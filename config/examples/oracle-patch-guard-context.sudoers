@@ -1,0 +1,9 @@
+Cmnd_Alias OPG_CONTEXT = /usr/local/sbin/opg_context_root.sh prepare-root, \
+                         /usr/local/sbin/opg_context_root.sh publish, \
+                         /usr/local/sbin/opg_context_root.sh rotate *, \
+                         /usr/local/sbin/opg_context_root.sh publish-approval-stage *
+
+oracle ALL=(root) NOPASSWD: OPG_CONTEXT
+
+Cmnd_Alias OPG_MEDIA_STAGE = /usr/local/sbin/opg_media_stage_root.sh stage-active-cycle
+oracle ALL=(root) NOPASSWD: OPG_MEDIA_STAGE

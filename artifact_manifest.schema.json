@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oracle-patch-guard.invalid/schema/artifact-manifest-v1.json",
+  "title": "Oracle Patch Guard signed cycle artifact manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "patch_cycle",
+    "created_at",
+    "tree_hash_format",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "patch_cycle": { "type": "string", "pattern": "^[A-Z0-9][A-Z0-9_-]{0,63}$" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "tree_hash_format": { "const": "OPG_TREE_HASH_V2" },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["db_ru", "ojvm", "opatch"],
+      "properties": {
+        "db_ru": { "$ref": "#/$defs/patchZip" },
+        "ojvm": { "$ref": "#/$defs/patchZip" },
+        "opatch": { "$ref": "#/$defs/opatchZip" }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "filename": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,254}\\.zip$" },
+    "patchZip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["patch_id", "filename", "size", "sha256"],
+      "properties": {
+        "patch_id": { "type": "string", "pattern": "^[0-9]{6,12}$" },
+        "filename": { "$ref": "#/$defs/filename" },
+        "size": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "opatchZip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "filename", "size", "sha256"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+){3,5}$" },
+        "filename": { "$ref": "#/$defs/filename" },
+        "size": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

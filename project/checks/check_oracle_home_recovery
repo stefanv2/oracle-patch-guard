@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# Read-only verificatie van Oracle Home-hersteloptie 2: gecontroleerde rebuild.
+set -uo pipefail
+umask 027
+
+blocked_count=0 unknown_count=0
+blocked() { printf 'BLOCKED: %s\n' "$*"; blocked_count=$((blocked_count + 1)); }
+unknown() { printf 'UNKNOWN: %s\n' "$*"; unknown_count=$((unknown_count + 1)); }
+sha() { sha256sum -- "$1" 2>/dev/null | awk '{print $1}'; }
+canon_dir() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
+canon_file() { readlink -f -- "$1" 2>/dev/null; }
+json_escape() { local v=${1-}; v=${v//\\/\\\\}; v=${v//\"/\\\"}; v=${v//$'\n'/\\n}; printf '%s' "$v"; }
+safe_regular() { [[ -f "$1" && ! -L "$1" && -r "$1" ]]; }
+tree_hash() {
+  local directory=$1 list
+  list=$(mktemp "${TMPDIR:-/tmp}/opg-recovery-hash.XXXXXX") || return 1
+  find "$directory" -type f -print0 2>/dev/null | sort -z | xargs -0 sha256sum >"$list" 2>/dev/null || { rm -f -- "$list"; return 1; }
+  sha "$list"; local rc=$?; rm -f -- "$list"; return "$rc"
+}
+
+target_home=${TARGET_ORACLE_HOME:-}; run_dir=${RUN_DIR:-}; run_id=${RUN_ID:-}; host=${HOST_NAME:-}
+base_image=${RECOVERY_BASE_IMAGE:-}; base_expected=${RECOVERY_BASE_IMAGE_SHA256:-}
+opatch_zip=${OPATCH_ROOT:-}/${OPATCH_ZIPFILE:-}; opatch_expected=${OPATCH_ZIP_SHA256:-}; opatch_version=${OPATCH_VERSION:-}
+db_dir=${PATCH_ROOT:-}/${MONTH:-}/${DB_PATCH:-}; ojvm_dir=${PATCH_ROOT:-}/${MONTH:-}/${OJVM_PATCH:-}
+procedure=${HOME_RECOVERY_PROCEDURE:-}; minimum_free=${HOME_REBUILD_MIN_FREE_MB:-30720}
+manifest_file=${RECOVERY_MANIFEST_FILE:-${run_dir}/recovery_manifest.json}
+oratab=${ORATAB_FILE:-/etc/oratab}; orainst=${ORAINST_LOC:-/etc/oraInst.loc}
+
+[[ -n "$target_home" && -n "$run_dir" && -d "$run_dir" ]] || { printf 'UNKNOWN: verplichte Patch Guard-context ontbreekt.\n'; exit 3; }
+canonical_home=$(canon_dir "$target_home") || { printf 'UNKNOWN: target Oracle Home is niet canoniek.\n'; exit 3; }
+database_evidence="${run_dir}/recovery_databases.psv"; network_evidence="${run_dir}/recovery_network.sha256"; backup_evidence="${run_dir}/recovery_backup.txt"
+: >"$database_evidence"; : >"$network_evidence"; : >"$backup_evidence"
+
+# Basismedia en staged patchmedia.
+if safe_regular "$base_image"; then
+  canonical_base=$(canon_file "$base_image") || canonical_base=
+  base_actual=$(sha "$base_image") || base_actual=
+  [[ "$base_expected" =~ ^[A-Fa-f0-9]{64}$ ]] || blocked 'verwachte checksum van base image ontbreekt of is ongeldig.'
+  [[ -n "$base_actual" && "${base_actual,,}" == "${base_expected,,}" ]] || blocked 'base-imagechecksum wijkt af.'
+else canonical_base=; base_actual=; blocked "base image is geen veilig leesbaar regulier bestand: ${base_image:-NOT_CONFIGURED}"; fi
+if safe_regular "$opatch_zip"; then
+  canonical_opatch=$(canon_file "$opatch_zip") || canonical_opatch=
+  opatch_actual=$(sha "$opatch_zip") || opatch_actual=
+  [[ "$opatch_expected" =~ ^[A-Fa-f0-9]{64}$ ]] || blocked 'verwachte OPatch-zipchecksum ontbreekt of is ongeldig.'
+  [[ -n "$opatch_actual" && "${opatch_actual,,}" == "${opatch_expected,,}" ]] || blocked 'OPatch-zipchecksum wijkt af.'
+  if [[ -n ${RECOVERY_OPATCH_ZIP_VERSION_OVERRIDE:-} && ${OPG_TEST_MODE:-0} == 1 ]]; then zip_version=$RECOVERY_OPATCH_ZIP_VERSION_OVERRIDE
+  elif command -v unzip >/dev/null 2>&1; then zip_version=$(unzip -p "$opatch_zip" 'OPatch/version.txt' 2>/dev/null | sed -nE 's/^[[:space:]]*OPATCH_VERSION[[:space:]]*:[[:space:]]*([^[:space:]\r]+).*$/\1/p; s/^[[:space:]]*OPatch Version[[:space:]]*:[[:space:]]*([^[:space:]\r]+).*$/\1/p' | head -1)
+  else zip_version=; unknown 'unzip ontbreekt; staged OPatch-versie kan niet worden gelezen.'; fi
+  [[ -n "$zip_version" ]] || unknown 'staged OPatch-versie kon niet uit de zip worden gelezen.'
+  [[ -z "$zip_version" || "$zip_version" == "$opatch_version" ]] || blocked "staged OPatch-versie wijkt af: $zip_version != $opatch_version"
+else canonical_opatch=; opatch_actual=; zip_version=; blocked "OPatch-zip is geen veilig leesbaar regulier bestand: $opatch_zip"; fi
+for media in "$db_dir" "$ojvm_dir"; do [[ -d "$media" && ! -L "$media" ]] || blocked "patchdirectory ontbreekt of is symlink: $media"; done
+db_hash=$(tree_hash "$db_dir" 2>/dev/null || true); ojvm_hash=$(tree_hash "$ojvm_dir" 2>/dev/null || true)
+[[ -n "$db_hash" ]] || unknown 'DB-RU kon niet volledig worden gehasht.'
+[[ -n "$ojvm_hash" ]] || unknown 'OJVM kon niet volledig worden gehasht.'
+
+# Oracle Base, inventories en geselecteerde oratab-regels.
+if [[ -n ${ORACLE_BASE_OVERRIDE:-} && ${OPG_TEST_MODE:-0} == 1 ]]; then oracle_base=$ORACLE_BASE_OVERRIDE
+elif [[ -x "$canonical_home/bin/orabase" ]]; then oracle_base=$("$canonical_home/bin/orabase" 2>/dev/null | tail -1)
+else oracle_base=; unknown 'Oracle Base kon niet via bin/orabase worden vastgesteld.'; fi
+canonical_base_dir=$(canon_dir "$oracle_base" 2>/dev/null || true); [[ -n "$canonical_base_dir" ]] || unknown 'Oracle Base is niet canoniek oplosbaar.'
+local_inventory="$canonical_home/inventory/ContentsXML/oraclehomeproperties.xml"
+safe_regular "$local_inventory" || blocked "local inventory ontbreekt of is onveilig: $local_inventory"
+local_inventory_hash=$(sha "$local_inventory" 2>/dev/null || true)
+central_inventory=$(awk -F= '$1~/^[[:space:]]*inventory_loc[[:space:]]*$/{gsub(/[[:space:]]/,"",$2);print $2;exit}' "$orainst" 2>/dev/null)
+[[ -n "$central_inventory" ]] && canonical_inventory=$(canon_dir "$central_inventory" 2>/dev/null || true) || canonical_inventory=
+safe_regular "${canonical_inventory}/ContentsXML/inventory.xml" || blocked "central inventory ontbreekt of is onveilig: ${canonical_inventory:-UNKNOWN}"
+central_inventory_hash=$(sha "${canonical_inventory}/ContentsXML/inventory.xml" 2>/dev/null || true)
+selected_oratab="${run_dir}/recovery_oratab_selected.psv"; : >"$selected_oratab"
+while IFS=: read -r sid home autostart rest; do
+  [[ "$sid" =~ ^[A-Za-z][A-Za-z0-9_#$]{0,29}$ && -n "$home" ]] || continue
+  canonical_entry=$(canon_dir "${home%/}" 2>/dev/null || true)
+  [[ "$canonical_entry" == "$canonical_home" ]] && printf '%s|%s|%s\n' "$sid" "$canonical_entry" "${autostart^^}" >>"$selected_oratab"
+done <"$oratab" 2>/dev/null || unknown 'oratab kon niet betrouwbaar worden gelezen.'
+[[ -s "$selected_oratab" ]] || blocked 'geen geselecteerde oratab-regels voor de target home.'
+oratab_hash=$(sha "$selected_oratab" 2>/dev/null || true)
+
+# Netwerkconfiguratie: ieder aanwezig bestand moet regulier, leesbaar en niet-symlink zijn.
+network_dir="$canonical_home/network/admin"; network_count=0
+for network_file in tnsnames.ora listener.ora sqlnet.ora; do
+  path="$network_dir/$network_file"; [[ -e "$path" ]] || continue; network_count=$((network_count + 1))
+  if safe_regular "$path"; then printf '%s  %s\n' "$(sha "$path")" "$(canon_file "$path")" >>"$network_evidence"; else blocked "onveilige netwerkconfiguratie: $path"; fi
+done
+(( network_count > 0 )) || blocked "geen netwerkconfiguratie gevonden in $network_dir"
+network_hash=$(sha "$network_evidence" 2>/dev/null || true)
+
+# Per draaiende database: SPFILE, password file, eigenschappen en services.
+while IFS='|' read -r sid _ _; do
+  [[ -n "$sid" ]] || continue
+  if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then running=${RECOVERY_TEST_RUNNING:-true}; else pgrep -f "ora_pmon_${sid}([^A-Za-z0-9_]|$)" >/dev/null 2>&1 && running=true || running=false; fi
+  [[ "$running" == true ]] || { printf '%s|STOPPED|||||\n' "$sid" >>"$database_evidence"; continue; }
+  password_file="$canonical_home/dbs/orapw${sid}"
+  safe_regular "$password_file" || blocked "verwacht password file ontbreekt of is onveilig voor SID=$sid: $password_file"
+  sql_output="${run_dir}/recovery_sql_${sid}.txt"
+  if [[ ${OPG_TEST_MODE:-0} == 1 && -r ${RECOVERY_SQL_FIXTURE_DIR:-}/$sid.txt ]]; then cp -- "${RECOVERY_SQL_FIXTURE_DIR}/$sid.txt" "$sql_output"; sql_rc=0
+  else
+    ORACLE_HOME="$canonical_home" ORACLE_SID="$sid" PATH="$canonical_home/bin:/usr/bin:/bin" timeout 120 "$canonical_home/bin/sqlplus" -s / as sysdba >"$sql_output" 2>&1 <<'SQL'
+set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
+whenever sqlerror exit 10 rollback
+whenever oserror exit 11 rollback
+select 'SPFILE|'||value from v$parameter where name='spfile';
+select 'DBPROP|'||name||'|'||db_unique_name||'|'||database_role||'|'||open_mode||'|'||cdb from v$database;
+select 'SERVICES|'||listagg(name,';') within group(order by name) from v$active_services where name not like 'SYS$%';
+exit success
+SQL
+    sql_rc=$?
+  fi
+  if (( sql_rc != 0 )); then unknown "recovery-SQL mislukt voor SID=$sid (rc=$sql_rc)."; continue; fi
+  spfile=$(grep '^SPFILE|' "$sql_output" | tail -1 | cut -d'|' -f2-); dbprop=$(grep '^DBPROP|' "$sql_output" | tail -1); services=$(grep '^SERVICES|' "$sql_output" | tail -1 | cut -d'|' -f2-)
+  [[ -n "$spfile" && -n "$dbprop" ]] || { unknown "onvolledige recovery-SQL-output voor SID=$sid."; continue; }
+  [[ "$spfile" == /* ]] || blocked "SPFILE voor SID=$sid heeft geen regulier bestandspad: $spfile"
+  safe_regular "$spfile" || blocked "SPFILE voor SID=$sid ontbreekt of is onveilig: $spfile"
+  printf '%s|RUNNING|%s|%s|%s|%s|%s\n' "$sid" "$(canon_file "$spfile")" "$(sha "$spfile")" "$(canon_file "$password_file" 2>/dev/null)" "$(sha "$password_file" 2>/dev/null)" "${dbprop#DBPROP|}|$services" >>"$database_evidence"
+done <"$selected_oratab"
+database_hash=$(sha "$database_evidence" 2>/dev/null || true)
+
+# De databaseherstelbaarheid blijft afhankelijk van de bestaande RMAN-policycheck.
+if [[ -n ${BACKUP_CHECK_COMMAND:-} && -x ${BACKUP_CHECK_COMMAND:-} && ! -L ${BACKUP_CHECK_COMMAND:-} ]]; then
+  "$BACKUP_CHECK_COMMAND" >"$backup_evidence" 2>&1; backup_rc=$?
+  case "$backup_rc" in 0) backup_status=READY;; 2) backup_status=BLOCKED; blocked 'RMAN-check is BLOCKED.';; *) backup_status=UNKNOWN; unknown "RMAN-check is onbetrouwbaar (rc=$backup_rc).";; esac
+else backup_status=UNKNOWN; unknown 'BACKUP_CHECK_COMMAND ontbreekt, is niet uitvoerbaar of is een symlink.'; fi
+
+# Herstelprocedure moet door root worden beheerd en niet wijzigbaar zijn voor group/other.
+if safe_regular "$procedure"; then
+  canonical_procedure=$(canon_file "$procedure") || canonical_procedure=
+  procedure_owner=$(stat -c '%U' "$procedure" 2>/dev/null || true); procedure_mode=$(stat -c '%a' "$procedure" 2>/dev/null || true)
+  if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then allowed_owner=$(id -un); [[ "$procedure_owner" == "$allowed_owner" || "$procedure_owner" == root ]] || blocked "herstelprocedure heeft onveilige eigenaar: $procedure_owner"
+  else [[ "$procedure_owner" == root ]] || blocked "herstelprocedure is niet root-owned: $procedure_owner"; fi
+  gd=${procedure_mode: -2:1}; od=${procedure_mode: -1}
+  if [[ "$gd" =~ ^[0-7]$ && "$od" =~ ^[0-7]$ ]]; then
+    (( (gd & 2) == 0 && (od & 2) == 0 )) || blocked "herstelprocedure is group/other-writable: $procedure_mode"
+  else
+    unknown 'mode herstelprocedure kon niet worden geïnterpreteerd.'
+  fi
+  procedure_hash=$(sha "$procedure" 2>/dev/null || true)
+else canonical_procedure=; procedure_hash=; blocked "herstelprocedure is geen veilig leesbaar regulier bestand: ${procedure:-NOT_CONFIGURED}"; fi
+
+free_mb=$(df -Pm -- "$(dirname -- "$canonical_home")" 2>/dev/null | awk 'NR==2{print $4}')
+space_status=UNKNOWN
+if [[ "$minimum_free" =~ ^[0-9]+$ && "$free_mb" =~ ^[0-9]+$ ]]; then
+  if (( free_mb >= minimum_free )); then space_status=READY; else space_status=BLOCKED; blocked "onvoldoende ruimte voor home-rebuild: ${free_mb} MiB < ${minimum_free} MiB"; fi
+else
+  unknown 'vrije ruimte of minimum is niet betrouwbaar vast te stellen.'
+fi
+
+# Deterministisch manifest: gelijke recovery-inputs leveren bij pre-apply dezelfde hash.
+tmp_manifest=$(mktemp "${run_dir}/.recovery-manifest.XXXXXX") || { printf 'UNKNOWN: manifest kan niet worden gemaakt.\n'; exit 3; }
+cat >"$tmp_manifest" <<EOF
+{
+  "schema_version": 1,
+  "recovery_method": "REBUILD",
+  "hostname": "$(json_escape "$host")",
+  "run_id": "$(json_escape "$run_id")",
+  "target_oracle_home": "$(json_escape "$canonical_home")",
+  "oracle_base": "$(json_escape "$canonical_base_dir")",
+  "local_inventory": "$(json_escape "$local_inventory")",
+  "local_inventory_sha256": "$local_inventory_hash",
+  "central_inventory": "$(json_escape "$canonical_inventory")",
+  "central_inventory_sha256": "$central_inventory_hash",
+  "selected_oratab_file": "$(json_escape "$selected_oratab")",
+  "selected_oratab_sha256": "$oratab_hash",
+  "base_image": "$(json_escape "$canonical_base")",
+  "base_image_sha256": "$base_actual",
+  "opatch_zip": "$(json_escape "$canonical_opatch")",
+  "opatch_zip_sha256": "$opatch_actual",
+  "opatch_version": "$(json_escape "$zip_version")",
+  "db_ru_directory": "$(json_escape "$db_dir")",
+  "db_ru_tree_sha256": "$db_hash",
+  "ojvm_directory": "$(json_escape "$ojvm_dir")",
+  "ojvm_tree_sha256": "$ojvm_hash",
+  "network_evidence_file": "$(json_escape "$network_evidence")",
+  "network_evidence_sha256": "$network_hash",
+  "database_evidence_file": "$(json_escape "$database_evidence")",
+  "database_evidence_sha256": "$database_hash",
+  "backup_status": "$backup_status",
+  "backup_evidence_file": "$(json_escape "$backup_evidence")",
+  "recovery_procedure": "$(json_escape "$canonical_procedure")",
+  "recovery_procedure_sha256": "$procedure_hash",
+  "rebuild_space_status": "$space_status",
+  "rebuild_min_free_mb": "$minimum_free"
+}
+EOF
+chmod 0600 "$tmp_manifest" 2>/dev/null || true
+mv -f -- "$tmp_manifest" "$manifest_file" || { printf 'UNKNOWN: recovery manifest kon niet atomisch worden geplaatst.\n'; exit 3; }
+
+if (( blocked_count > 0 )); then printf 'RESULT=BLOCKED blocked=%s unknown=%s manifest=%s\n' "$blocked_count" "$unknown_count" "$manifest_file"; exit 2; fi
+if (( unknown_count > 0 )); then printf 'RESULT=UNKNOWN blocked=0 unknown=%s manifest=%s\n' "$unknown_count" "$manifest_file"; exit 3; fi
+printf 'RESULT=READY recovery_method=REBUILD manifest=%s\n' "$manifest_file"
+exit 0

@@ -1,0 +1,2 @@
+SID,ORACLE_HOME,oratab_autostart,instance_running,database_role,open_mode,CDB,PDB_status,listener,services
+"DBN","__TARGET_HOME__","N","false","UNKNOWN","STOPPED","UNKNOWN","","UNKNOWN",""

@@ -1,0 +1,56 @@
+# Runtime and test output
+*.log
+*.tmp
+*.bak
+*.old
+*.orig
+*.before-*
+test-output/
+reports/
+runs/
+approvals/
+evidence/
+
+# Python, Node and editor state
+__pycache__/
+*.pyc
+node_modules/
+.DS_Store
+Thumbs.db
+~$*
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Local build/workspace material
+archive/
+releases/
+cleanup/
+dist/
+build/
+*.tar
+*.tar.gz
+*.zip.sha256
+.codex/
+.agents/
+
+# Site configuration and environment
+project/patchGD_guard.conf
+.env
+.env.*
+*.ora
+*.wallet
+*.sso
+
+# Secret/private key material. Public PEM keys may be intentionally reviewed
+# and committed, so PEM is not ignored globally.
+*.key
+*.p12
+*.pfx
+*.jks
+*private*.pem
+*_private.pem
+private.pem
+id_rsa
+id_ed25519

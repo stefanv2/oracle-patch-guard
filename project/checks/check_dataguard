@@ -1,0 +1,129 @@
+#!/bin/bash
+
+set -uo pipefail
+umask 027
+
+ORATAB_FILE="/etc/oratab"
+SQLPLUS_TIMEOUT_SECONDS=60
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+if [[ ! -r "$ORATAB_FILE" ]]; then
+    echo "UNKNOWN: $ORATAB_FILE is niet leesbaar."
+    exit 3
+fi
+
+unknown=0
+blocked=0
+checked=0
+
+while IFS=: read -r sid oracle_home _autostart _rest; do
+    [[ -n "$sid" ]] || continue
+    [[ "$sid" != \#* ]] || continue
+    [[ "$sid" != "*" ]] || continue
+    [[ -n "$oracle_home" ]] || continue
+    [[ -x "$oracle_home/bin/sqlplus" ]] || {
+        echo "UNKNOWN: sqlplus ontbreekt voor SID=$sid in $oracle_home."
+        unknown=1
+        continue
+    }
+
+    if ! pgrep -f "ora_pmon_${sid}$" >/dev/null 2>&1; then
+        echo "UNKNOWN: instance $sid draait niet; Data Guard-status kan niet worden vastgesteld."
+        unknown=1
+        continue
+    fi
+
+    checked=$((checked + 1))
+
+    output=$(
+        ORACLE_SID="$sid" \
+        ORACLE_HOME="$oracle_home" \
+        PATH="$oracle_home/bin:/usr/bin:/bin" \
+        timeout "$SQLPLUS_TIMEOUT_SECONDS" \
+        "$oracle_home/bin/sqlplus" -s / as sysdba <<'SQL'
+set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
+whenever sqlerror exit 10 rollback
+whenever oserror exit 11 rollback
+
+select 'DATABASE|' ||
+       database_role || '|' ||
+       open_mode || '|' ||
+       protection_mode || '|' ||
+       switchover_status
+from v$database;
+
+select 'REMOTE_DESTINATIONS|' || count(*)
+from v$archive_dest
+where status <> 'INACTIVE'
+  and (
+       target = 'STANDBY'
+       or destination is not null
+          and (
+               upper(destination) like '%SERVICE=%'
+               or upper(destination) like '%LGWR%'
+               or upper(destination) like '%SYNC%'
+               or upper(destination) like '%ASYNC%'
+          )
+      );
+
+exit success
+SQL
+    )
+    rc=$?
+
+    if (( rc != 0 )); then
+        echo "UNKNOWN: Data Guard-query mislukt voor SID=$sid, exitcode=$rc."
+        unknown=1
+        continue
+    fi
+
+    db_line=$(printf '%s\n' "$output" | grep '^DATABASE|' | tail -1)
+    dest_line=$(printf '%s\n' "$output" | grep '^REMOTE_DESTINATIONS|' | tail -1)
+
+    if [[ -z "$db_line" || -z "$dest_line" ]]; then
+        echo "UNKNOWN: onvolledige Data Guard-output voor SID=$sid."
+        unknown=1
+        continue
+    fi
+
+    IFS='|' read -r _ role open_mode protection_mode switchover_status <<<"$db_line"
+    remote_destinations=${dest_line#REMOTE_DESTINATIONS|}
+
+    echo "SID=$sid role=$role open_mode=$open_mode protection_mode=$protection_mode switchover_status=$switchover_status remote_destinations=$remote_destinations"
+
+    if [[ "$role" != "PRIMARY" ]]; then
+        echo "BLOCKED: SID=$sid heeft database_role=$role."
+        blocked=1
+        continue
+    fi
+
+    if [[ ! "$remote_destinations" =~ ^[0-9]+$ ]]; then
+        echo "UNKNOWN: remote destination count is ongeldig voor SID=$sid."
+        unknown=1
+        continue
+    fi
+
+    if (( remote_destinations > 0 )); then
+        echo "BLOCKED: SID=$sid heeft $remote_destinations actieve remote/standby archive destination(s)."
+        blocked=1
+        continue
+    fi
+
+done <"$ORATAB_FILE"
+
+if (( checked == 0 )); then
+    echo "UNKNOWN: geen draaiende Oracle-databases gecontroleerd."
+    exit 3
+fi
+
+if (( blocked != 0 )); then
+    exit 2
+fi
+
+if (( unknown != 0 )); then
+    exit 3
+fi
+
+echo "READY: alle gecontroleerde databases zijn PRIMARY zonder actieve Data Guard-destination."
+exit 0

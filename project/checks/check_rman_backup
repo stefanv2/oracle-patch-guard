@@ -1,0 +1,486 @@
+#!/bin/bash
+#
+# Oracle Patch Guard - RMAN/DD Boost backupcontrole
+#
+# Exitcodes:
+#   0 = READY   - recente, beschikbare RMAN-backups aangetoond
+#   2 = BLOCKED - backup ontbreekt, is te oud of configuratie wijkt af
+#   3 = UNKNOWN - controle kon niet betrouwbaar worden uitgevoerd
+#
+# De controle is read-only:
+#   - geen CROSSCHECK
+#   - geen DELETE EXPIRED
+#   - geen repositorywijzigingen
+#
+
+set -uo pipefail
+umask 027
+
+ORATAB_FILE="${ORATAB_FILE:-/etc/oratab}"
+
+# Voor de pilot. Wanneer Patch Guard TARGET_ORACLE_HOME exporteert,
+# wordt automatisch die waarde gebruikt.
+TARGET_ORACLE_HOME="${TARGET_ORACLE_HOME:-/u01/app/oracle/product/19.0.0/dbhome_1}"
+
+SQLPLUS_TIMEOUT_SECONDS="${SQLPLUS_TIMEOUT_SECONDS:-120}"
+RMAN_TIMEOUT_SECONDS="${RMAN_TIMEOUT_SECONDS:-120}"
+
+# Aansluitend op:
+# - wekelijkse level 0
+# - twee incrementals per week
+# - vier archivelogbackups per dag
+MAX_LEVEL0_AGE_HOURS="${MAX_LEVEL0_AGE_HOURS:-192}"
+MAX_DATABASE_BACKUP_AGE_HOURS="${MAX_DATABASE_BACKUP_AGE_HOURS:-96}"
+MAX_ARCHIVELOG_BACKUP_AGE_HOURS="${MAX_ARCHIVELOG_BACKUP_AGE_HOURS:-26}"
+
+EXPECTED_SBT_LIBRARY="${EXPECTED_SBT_LIBRARY:-/opt/backup-agent/lib/libddobk.so}"
+EXPECTED_BACKUP_HOST="${EXPECTED_BACKUP_HOST:-ddboost01.example.com}"
+EXPECTED_STORAGE_UNIT="${EXPECTED_STORAGE_UNIT:-/oracle-backups}"
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+blocked_count=0
+unknown_count=0
+checked_count=0
+
+printf 'EXPECTED_SBT_LIBRARY=<%q> length=%d\n' "$EXPECTED_SBT_LIBRARY" "${#EXPECTED_SBT_LIBRARY}"
+printf 'EXPECTED_BACKUP_HOST=<%q> length=%d\n' "$EXPECTED_BACKUP_HOST" "${#EXPECTED_BACKUP_HOST}"
+printf 'EXPECTED_STORAGE_UNIT=<%q> length=%d\n' "$EXPECTED_STORAGE_UNIT" "${#EXPECTED_STORAGE_UNIT}"
+
+add_blocked() {
+    echo "BLOCKED: $*"
+    blocked_count=$((blocked_count + 1))
+}
+
+add_unknown() {
+    echo "UNKNOWN: $*"
+    unknown_count=$((unknown_count + 1))
+}
+
+trim() {
+    local value="$1"
+
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+
+    printf '%s' "$value"
+}
+
+is_non_negative_number() {
+    [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]
+}
+
+age_exceeds_limit() {
+    local age="$1"
+    local limit="$2"
+
+    awk -v age="$age" -v limit="$limit" \
+        'BEGIN { exit !(age > limit) }'
+}
+
+find_pmon() {
+    local sid="$1"
+
+    pgrep -f "ora_pmon_${sid}$" >/dev/null 2>&1
+}
+
+check_rman_configuration() {
+    local sid="$1"
+    local oracle_home="$2"
+    local output rc
+
+    output=$(
+        ORACLE_SID="$sid" \
+        ORACLE_HOME="$oracle_home" \
+        PATH="$oracle_home/bin:/usr/bin:/bin" \
+        timeout "$RMAN_TIMEOUT_SECONDS" \
+        "$oracle_home/bin/rman" target / 2>&1 <<'RMAN'
+set echo off;
+show all;
+exit;
+RMAN
+    )
+    rc=$?
+
+    printf '%s\n' "$output"
+
+    if (( rc != 0 )); then
+        add_unknown "RMAN-configuratie kon niet worden uitgelezen voor SID=$sid, exitcode=$rc."
+        return 1
+    fi
+
+    if grep -Eqi '(^|[^A-Z])(RMAN|ORA)-[0-9]{5}' <<<"$output"; then
+        echo "RMAN/Oracle-meldingen voor SID=$sid:"
+        printf '%s\n' "$output" |
+            grep -Ei '(^|[^A-Z])(RMAN|ORA)-[0-9]{5}' |
+            tail -20
+
+        add_unknown "RMAN gaf een foutmelding tijdens de configuratiecontrole voor SID=$sid."
+        return 1
+    fi
+
+    if ! grep -Fq -- "CONFIGURE CHANNEL DEVICE TYPE 'SBT_TAPE'" <<<"$output"; then
+        add_blocked "Geen expliciete RMAN SBT_TAPE-channelconfiguratie gevonden voor SID=$sid."
+    fi
+
+    if ! grep -Fq -- "SBT_LIBRARY=$EXPECTED_SBT_LIBRARY" <<<"$output"; then
+        add_blocked "Verwachte DD Boost-library ontbreekt in RMAN-configuratie voor SID=$sid: $EXPECTED_SBT_LIBRARY"
+    fi
+
+    if ! grep -Fq -- "BACKUP_HOST=$EXPECTED_BACKUP_HOST" <<<"$output"; then
+        add_blocked "Verwachte DD Boost-host ontbreekt in RMAN-configuratie voor SID=$sid: $EXPECTED_BACKUP_HOST"
+    fi
+
+    if ! grep -Fq -- "STORAGE_UNIT=$EXPECTED_STORAGE_UNIT" <<<"$output"; then
+        add_blocked "Verwachte Data Domain-storage-unit ontbreekt voor SID=$sid: $EXPECTED_STORAGE_UNIT"
+    fi
+
+    if [[ ! -r "$EXPECTED_SBT_LIBRARY" ]]; then
+        add_blocked "DD Boost-library is niet leesbaar: $EXPECTED_SBT_LIBRARY"
+    fi
+
+    return 0
+}
+
+check_backup_metadata() {
+    local sid="$1"
+    local oracle_home="$2"
+    local output rc
+    local level0_time level0_age
+    local database_time database_age
+    local archivelog_time archivelog_age
+    local sbt_piece_count
+
+    output=$(
+        ORACLE_SID="$sid" \
+        ORACLE_HOME="$oracle_home" \
+        PATH="$oracle_home/bin:/usr/bin:/bin" \
+        timeout "$SQLPLUS_TIMEOUT_SECONDS" \
+        "$oracle_home/bin/sqlplus" -s / as sysdba 2>&1 <<'SQL'
+set pages 0
+set feedback off
+set heading off
+set verify off
+set echo off
+set trimspool on
+set lines 32767
+
+whenever sqlerror exit 10 rollback
+whenever oserror exit 11 rollback
+
+/*
+ * Alleen backupsets waarvan:
+ * - minimaal één SBT_TAPE-piece bestaat;
+ * - geen gekoppeld piece een andere status dan AVAILABLE heeft.
+ */
+
+select 'LEVEL0|' ||
+       nvl(
+         to_char(
+           max(bs.completion_time),
+           'YYYY-MM-DD"T"HH24:MI:SS'
+         ),
+         'NONE'
+       ) || '|' ||
+       nvl(
+         to_char(
+           round((sysdate - max(bs.completion_time)) * 24, 2),
+           'FM999999990D00',
+           'NLS_NUMERIC_CHARACTERS=''.,'''
+         ),
+         'NONE'
+       )
+from v$backup_set bs
+where (
+        bs.backup_type = 'D'
+        or (
+             bs.backup_type = 'I'
+             and nvl(bs.incremental_level, 0) = 0
+           )
+      )
+  and exists (
+        select 1
+        from v$backup_piece bp
+        where bp.set_stamp = bs.set_stamp
+          and bp.set_count = bs.set_count
+          and bp.device_type = 'SBT_TAPE'
+      )
+  and not exists (
+        select 1
+        from v$backup_piece bp
+        where bp.set_stamp = bs.set_stamp
+          and bp.set_count = bs.set_count
+          and bp.status <> 'A'
+      );
+
+select 'DATABASE_BACKUP|' ||
+       nvl(
+         to_char(
+           max(bs.completion_time),
+           'YYYY-MM-DD"T"HH24:MI:SS'
+         ),
+         'NONE'
+       ) || '|' ||
+       nvl(
+         to_char(
+           round((sysdate - max(bs.completion_time)) * 24, 2),
+           'FM999999990D00',
+           'NLS_NUMERIC_CHARACTERS=''.,'''
+         ),
+         'NONE'
+       )
+from v$backup_set bs
+where bs.backup_type in ('D', 'I')
+  and exists (
+        select 1
+        from v$backup_piece bp
+        where bp.set_stamp = bs.set_stamp
+          and bp.set_count = bs.set_count
+          and bp.device_type = 'SBT_TAPE'
+      )
+  and not exists (
+        select 1
+        from v$backup_piece bp
+        where bp.set_stamp = bs.set_stamp
+          and bp.set_count = bs.set_count
+          and bp.status <> 'A'
+      );
+
+select 'ARCHIVELOG_BACKUP|' ||
+       nvl(
+         to_char(
+           max(bs.completion_time),
+           'YYYY-MM-DD"T"HH24:MI:SS'
+         ),
+         'NONE'
+       ) || '|' ||
+       nvl(
+         to_char(
+           round((sysdate - max(bs.completion_time)) * 24, 2),
+           'FM999999990D00',
+           'NLS_NUMERIC_CHARACTERS=''.,'''
+         ),
+         'NONE'
+       )
+from v$backup_set bs
+where bs.backup_type = 'L'
+  and exists (
+        select 1
+        from v$backup_piece bp
+        where bp.set_stamp = bs.set_stamp
+          and bp.set_count = bs.set_count
+          and bp.device_type = 'SBT_TAPE'
+      )
+  and not exists (
+        select 1
+        from v$backup_piece bp
+        where bp.set_stamp = bs.set_stamp
+          and bp.set_count = bs.set_count
+          and bp.status <> 'A'
+      );
+
+select 'RECENT_SBT_PIECES|' || count(*)
+from v$backup_piece
+where device_type = 'SBT_TAPE'
+  and status = 'A'
+  and completion_time >= sysdate - 8;
+
+exit success
+SQL
+    )
+    rc=$?
+
+    printf '%s\n' "$output"
+
+    if (( rc != 0 )); then
+        add_unknown "Backupmetadata kon niet worden uitgelezen voor SID=$sid, exitcode=$rc."
+        return 1
+    fi
+
+    if grep -Eqi '(^|[^A-Z])ORA-[0-9]{5}' <<<"$output"; then
+        echo "Oracle-meldingen voor SID=$sid:"
+        printf '%s\n' "$output" |
+            grep -Ei '(^|[^A-Z])ORA-[0-9]{5}' |
+            tail -20
+
+        add_unknown "Oracle gaf een foutmelding tijdens de backupcontrole voor SID=$sid."
+        return 1
+    fi
+
+    level0_time=$(
+        printf '%s\n' "$output" |
+        grep '^LEVEL0|' |
+        tail -1 |
+        cut -d'|' -f2
+    )
+
+    level0_age=$(
+        printf '%s\n' "$output" |
+        grep '^LEVEL0|' |
+        tail -1 |
+        cut -d'|' -f3
+    )
+
+    database_time=$(
+        printf '%s\n' "$output" |
+        grep '^DATABASE_BACKUP|' |
+        tail -1 |
+        cut -d'|' -f2
+    )
+
+    database_age=$(
+        printf '%s\n' "$output" |
+        grep '^DATABASE_BACKUP|' |
+        tail -1 |
+        cut -d'|' -f3
+    )
+
+    archivelog_time=$(
+        printf '%s\n' "$output" |
+        grep '^ARCHIVELOG_BACKUP|' |
+        tail -1 |
+        cut -d'|' -f2
+    )
+
+    archivelog_age=$(
+        printf '%s\n' "$output" |
+        grep '^ARCHIVELOG_BACKUP|' |
+        tail -1 |
+        cut -d'|' -f3
+    )
+
+    sbt_piece_count=$(
+        printf '%s\n' "$output" |
+        grep '^RECENT_SBT_PIECES|' |
+        tail -1 |
+        cut -d'|' -f2
+    )
+
+    level0_time=$(trim "${level0_time:-}")
+    level0_age=$(trim "${level0_age:-}")
+    database_time=$(trim "${database_time:-}")
+    database_age=$(trim "${database_age:-}")
+    archivelog_time=$(trim "${archivelog_time:-}")
+    archivelog_age=$(trim "${archivelog_age:-}")
+    sbt_piece_count=$(trim "${sbt_piece_count:-}")
+
+    if [[ -z "$level0_time" || -z "$level0_age" ]]; then
+        add_unknown "LEVEL0-resultaat ontbreekt of is onvolledig voor SID=$sid."
+    elif [[ "$level0_time" == "NONE" || "$level0_age" == "NONE" ]]; then
+        add_blocked "Geen beschikbare level 0/full SBT_TAPE-backup gevonden voor SID=$sid."
+    elif ! is_non_negative_number "$level0_age"; then
+        add_unknown "Ongeldige leeftijd voor level 0-backup van SID=$sid: $level0_age"
+    elif age_exceeds_limit "$level0_age" "$MAX_LEVEL0_AGE_HOURS"; then
+        add_blocked "Level 0/full backup voor SID=$sid is te oud: ${level0_age} uur; maximum ${MAX_LEVEL0_AGE_HOURS} uur."
+    else
+        echo "READY: SID=$sid level0/full=$level0_time age_hours=$level0_age"
+    fi
+
+    if [[ -z "$database_time" || -z "$database_age" ]]; then
+        add_unknown "DATABASE_BACKUP-resultaat ontbreekt of is onvolledig voor SID=$sid."
+    elif [[ "$database_time" == "NONE" || "$database_age" == "NONE" ]]; then
+        add_blocked "Geen beschikbare recente databasebackup gevonden voor SID=$sid."
+    elif ! is_non_negative_number "$database_age"; then
+        add_unknown "Ongeldige leeftijd voor databasebackup van SID=$sid: $database_age"
+    elif age_exceeds_limit "$database_age" "$MAX_DATABASE_BACKUP_AGE_HOURS"; then
+        add_blocked "Laatste databasebackup voor SID=$sid is te oud: ${database_age} uur; maximum ${MAX_DATABASE_BACKUP_AGE_HOURS} uur."
+    else
+        echo "READY: SID=$sid database_backup=$database_time age_hours=$database_age"
+    fi
+
+    if [[ -z "$archivelog_time" || -z "$archivelog_age" ]]; then
+        add_unknown "ARCHIVELOG_BACKUP-resultaat ontbreekt of is onvolledig voor SID=$sid."
+    elif [[ "$archivelog_time" == "NONE" || "$archivelog_age" == "NONE" ]]; then
+        add_blocked "Geen beschikbare archivelogbackup gevonden voor SID=$sid."
+    elif ! is_non_negative_number "$archivelog_age"; then
+        add_unknown "Ongeldige leeftijd voor archivelogbackup van SID=$sid: $archivelog_age"
+    elif age_exceeds_limit "$archivelog_age" "$MAX_ARCHIVELOG_BACKUP_AGE_HOURS"; then
+        add_blocked "Laatste archivelogbackup voor SID=$sid is te oud: ${archivelog_age} uur; maximum ${MAX_ARCHIVELOG_BACKUP_AGE_HOURS} uur."
+    else
+        echo "READY: SID=$sid archivelog_backup=$archivelog_time age_hours=$archivelog_age"
+    fi
+
+    if [[ ! "$sbt_piece_count" =~ ^[0-9]+$ ]]; then
+        add_unknown "Aantal recente SBT-pieces is ongeldig voor SID=$sid: ${sbt_piece_count:-leeg}"
+    elif (( sbt_piece_count == 0 )); then
+        add_blocked "Geen AVAILABLE SBT_TAPE-backuppieces uit de laatste acht dagen gevonden voor SID=$sid."
+    else
+        echo "READY: SID=$sid recent_available_sbt_pieces=$sbt_piece_count"
+    fi
+
+    return 0
+}
+
+if [[ ! -r "$ORATAB_FILE" ]]; then
+    echo "UNKNOWN: oratab is niet leesbaar: $ORATAB_FILE"
+    exit 3
+fi
+
+if [[ ! -d "$TARGET_ORACLE_HOME" ]]; then
+    echo "UNKNOWN: target Oracle Home bestaat niet: $TARGET_ORACLE_HOME"
+    exit 3
+fi
+
+while IFS=: read -r sid oracle_home _autostart _remainder; do
+    sid=$(trim "${sid:-}")
+    oracle_home=$(trim "${oracle_home:-}")
+
+    [[ -n "$sid" ]] || continue
+    [[ "$sid" != \#* ]] || continue
+    [[ "$sid" != "*" ]] || continue
+    [[ -n "$oracle_home" ]] || continue
+
+    oracle_home=$(
+        readlink -f "$oracle_home" 2>/dev/null ||
+        printf '%s' "$oracle_home"
+    )
+
+    [[ "$oracle_home" == "$TARGET_ORACLE_HOME" ]] || continue
+
+    if ! find_pmon "$sid"; then
+        add_unknown "Instance SID=$sid uit target Oracle Home draait niet."
+        continue
+    fi
+
+    if [[ ! -x "$oracle_home/bin/sqlplus" ]]; then
+        add_unknown "sqlplus ontbreekt of is niet uitvoerbaar voor SID=$sid."
+        continue
+    fi
+
+    if [[ ! -x "$oracle_home/bin/rman" ]]; then
+        add_unknown "RMAN ontbreekt of is niet uitvoerbaar voor SID=$sid."
+        continue
+    fi
+
+    checked_count=$((checked_count + 1))
+
+    echo "=== RMAN-backupcontrole SID=$sid HOME=$oracle_home ==="
+
+    check_rman_configuration "$sid" "$oracle_home" || true
+    check_backup_metadata "$sid" "$oracle_home" || true
+
+done <"$ORATAB_FILE"
+
+if (( checked_count == 0 )); then
+    echo "UNKNOWN: geen draaiende database uit target Oracle Home gecontroleerd."
+    exit 3
+fi
+
+echo
+echo "Gecontroleerde databases: $checked_count"
+echo "Blokkades: $blocked_count"
+echo "Onbekende resultaten: $unknown_count"
+
+if (( blocked_count > 0 )); then
+    echo "RESULT=BLOCKED"
+    exit 2
+fi
+
+if (( unknown_count > 0 )); then
+    echo "RESULT=UNKNOWN"
+    exit 3
+fi
+
+echo "RESULT=READY"
+echo "READY: RMAN/DD Boost-backups zijn recent en aantoonbaar beschikbaar."
+exit 0

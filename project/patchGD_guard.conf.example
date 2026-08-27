@@ -1,0 +1,73 @@
+# Oracle Patch Guard - voorbeeldconfiguratie
+# Kopieer naar /etc/oracle-patch-guard/patchGD_guard.conf en pas lokaal aan.
+
+PATCH_ROOT=/mnt/patch-share/oracle-patches
+OPATCH_ROOT=/mnt/patch-share/oracle-patches/opatch
+LOCAL_MEDIA_MODE=required
+LOCAL_STAGE_ROOT=/u01/stage/oracle-patch-guard
+MEDIA_STAGE_HELPER=/usr/local/sbin/opg_media_stage_root.sh
+RUN_ROOT=/var/log/oracle-patch-guard
+LOCK_ROOT=/var/lock/oracle-patch-guard
+ORATAB_FILE=/etc/oratab
+ORAINST_LOC=/etc/oraInst.loc
+# Leeg betekent: de eigenaar van de canonieke Oracle Home.
+EXPECTED_ORACLE_OWNER=
+ASSESSMENT_MAX_AGE_MINUTES=60
+MIN_HOME_FREE_MB=10240
+MIN_INVENTORY_FREE_MB=2048
+MIN_STAGE_FREE_MB=15360
+MIN_TMP_FREE_MB=2048
+# Extra vrije ruimte voor gelijktijdige OPatch-backup en staging.
+OPATCH_UPGRADE_MIN_FREE_MB=1024
+COMMAND_TIMEOUT_SECONDS=7200
+SQLPLUS_TIMEOUT_SECONDS=900
+INTEGRITY_CHECK_TIMEOUT_SECONDS=1800
+LISTENER_STOP_TIMEOUT_SECONDS=30
+LISTENER_READY_TIMEOUT_SECONDS=60
+LISTENER_POLL_SECONDS=2
+LOCK_WAIT_SECONDS=0
+ROLLBACK_RETENTION_HOURS=168
+
+# OEM-wave-instellingen (de lokale guard stuurt zelf geen andere hosts aan).
+MAX_PARALLEL_TARGETS=2
+FAILURE_THRESHOLD=1
+STOP_NEXT_WAVE_ON_FAILURE=true
+
+# Optionele, organisatiespecifieke read-only controles. Een niet-geconfigureerde
+# koppeling levert UNKNOWN op; nooit een verzonnen successtatus.
+BACKUP_CHECK_COMMAND=
+# Hersteloptie 2: gecontroleerde rebuild van exact dezelfde Oracle Home.
+ORACLE_HOME_RECOVERY_CHECK_COMMAND=/opt/oracle-patch-guard/checks/check_oracle_home_recovery
+RECOVERY_BASE_IMAGE=/secure/oracle-media/LINUX.X64_193000_db_home.zip
+RECOVERY_BASE_IMAGE_SHA256=VUL_HIER_EXACT_64_HEX_IN
+OPATCH_ZIP_SHA256=VUL_HIER_EXACT_64_HEX_IN
+HOME_RECOVERY_PROCEDURE=/etc/oracle-patch-guard/oracle_home_rebuild.md
+HOME_REBUILD_MIN_FREE_MB=30720
+# Root-owned 0640 key=value-manifest; zie README.
+MAINTENANCE_WINDOW_CHECK_COMMAND=/opt/oracle-patch-guard/checks/check_maintenance_window
+MAINTENANCE_WINDOW_MANIFEST=/etc/oracle-patch-guard/maintenance_window.conf
+# Niet meer gebruikt: Data Pump komt uit dezelfde inventory-SQL als DB/PDB/services.
+DATAPUMP_CHECK_COMMAND=
+DATAGUARD_CHECK_COMMAND=
+
+# Exacte lokale paden; geen interactieve profielen gebruiken.
+SAFE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EMCTL_PATH=
+MANAGE_LISTENERS=true
+# Spatiegescheiden, streng gevalideerde listenernamen uit deze Oracle Home.
+LISTENER_NAMES="LISTENER"
+
+# Publieke sleutel waarmee een losstaand signature-bestand over het exacte
+# patch_manifest.json wordt gecontroleerd. Verplicht buiten testmodus.
+APPROVAL_PUBLIC_KEY=/etc/oracle-patch-guard/approval_public.pem
+
+# Opt-in defaults uit de historische procedure. Ze worden uitsluitend gebruikt
+# als --use-defaults expliciet is opgegeven.
+DEFAULT_DB_PATCH=39472050
+DEFAULT_OJVM_PATCH=39222882
+DEFAULT_MONTH=JUL2026
+DEFAULT_OPATCH_VERSION=12.2.0.1.52
+DEFAULT_OPATCH_ZIPFILE=p6880880_190000_Linux-x86-64.zip
+
+# Alleen voor de test-harness. Nooit inschakelen op een echt target.
+ALLOW_TEST_MODE=false

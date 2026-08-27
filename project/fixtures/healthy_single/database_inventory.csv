@@ -1,0 +1,2 @@
+SID,ORACLE_HOME,oratab_autostart,instance_running,database_role,open_mode,CDB,PDB_status,listener,services
+"DB1","__TARGET_HOME__","Y","true","PRIMARY","READ WRITE","YES","PDB1=READ WRITE","LISTENER","APP_SVC"

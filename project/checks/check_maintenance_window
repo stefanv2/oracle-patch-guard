@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Read-only controle van een root-beheerd onderhoudsvenster (key=value).
+set -uo pipefail
+umask 027
+
+manifest=${MAINTENANCE_WINDOW_MANIFEST:-}
+phase=${OPG_CHECK_PHASE:-assess}
+target_home=${TARGET_ORACLE_HOME:-}
+expected_host=${HOST_NAME:-$(hostname -f 2>/dev/null || hostname)}
+expected_run=${RUN_ID:-}
+
+unknown() { printf 'UNKNOWN: %s\n' "$*"; exit 3; }
+blocked() { printf 'BLOCKED: %s\n' "$*"; exit 2; }
+field() { awk -F= -v key="$1" '$1==key{sub(/^[^=]*=/,"");print;exit}' "$manifest"; }
+
+[[ -n "$manifest" ]] || unknown 'MAINTENANCE_WINDOW_MANIFEST is niet geconfigureerd.'
+[[ -f "$manifest" && ! -L "$manifest" && -r "$manifest" ]] || unknown "manifest is niet veilig leesbaar: $manifest"
+owner=$(stat -c '%U' "$manifest" 2>/dev/null) || unknown 'eigenaar kon niet worden bepaald.'
+mode=$(stat -c '%a' "$manifest" 2>/dev/null) || unknown 'mode kon niet worden bepaald.'
+if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then current_owner=$(id -un); [[ "$owner" == "$current_owner" || "$owner" == root ]] || blocked "onveilige eigenaar: $owner"
+else [[ "$owner" == root ]] || blocked "manifest is niet root-owned: $owner"; fi
+group_digit=${mode: -2:1}; other_digit=${mode: -1}
+[[ "$group_digit" =~ ^[0-7]$ && "$other_digit" =~ ^[0-7]$ ]] || unknown "ongeldige mode: $mode"
+(( (group_digit & 2) == 0 && (other_digit & 2) == 0 )) || blocked "manifest is group/other-writable: $mode"
+
+hostname_value=$(field hostname); change_id=$(field change_id); start=$(field start); end=$(field end)
+allowed_home=$(field allowed_oracle_home); manifest_run=$(field run_id); minimum=$(field min_remaining_minutes)
+[[ -n "$hostname_value" && -n "$change_id" && -n "$start" && -n "$end" && -n "$allowed_home" && -n "$minimum" ]] || blocked 'een verplicht veld ontbreekt.'
+[[ "$change_id" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{1,79}$ ]] || blocked 'change_id heeft een ongeldig formaat.'
+[[ "$start" =~ (Z|[+-][0-9]{2}:[0-9]{2})$ && "$end" =~ (Z|[+-][0-9]{2}:[0-9]{2})$ ]] || blocked 'start/end moeten ISO-8601 met timezone of Z zijn.'
+[[ "$minimum" =~ ^[0-9]+$ && "$minimum" -gt 0 ]] || blocked 'min_remaining_minutes moet een positief geheel getal zijn.'
+[[ "$hostname_value" == "$expected_host" ]] || blocked "hostname mismatch: manifest=$hostname_value target=$expected_host"
+[[ -z "$manifest_run" || "$manifest_run" == "$expected_run" ]] || blocked "run_id mismatch: manifest=$manifest_run target=$expected_run"
+canonical_target=$(cd -P -- "$target_home" 2>/dev/null && pwd -P) || unknown 'target Oracle Home is niet canoniek oplosbaar.'
+canonical_allowed=$(cd -P -- "$allowed_home" 2>/dev/null && pwd -P) || blocked 'allowed_oracle_home bestaat niet of is niet canoniek.'
+[[ "$canonical_target" == "$canonical_allowed" ]] || blocked "Oracle Home mismatch: allowed=$canonical_allowed target=$canonical_target"
+start_epoch=$(date -d "$start" +%s 2>/dev/null) || unknown 'start kon niet betrouwbaar worden geïnterpreteerd.'
+end_epoch=$(date -d "$end" +%s 2>/dev/null) || unknown 'end kon niet betrouwbaar worden geïnterpreteerd.'
+now_epoch=${OPG_NOW_EPOCH_OVERRIDE:-$(date +%s)}
+[[ "$now_epoch" =~ ^[0-9]+$ ]] || unknown 'huidige tijd kon niet worden bepaald.'
+(( end_epoch > start_epoch )) || blocked 'eindtijd ligt niet na starttijd.'
+
+if [[ "$phase" == preapply ]]; then
+  (( now_epoch >= start_epoch && now_epoch <= end_epoch )) || blocked 'huidige tijd ligt niet binnen het goedgekeurde venster.'
+  remaining=$(( (end_epoch - now_epoch) / 60 ))
+else
+  (( now_epoch <= end_epoch )) || blocked 'het goedgekeurde venster is al verlopen.'
+  if (( now_epoch < start_epoch )); then remaining=$(( (end_epoch - start_epoch) / 60 )); else remaining=$(( (end_epoch - now_epoch) / 60 )); fi
+fi
+(( remaining >= minimum )) || blocked "onvoldoende resterende venstertijd: ${remaining}m < ${minimum}m"
+printf 'READY: change_id=%s phase=%s start=%s end=%s remaining_minutes=%s min_remaining_minutes=%s home=%s run_id=%s\n' \
+  "$change_id" "$phase" "$start" "$end" "$remaining" "$minimum" "$canonical_target" "${manifest_run:-ANY}"
+exit 0
