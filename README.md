@@ -4,6 +4,12 @@ Oracle Patch Guard (OPG) is a safe, auditable and approval-driven Oracle
 Database patching framework with staged media validation, cryptographic
 approval and multi-target support.
 
+<p align="center">
+  <img src="docs/images/oracle-patch-guard.png"
+       alt="Oracle Patch Guard"
+       width="900">
+</p>
+
 The controlled workflow is:
 
 ```text
