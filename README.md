@@ -76,5 +76,7 @@ The current public-release baseline is 265/265 passing regressions. See
 - The existing site-controlled `opg_approve_run.sh` remains the sole mutating
   single-run signer. It is an integration dependency and is not included in
   this repository.
-- No license has been selected yet. The repository owner must choose a license
-  before presenting the project as formally open source.
+
+## License
+
+Oracle Patch Guard is licensed under the [Apache License 2.0](LICENSE).
