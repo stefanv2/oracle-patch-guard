@@ -1,8 +1,8 @@
 # Oracle Patch Guard
 
-Oracle Patch Guard (OPG) is a safe, auditable and approval-driven Oracle
-Database patching framework with staged media validation, cryptographic
-approval and multi-target support.
+Oracle Patch Guard (OPG) is een veilig, controleerbaar en door goedkeuring
+gestuurd framework voor het patchen van Oracle Database, met validatie van
+staged media, cryptografische goedkeuring en multi-target-ondersteuning.
 
 <p align="center">
   <img src="docs/images/oracle-patch-guard.png"
@@ -10,78 +10,85 @@ approval and multi-target support.
        width="900">
 </p>
 
-The controlled workflow is:
+De gecontroleerde workflow is:
 
 ```text
 PLAN → APPROVE → APPLY
 ```
 
-PLAN records a fail-closed preflight assessment and binds the exact target,
-Oracle Home, patch media and recovery evidence into an immutable manifest.
-APPROVE signs that manifest and a separate approval token. APPLY obtains the
-Oracle Home lock, repeats volatile checks, re-verifies local staged media and
-cryptographic bindings, and only then permits downtime or patch mutation.
+PLAN legt een fail-closed preflight-assessment vast en bindt het exacte target,
+de Oracle Home, patchmedia en recovery-evidence in een immutable manifest.
+APPROVE ondertekent dat manifest en een afzonderlijk approval-token. APPLY
+verkrijgt de Oracle Home-lock, herhaalt veranderlijke controles, verifieert de
+lokale staged media en cryptografische bindingen opnieuw en staat pas daarna
+downtime of patchmutaties toe.
 
-## Key properties
+## Belangrijkste eigenschappen
 
-- preflight assessment well before the maintenance window;
-- a fresh pre-apply recheck before database or listener shutdown;
-- local validated media staging with ZIP SHA256 and deterministic V2 tree
-  hashes;
-- cryptographic manifest binding and explicit approval;
-- APPLY and resume re-verification with fail-closed state handling;
-- Oracle Home, PMON, listener, SID, service and SQL patch validation;
-- controlled OPatch self-upgrade before RU/OJVM mutation;
-- multi-target support with a per-host/per-home lock;
-- OEM integration through constrained wrappers and local privileged helpers;
-- signer-side status reporting and batch approval orchestration.
+- preflight-assessment ruim vóór het onderhoudsvenster;
+- een verse pre-apply-hercontrole voordat de database of listener wordt
+  gestopt;
+- lokale, gevalideerde media staging met ZIP SHA256 en deterministische V2
+  tree hashes;
+- cryptografische manifest-binding en expliciete goedkeuring;
+- herverificatie bij APPLY en resume met fail-closed state-afhandeling;
+- validatie van Oracle Home, PMON, listener, SID, service en SQL-patches;
+- gecontroleerde OPatch self-upgrade vóór RU/OJVM-mutaties;
+- multi-target-ondersteuning met een lock per host en Oracle Home;
+- OEM-integratie via begrensde wrappers en lokale privileged helpers;
+- statusrapportage aan signer-zijde en orchestratie van batchgoedkeuringen.
 
-## Stable 2026-08-31 baseline
+## Stable baseline 2026-08-31
 
-The stable baseline adds the live-validated lifecycle around the existing
-PLAN → APPROVE → APPLY contract:
+De stable baseline voegt de live gevalideerde lifecycle toe rond het bestaande
+PLAN → APPROVE → APPLY-contract:
 
-- exact per-container datapatch validation for `CDB$ROOT` and every expected
-  user PDB; a missing, duplicate, ambiguous or non-SUCCESS RU/OJVM record is
-  fail-closed;
-- user PDBs that were READ ONLY or MOUNTED are temporarily opened READ WRITE
-  for datapatch and are restored to their original state after successful
-  validation; `PDB$SEED` is excluded from the user-PDB validation set;
-- fresh-host bootstrap installs the constrained root helpers, validated
-  sudoers fragment, protected runtime configuration and `/u01/stage` anchors;
-- runtime and approval roots are resolved from protected configuration rather
-  than runtime share-path fallbacks;
-- batch approval asks once and then delegates every selected run to the sole
-  single-run signing implementation;
-- successful APPLY publishes hash-bound `completion.json` evidence, allowing a
-  historically valid COMPLETE to remain COMPLETE after approval expiry.
+- exacte datapatch-validatie per container voor `CDB$ROOT` en iedere verwachte
+  user-PDB; een ontbrekend, dubbel, ambigu of niet-SUCCESS RU/OJVM-record leidt
+  fail-closed tot stoppen;
+- user-PDB's die READ ONLY of MOUNTED waren, worden voor datapatch tijdelijk
+  READ WRITE geopend en na succesvolle validatie in hun oorspronkelijke state
+  hersteld; `PDB$SEED` is uitgesloten van de user-PDB-validatieset;
+- fresh-host bootstrap installeert de begrensde root-helpers, het gevalideerde
+  sudoers-fragment, de beveiligde runtimeconfiguratie en de anchors onder
+  `/u01/stage`;
+- runtime- en approval-roots worden uit beveiligde configuratie bepaald in
+  plaats van via fallbacks naar runtime-sharepaden;
+- batchgoedkeuring vraagt eenmaal om bevestiging en delegeert daarna iedere
+  geselecteerde run aan de enige single-run signing-implementatie;
+- een succesvolle APPLY publiceert met hashes gebonden
+  `completion.json`-evidence, waardoor een historisch geldige COMPLETE na het
+  verlopen van de approval COMPLETE kan blijven.
 
-The baseline was validated in non-production on Oracle Database 19.32 with a
-CDB and user PDB, DB RU 39472050 and OJVM RU 39222882. The complete live flow
-finished successfully, including completion publication. See
+De baseline is in non-productie gevalideerd op Oracle Database 19.32 met een
+CDB en user-PDB, DB RU 39472050 en OJVM RU 39222882. De volledige live flow is
+succesvol afgerond, inclusief completion-publicatie. Zie
 [`RELEASE_NOTES_20260831.md`](RELEASE_NOTES_20260831.md).
 
-## Repository layout
+## Repository-indeling
 
-- `project/` — patch guard core, checks, OEM wrappers, fixtures and tests;
-- `oem-tasks/` — target orchestration, approval staging and media helpers;
-- `signer/` — read-only run status and multi-target approval orchestration;
-- `config/examples/` — generic cycle and sudoers examples;
-- `tools/` — standalone hashing benchmark;
-- `PILOT07_*.md`, `TREE_HASH_V2_SPEC.md` — design, security and validation
-  documentation.
+- `project/` — Patch Guard-core, controles, OEM-wrappers, fixtures en tests;
+- `oem-tasks/` — target-orchestratie, approval staging en mediahelpers;
+- `signer/` — read-only runstatus en orchestratie van multi-target-goedkeuring;
+- `config/examples/` — generieke voorbeelden voor cycles en sudoers;
+- `tools/` — standalone benchmark voor hashing;
+- `PILOT07_*.md`, `TREE_HASH_V2_SPEC.md` — documentatie over ontwerp, security
+  en validatie.
 
-Site-specific values belong in a protected local configuration copied from
-`project/patchGD_guard.conf.example`. The repository intentionally contains no
-production configuration, private key, approval data or release archive.
+Site-specifieke waarden horen thuis in een beveiligde lokale configuratie die
+is gekopieerd van `project/patchGD_guard.conf.example`. De repository bevat
+bewust geen productieconfiguratie, private key, approval-data of
+release-archief.
 
-Example public paths use `/mnt/patch-share`; example hosts use the reserved
-`example.com` domain. Review every path, owner, group, sudo rule, recovery hook
-and maintenance-window policy before deployment.
+Publieke voorbeeldpaden gebruiken `/mnt/patch-share`; voorbeeldhosts gebruiken
+het gereserveerde domein `example.com`. Controleer vóór deployment ieder pad,
+iedere owner en group, iedere sudo-regel, recovery-hook en het beleid voor het
+onderhoudsvenster.
 
-## Validation
+## Validatie
 
-Run on Linux with Bash, Python 3, OpenSSL and ShellCheck available:
+Voer dit uit op Linux, waarbij Bash, Python 3, OpenSSL en ShellCheck beschikbaar
+zijn:
 
 ```bash
 cd project
@@ -98,29 +105,31 @@ bash tests/run_completion_publication_tests.sh
 sudo bash tests/run_bootstrap_tests.sh
 ```
 
-The current stable baseline is 351/351 passing regressions. The original Pilot07
-public-release evidence remains in `PILOT07_VALIDATION_REPORT.md` and
-`PUBLIC_RELEASE_AUDIT.md`; completion-publication validation is documented in
-`COMPLETION_PUBLICATION_VALIDATION_REPORT.md` and config-driven deployment-path
-validation in `DEPLOYMENT_PATH_VALIDATION_REPORT.md`.
+De huidige stable baseline heeft 351/351 geslaagde regressietests. De
+oorspronkelijke evidence van de publieke Pilot07-release blijft beschikbaar in
+`PILOT07_VALIDATION_REPORT.md` en `PUBLIC_RELEASE_AUDIT.md`; de validatie van
+completion-publicatie is gedocumenteerd in
+`COMPLETION_PUBLICATION_VALIDATION_REPORT.md` en de validatie van
+configgedreven deploymentpaden in `DEPLOYMENT_PATH_VALIDATION_REPORT.md`.
 
-## Release discipline
+## Releasediscipline
 
-The deployed `current` link must reference an immutable, validated release
-directory. Do not place ad-hoc fixes in `current`. Prepare and test future
-changes in a separate RC/release directory, record its evidence, and only then
-move `current` to that immutable release.
+De gedeployde `current`-link moet verwijzen naar een immutable, gevalideerde
+release-directory. Plaats geen ad-hocfixes in `current`. Bereid toekomstige
+wijzigingen voor en test ze in een afzonderlijke RC/release-directory, leg de
+evidence vast en verplaats `current` pas daarna naar die immutable release.
 
-## Important limitations
+## Belangrijke beperkingen
 
-- The project is pilot software and requires non-production validation for the
-  target Oracle release, topology and backup implementation.
-- RAC, SEHA, ASM/Grid and Data Guard configurations are detected and blocked by
-  the current single-instance scope.
-- The existing site-controlled `opg_approve_run.sh` remains the sole mutating
-  single-run signer. It is an integration dependency and is not included in
-  this repository.
+- Het project is pilotsoftware en vereist validatie in non-productie voor de
+  beoogde Oracle-release, topologie en backupimplementatie.
+- RAC-, SEHA-, ASM/Grid- en Data Guard-configuraties worden gedetecteerd en door
+  de huidige single-instance-scope geblokkeerd.
+- De bestaande site-controlled `opg_approve_run.sh` blijft de enige muterende
+  single-run signer. Dit is een integratieafhankelijkheid en het script is niet
+  opgenomen in deze repository.
 
-## License
+## Licentie
 
-Oracle Patch Guard is licensed under the [Apache License 2.0](LICENSE).
+Oracle Patch Guard wordt beschikbaar gesteld onder de
+[Apache License 2.0](LICENSE).
