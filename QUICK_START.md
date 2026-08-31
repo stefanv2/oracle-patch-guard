@@ -1,5 +1,11 @@
 # Oracle Patch Guard — Quick Start
 
+<p align="center">
+  <img src="docs/images/oracle-patch-guard-quick-start.png"
+       alt="Oracle Patch Guard — Quick Start"
+       width="1200">
+</p>
+
 Deze quick start beschrijft de stable baseline `stable-20260831`. Het is geen
 vervanging voor lokale change-, backup-, recovery- en securityprocedures.
 
