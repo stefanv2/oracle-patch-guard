@@ -86,10 +86,19 @@ De OEM-wrapper blijft volledig als `oracle` draaien. Alleen deze context-filesys
 
 - `prepare-root`: uitsluitend de vaste contextroot voorbereiden;
 - `publish`: gevalideerde context-JSON via stdin atomisch als `current_run.json` publiceren;
-- `rotate <reden>`: uitsluitend een terminale context archiveren en vervangen, met historyregistratie.
-- `publish-approval-stage <RUN_ID>`: uitsluitend vier vaste PLAN-artifacts uit een gevalideerde tarstream onder de vaste approvalroot publiceren.
+- `rotate <reden>`: uitsluitend een terminale context archiveren en vervangen, met historyregistratie;
+- `publish-approval-stage <RUN_ID>`: uitsluitend vier vaste PLAN-artifacts uit een gevalideerde tarstream onder de vaste approvalroot publiceren;
+- `publish-completion <RUN_ID>`: uitsluitend voor de actieve, lokaal coherente
+  `12_COMPLETE`-run een nieuw hashgebonden `completion.json` atomisch toevoegen.
 
 De helper accepteert geen pad of command van de wrapper. In productie zijn de contextroot (`/var/lib/oracle-patch-guard`) en runroot (`/var/log/oracle-patch-guard`) in de root-owned helper vastgelegd. De centrale sharecopy is uitsluitend installatiemedium en is nooit een toegestaan sudo-target. Onbeschikbare non-interactive sudo, afwijkende helperownership/mode, een symlink, een onveilige parentdirectory, ongeldige JSON, een niet-terminale oude run of een filesystemfout stopt fail-closed.
+
+`OPG_ROOT` en `APPROVAL_ROOT` komen in productie uitsluitend uit de root-owned,
+niet group/world-writable `/etc/oracle-patch-guard/patchGD_guard.conf`. De
+root-helper parseert alleen exact `APPROVAL_ROOT` en voert de config nooit als
+shellcode uit. Relatieve, lege, dubbele of lexicaal onveilige paden worden
+fail-closed geweigerd. Testfixtures behouden uitsluitend onder expliciete
+testmodus hun begrensde `OPG_TEST_*`/`OPG_CONTEXT_HELPER_TEST_*` overrides.
 
 Installeer de helper en de meegeleverde sudoersregel als root:
 
@@ -117,6 +126,14 @@ install -d -o root -g oinstall -m 0750 \
 ```
 
 Bij `stage` valideert `opg_stage_approval.sh` de bestaande vier PLAN-artifacts eerst onprivileged en byte-voor-byte. Daarna streamt het uitsluitend `patch_manifest.json`, `assessment.json`, `findings.psv` en `execution_state.json` naar de lokale helper. De helper accepteert geen bron- of doelpad, weigert symlinks, onbekende of dubbele tar-items en onveilige RUN_ID's, zet directory `root:oinstall 0750` en bestanden `root:oinstall 0440`, en publiceert binnen dezelfde approvalroot atomisch. Een bestaande definitieve RUN_ID-directory wordt nooit overschreven.
+
+Na een succesvolle core-APPLY roept de wrapper dezelfde lokale helper aan voor
+completion-publicatie. De oorspronkelijke vier PLAN-artifacts en alle signer-
+artifacts worden nooit overschreven. `completion.json` wordt `root:oinstall
+0440`, bevat SHA256 van exact `patch_manifest.json` en `approval.json`, en wordt
+alleen gepubliceerd wanneer context, lokale state, host, home, cycle,
+conditionals en expiryrelatie coherent zijn. Een identieke retry is idempotent;
+een afwijkend bestaand artifact wordt fail-closed geweigerd.
 
 Vervolgfases herhalen cycle- en targetdiscovery en eisen een exacte match met deze context. Ze maken geen nieuwe RUN_ID.
 
@@ -148,6 +165,15 @@ Na signing:
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh apply
 ```
 
+Wanneer Oracle-patching al succesvol `12_COMPLETE` bereikte maar de share-
+publicatie faalde, blijft de patchstate intact en retourneert de wrapper
+`OPG_COMPLETION_PUBLISH|...|status=FAILED` plus exit 30. Herstel uitsluitend de
+publicatieoorzaak en herhaal daarna zonder APPLY opnieuw uit te voeren:
+
+```bash
+/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh publish-completion
+```
+
 Optionele diagnose, niet automatisch onderdeel van APPLY:
 
 ```bash
@@ -155,7 +181,7 @@ Optionele diagnose, niet automatisch onderdeel van APPLY:
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh show-context
 ```
 
-`plan` bewaart de core-exitcode en gebruikt de bestaande result-summary wanneer die aanwezig is. `apply` leidt manifest en token af als `approvals/<RUN_ID>/patch_manifest.json` en `approval.json`; de bestaande apply/core blijft fail-closed verantwoordelijk voor leesbaarheid, signatures, binding en preapply.
+`plan` bewaart de core-exitcode en gebruikt de bestaande result-summary wanneer die aanwezig is. `apply` leidt manifest en token af als `approvals/<RUN_ID>/patch_manifest.json` en `approval.json`; de bestaande apply/core blijft fail-closed verantwoordelijk voor leesbaarheid, signatures, binding en preapply. Completion-publicatie gebeurt pas na core-exit 0 en veroorzaakt nooit automatische patchrollback.
 
 ## Meerdere targets en signing
 

@@ -10,6 +10,7 @@ cd / || exit 30
 readonly EXIT_BLOCKED=20 EXIT_UNKNOWN=30 EXIT_USAGE=70
 ACTION=${1:-}
 INCOMING_FILE=
+CONFIG_FILE=/etc/oracle-patch-guard/patchGD_guard.conf
 
 die() {
   local code=$1 message=$2
@@ -23,10 +24,37 @@ cleanup() {
 }
 trap cleanup EXIT
 
+config_value() {
+  local config=$1 wanted=$2 raw key value found=
+  [[ -f "$config" && ! -L "$config" ]] || die "$EXIT_BLOCKED" "Config ontbreekt of is onveilig: ${config}"
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    raw=${raw%$'\r'}
+    [[ "$raw" =~ ^[[:space:]]*$ || "$raw" =~ ^[[:space:]]*# ]] && continue
+    [[ "$raw" == *=* ]] || continue
+    key=${raw%%=*}; value=${raw#*=}
+    key=${key#"${key%%[![:space:]]*}"}; key=${key%"${key##*[![:space:]]}"}
+    value=${value#"${value%%[![:space:]]*}"}; value=${value%"${value##*[![:space:]]}"}
+    [[ "$key" == "$wanted" ]] || continue
+    [[ -z "$found" ]] || die "$EXIT_BLOCKED" "Dubbele configsleutel: ${wanted}"
+    found=$value
+  done <"$config"
+  [[ -n "$found" ]] || die "$EXIT_BLOCKED" "Verplichte configsleutel ontbreekt of is leeg: ${wanted}"
+  [[ "$found" == /* && "$found" =~ ^/[A-Za-z0-9_./-]+$ && "$found" != *'//'*
+     && "$found" != */../* && "$found" != */./* && "$found" != */.. && "$found" != */. ]] || die "$EXIT_BLOCKED" "Relatief of ongeldig configpad voor ${wanted}."
+  printf '%s' "$found"
+}
+
 if [[ ${OPG_CONTEXT_HELPER_TEST_MODE:-0} == 1 ]]; then
   CONTEXT_ROOT=${OPG_CONTEXT_HELPER_TEST_ROOT:-}
   RUN_ROOT=${OPG_CONTEXT_HELPER_TEST_RUN_ROOT:-}
-  APPROVAL_ROOT=${OPG_CONTEXT_HELPER_TEST_APPROVAL_ROOT:-${CONTEXT_ROOT}/approvals}
+  CONFIG_FILE=${OPG_CONTEXT_HELPER_TEST_CONFIG:-}
+  if [[ -n ${OPG_CONTEXT_HELPER_TEST_APPROVAL_ROOT:-} ]]; then
+    APPROVAL_ROOT=$OPG_CONTEXT_HELPER_TEST_APPROVAL_ROOT
+  elif [[ -n "$CONFIG_FILE" ]]; then
+    APPROVAL_ROOT=$(config_value "$CONFIG_FILE" APPROVAL_ROOT) || die "$EXIT_BLOCKED" 'APPROVAL_ROOT kon niet veilig uit testconfig worden gelezen.'
+  else
+    APPROVAL_ROOT=${CONTEXT_ROOT}/approvals
+  fi
   CONTEXT_GROUP=${OPG_CONTEXT_HELPER_TEST_GROUP:-$(id -gn)}
   CONTEXT_OWNER=$(id -un)
   case "$CONTEXT_ROOT" in /tmp/opg-context-helper-tests.*|/tmp/opg-oem-wrapper-tests.*|/tmp/opg-oem14-tests.*) ;; *) die "$EXIT_USAGE" 'Ongeldige context-helper-testroot.' ;; esac
@@ -36,7 +64,10 @@ else
   (( EUID == 0 )) || die "$EXIT_USAGE" 'Deze helper moet via de begrensde root-sudo-regel worden uitgevoerd.'
   CONTEXT_ROOT=/var/lib/oracle-patch-guard
   RUN_ROOT=/var/log/oracle-patch-guard
-  APPROVAL_ROOT=/mnt/patch-share/oracle-patch-guard/approvals
+  config_info=$(stat -Lc '%U:%a' "$CONFIG_FILE" 2>/dev/null) || die "$EXIT_BLOCKED" "Config ontbreekt of is onveilig: ${CONFIG_FILE}"
+  [[ "$config_info" =~ ^root:([0-7]{3,4})$ ]] || die "$EXIT_BLOCKED" 'Live config moet root-owned zijn.'
+  config_mode=${BASH_REMATCH[1]}; (( (8#$config_mode & 0022) == 0 )) || die "$EXIT_BLOCKED" 'Live config is group/world-writable.'
+  APPROVAL_ROOT=$(config_value "$CONFIG_FILE" APPROVAL_ROOT) || die "$EXIT_BLOCKED" 'APPROVAL_ROOT kon niet veilig uit config worden gelezen.'
   CONTEXT_GROUP=oinstall
   CONTEXT_OWNER=root
 fi
@@ -306,10 +337,309 @@ PY
   esac
 }
 
+publish_completion() {
+  local run_id=$1 rc
+  [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] || die "$EXIT_USAGE" 'Ongeldige completion RUN_ID.'
+  set +e
+  /usr/bin/python3 - "$CONTEXT_ROOT" "$RUN_ROOT" "$APPROVAL_ROOT" "$run_id" "$CONTEXT_OWNER" "$CONTEXT_GROUP" <<'PY'
+import datetime
+import grp
+import hashlib
+import json
+import os
+import pwd
+import re
+import secrets
+import stat
+import sys
+
+context_root, run_root, approval_root, run_id, owner_name, group_name = sys.argv[1:]
+safe_run = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+safe_sid = re.compile(r"^[A-Za-z0-9_#$]+$")
+safe_cycle = re.compile(r"^[A-Z][A-Z0-9_-]{2,31}$")
+safe_hash = re.compile(r"^[0-9a-f]{64}$")
+safe_iso = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+max_size = 16 * 1024 * 1024
+
+
+class InvalidEvidence(Exception):
+    pass
+
+
+class MissingEvidence(InvalidEvidence):
+    pass
+
+
+def blocked(message):
+    print(f"OPG CONTEXT HELPER: {message}", file=sys.stderr)
+    raise SystemExit(20)
+
+
+def unknown(message):
+    print(f"OPG CONTEXT HELPER: {message}", file=sys.stderr)
+    raise SystemExit(30)
+
+
+def strict_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise InvalidEvidence(f"Dubbele JSON-sleutel: {key}")
+        result[key] = value
+    return result
+
+
+def text(value):
+    return value if isinstance(value, str) else ""
+
+
+def integer(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def iso_epoch(value):
+    if not isinstance(value, str) or not safe_iso.fullmatch(value):
+        return None
+    try:
+        parsed = datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+    return int(parsed.replace(tzinfo=datetime.timezone.utc).timestamp())
+
+
+def open_directory(path):
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    return os.open(path, flags)
+
+
+def open_child_directory(parent_fd, name):
+    try:
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise InvalidEvidence(f"Directory ontbreekt: {name}") from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise InvalidEvidence(f"Geen veilige directory: {name}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    return os.open(name, flags, dir_fd=parent_fd)
+
+
+def stable_bytes(dir_fd, name, require_owner=None, require_group=None, maximum=max_size):
+    try:
+        before = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise MissingEvidence(f"Artifact ontbreekt: {name}") from exc
+    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size < 0 or
+            before.st_size > maximum or stat.S_IMODE(before.st_mode) & 0o022 or
+            (require_owner is not None and before.st_uid != require_owner) or
+            (require_group is not None and before.st_gid != require_group)):
+        raise InvalidEvidence(f"Onveilig artifact: {name}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(name, flags, dir_fd=dir_fd)
+    try:
+        data = b""
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            data += block
+            if len(data) > maximum:
+                raise InvalidEvidence(f"Artifact te groot: {name}")
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(before, field) != getattr(after, field) for field in fields):
+        raise InvalidEvidence(f"Artifact wijzigde tijdens lezen: {name}")
+    return data
+
+
+def read_json(dir_fd, name, require_owner=None, require_group=None):
+    raw = stable_bytes(dir_fd, name, require_owner, require_group)
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=strict_object)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise InvalidEvidence(f"Ongeldige JSON: {name}") from exc
+    if not isinstance(value, dict):
+        raise InvalidEvidence(f"JSON-root is geen object: {name}")
+    return value, raw
+
+
+def validate_findings(raw, approval):
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeError as exc:
+        raise InvalidEvidence("findings.psv is geen UTF-8") from exc
+    for line in lines:
+        if not line:
+            continue
+        fields = line.split("|")
+        if len(fields) < 2 or fields[0] not in ("READY", "CONDITIONAL", "BLOCKED", "UNKNOWN"):
+            raise InvalidEvidence("Ongeldige findings.psv")
+        if fields[0] in ("BLOCKED", "UNKNOWN"):
+            raise InvalidEvidence("Runfindings zijn niet approvable")
+        if fields[0] == "CONDITIONAL":
+            condition = fields[1]
+            if (not re.fullmatch(r"[A-Z0-9_]{1,80}", condition) or
+                    text(approval.get("accept_" + condition)) != condition):
+                raise InvalidEvidence("Conditional is niet geaccepteerd")
+
+
+if not safe_run.fullmatch(run_id):
+    blocked("Ongeldige completion RUN_ID.")
+
+context_fd = run_root_fd = local_run_fd = approval_root_fd = approval_run_fd = None
+temp_name = None
+try:
+    owner_uid = pwd.getpwnam(owner_name).pw_uid
+    group_gid = grp.getgrnam(group_name).gr_gid
+
+    context_fd = open_directory(context_root)
+    context_info = os.fstat(context_fd)
+    if (context_info.st_uid != owner_uid or context_info.st_gid != group_gid or
+            stat.S_IMODE(context_info.st_mode) != 0o750):
+        raise InvalidEvidence("Contextroot heeft onveilige ownership/mode")
+    context_file_info = os.stat("current_run.json", dir_fd=context_fd, follow_symlinks=False)
+    if (context_file_info.st_uid != owner_uid or context_file_info.st_gid != group_gid or
+            stat.S_IMODE(context_file_info.st_mode) != 0o640):
+        raise InvalidEvidence("current_run.json heeft onveilige ownership/mode")
+    context, _ = read_json(context_fd, "current_run.json", owner_uid, group_gid)
+    if (text(context.get("run_id")) != run_id or text(context.get("schema_version")) != "1"):
+        raise InvalidEvidence("Actieve context hoort niet bij RUN_ID")
+
+    run_root_fd = open_directory(run_root)
+    local_run_fd = open_child_directory(run_root_fd, run_id)
+    local_run_info = os.fstat(local_run_fd)
+    if stat.S_IMODE(local_run_info.st_mode) & 0o022:
+        raise InvalidEvidence("Lokale rundirectory is group/world-writable")
+    state, _ = read_json(local_run_fd, "execution_state.json")
+
+    approval_root_fd = open_directory(approval_root)
+    approval_root_info = os.fstat(approval_root_fd)
+    if (approval_root_info.st_uid != owner_uid or approval_root_info.st_gid != group_gid or
+            stat.S_IMODE(approval_root_info.st_mode) != 0o750):
+        raise InvalidEvidence("Approvalroot heeft onveilige ownership/mode")
+    approval_run_fd = open_child_directory(approval_root_fd, run_id)
+    approval_run_info = os.fstat(approval_run_fd)
+    if (approval_run_info.st_uid != owner_uid or approval_run_info.st_gid != group_gid or
+            stat.S_IMODE(approval_run_info.st_mode) != 0o750):
+        raise InvalidEvidence("Approval-rundirectory heeft onveilige ownership/mode")
+
+    manifest, manifest_raw = read_json(approval_run_fd, "patch_manifest.json", owner_uid, group_gid)
+    approval, approval_raw = read_json(approval_run_fd, "approval.json", owner_uid)
+    findings_raw = stable_bytes(approval_run_fd, "findings.psv", owner_uid, group_gid)
+    stable_bytes(approval_run_fd, "patch_manifest.sig", owner_uid, maximum=1024 * 1024)
+    stable_bytes(approval_run_fd, "approval.sig", owner_uid, maximum=1024 * 1024)
+
+    manifest_hash = hashlib.sha256(manifest_raw).hexdigest()
+    approval_hash = hashlib.sha256(approval_raw).hexdigest()
+    hostname = text(manifest.get("hostname"))
+    home = text(manifest.get("target_oracle_home"))
+    cycle = text(manifest.get("month"))
+    sid = text(context.get("oracle_sid"))
+    completed_at = text(state.get("timestamp"))
+    completion_epoch = iso_epoch(completed_at)
+    expires_epoch = integer(approval.get("expires_epoch"))
+
+    if (text(manifest.get("run_id")) != run_id or not hostname or not home or not safe_cycle.fullmatch(cycle)):
+        raise InvalidEvidence("Manifestidentiteit is ongeldig")
+    if (text(context.get("fqdn")) != hostname or text(context.get("oracle_home")) != home or
+            text(context.get("patch_cycle")) != cycle or not safe_sid.fullmatch(sid)):
+        raise InvalidEvidence("Context en manifestbinding wijken af")
+    if (text(state.get("run_id")) != run_id or text(state.get("hostname")) != hostname or
+            text(state.get("target_oracle_home")) != home or text(state.get("state")) != "12_COMPLETE" or
+            text(state.get("phase")) != "COMPLETE" or integer(state.get("exit_code")) != 0 or
+            (text(state.get("sid")) not in ("", sid))):
+        raise InvalidEvidence("Lokale execution-state is niet coherent COMPLETE")
+    if completion_epoch is None:
+        raise InvalidEvidence("Completiontimestamp is niet betrouwbaar")
+    if (approval.get("approved") is not True or text(approval.get("manifest_sha256")) != manifest_hash or
+            text(approval.get("hostname")) != hostname or text(approval.get("target_oracle_home")) != home or
+            expires_epoch is None or expires_epoch < 0 or completion_epoch > expires_epoch):
+        raise InvalidEvidence("Approvalbinding of completionperiode is ongeldig")
+    if (os.path.basename(text(approval.get("manifest_signature_file"))) != "patch_manifest.sig" or
+            os.path.basename(text(approval.get("approval_signature_file"))) != "approval.sig"):
+        raise InvalidEvidence("Approval-signaturebestandsbinding is ongeldig")
+    validate_findings(findings_raw, approval)
+
+    completion = {
+        "approval_sha256": approval_hash,
+        "completed_at": completed_at,
+        "completion_epoch": completion_epoch,
+        "exit_code": 0,
+        "hostname": hostname,
+        "manifest_sha256": manifest_hash,
+        "patch_cycle": cycle,
+        "phase": "COMPLETE",
+        "run_id": run_id,
+        "schema_version": 1,
+        "sid": sid,
+        "state": "12_COMPLETE",
+        "target_oracle_home": home,
+    }
+    payload = (json.dumps(completion, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+    try:
+        existing = stable_bytes(approval_run_fd, "completion.json", owner_uid, group_gid)
+    except MissingEvidence:
+        pass
+    else:
+        if existing != payload:
+            raise InvalidEvidence("Bestaande completion.json wijkt af; overschrijven geweigerd")
+        raise SystemExit(0)
+
+    temp_name = f".completion.{os.getpid()}.{secrets.token_hex(6)}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    temp_fd = os.open(temp_name, flags, 0o440, dir_fd=approval_run_fd)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(temp_fd, view)
+            view = view[written:]
+        os.fchown(temp_fd, owner_uid, group_gid)
+        os.fchmod(temp_fd, 0o440)
+        os.fsync(temp_fd)
+    finally:
+        os.close(temp_fd)
+    try:
+        os.link(temp_name, "completion.json", src_dir_fd=approval_run_fd,
+                dst_dir_fd=approval_run_fd, follow_symlinks=False)
+    except FileExistsError:
+        existing = stable_bytes(approval_run_fd, "completion.json", owner_uid, group_gid)
+        if existing != payload:
+            raise InvalidEvidence("Concurrent completion.json wijkt af")
+    os.unlink(temp_name, dir_fd=approval_run_fd)
+    temp_name = None
+    os.fsync(approval_run_fd)
+except SystemExit:
+    raise
+except InvalidEvidence as exc:
+    blocked(str(exc))
+except (KeyError, OSError) as exc:
+    unknown(f"Completionpublicatie faalde: {exc}")
+finally:
+    if temp_name is not None and approval_run_fd is not None:
+        try:
+            os.unlink(temp_name, dir_fd=approval_run_fd)
+        except OSError:
+            pass
+    for fd in (approval_run_fd, approval_root_fd, local_run_fd, run_root_fd, context_fd):
+        if fd is not None:
+            os.close(fd)
+PY
+  rc=$?
+  set -e
+  case "$rc" in
+    0) ;;
+    "$EXIT_BLOCKED") die "$EXIT_BLOCKED" 'Completionpublicatie werd veilig geweigerd.' ;;
+    *) die "$EXIT_UNKNOWN" 'Completion kon niet betrouwbaar worden gepubliceerd.' ;;
+  esac
+}
+
 case "$ACTION" in
   prepare-root) [[ $# -eq 1 ]] || die "$EXIT_USAGE" 'prepare-root accepteert geen argumenten.'; ensure_context_root ;;
   publish) [[ $# -eq 1 ]] || die "$EXIT_USAGE" 'publish accepteert geen argumenten of paden.'; publish_context ;;
   rotate) [[ $# -eq 2 ]] || die "$EXIT_USAGE" 'rotate accepteert uitsluitend één reden.'; rotate_context "$2" ;;
   publish-approval-stage) [[ $# -eq 2 ]] || die "$EXIT_USAGE" 'publish-approval-stage accepteert uitsluitend één RUN_ID.'; publish_approval_stage "$2" ;;
-  *) die "$EXIT_USAGE" 'Toegestane acties: prepare-root, publish, rotate, publish-approval-stage.' ;;
+  publish-completion) [[ $# -eq 2 ]] || die "$EXIT_USAGE" 'publish-completion accepteert uitsluitend één RUN_ID.'; publish_completion "$2" ;;
+  *) die "$EXIT_USAGE" 'Toegestane acties: prepare-root, publish, rotate, publish-approval-stage, publish-completion.' ;;
 esac

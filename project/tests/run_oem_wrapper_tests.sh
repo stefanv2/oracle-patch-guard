@@ -36,6 +36,7 @@ setup_case() {
   HOME_DIR="$CASE/dbhome_1"; CONFIG="$CASE/etc/patchGD_guard.conf"; RUN_ROOT="$CASE/runs"; CONTEXT_ROOT="$CASE/var/lib/oracle-patch-guard"
   mkdir -p "$OPG_ROOT/config" "$OPG_ROOT/approvals" "$TASK_ROOT" "$PROJECT/lib" "$LOCAL_SBIN" "$HOME_DIR/bin" "$CENTRAL/JUL2026/39472050" "$CENTRAL/JUL2026/39222882" "$CENTRAL/opatch" "$CASE/etc" "$RUN_ROOT"
   chmod 0755 "$LOCAL_SBIN"
+  chmod 0750 "$OPG_ROOT/approvals"
   printf '#!/usr/bin/env bash\nexit 0\n' >"$HOME_DIR/bin/oracle"; chmod 0750 "$HOME_DIR/bin/oracle"
   printf 'JUL2026\n' >"$OPG_ROOT/config/active_cycle"
   cat >"$CENTRAL/JUL2026/opg_cycle.conf" <<'EOF'
@@ -47,6 +48,8 @@ OPATCH_ZIP=p6880880_190000_Linux-x86-64.zip
 EOF
   printf 'zip\n' >"$CENTRAL/opatch/p6880880_190000_Linux-x86-64.zip"
   cat >"$CONFIG" <<EOF
+OPG_ROOT=$OPG_ROOT
+APPROVAL_ROOT=$OPG_ROOT/approvals
 PATCH_ROOT=$CENTRAL
 OPATCH_ROOT=$CENTRAL/opatch
 RUN_ROOT=$RUN_ROOT
@@ -60,10 +63,10 @@ EOF
   write_mock "$TASK_ROOT/opg_assess_task.sh" "printf 'assess|sid=%s|home=%s|ld=%s|args=%s\\n' \"\$ORACLE_SID\" \"\$ORACLE_HOME\" \"\$LD_LIBRARY_PATH\" \"\$*\" >>'$CASE/routes.log'; exit 10"
   write_mock "$TASK_ROOT/opg_stage_approval.sh" "printf 'stage|%s\\n' \"\$1\" >>'$CASE/routes.log'; exit 0"
   cp "$ROOT/oem-tasks/opg_context_root.sh" "$CONTEXT_HELPER"; chmod 0755 "$CONTEXT_HELPER"
-  write_mock "$CASE/mock-sudo" "[[ \"\$1\" == -n ]] || exit 70; shift; export OPG_CONTEXT_HELPER_TEST_MODE=1 OPG_CONTEXT_HELPER_TEST_ROOT='$CONTEXT_ROOT' OPG_CONTEXT_HELPER_TEST_RUN_ROOT='$RUN_ROOT' OPG_CONTEXT_HELPER_TEST_GROUP='$(id -gn)'; exec \"\$@\""
+  write_mock "$CASE/mock-sudo" "[[ \"\$1\" == -n ]] || exit 70; shift; export OPG_CONTEXT_HELPER_TEST_MODE=1 OPG_CONTEXT_HELPER_TEST_ROOT='$CONTEXT_ROOT' OPG_CONTEXT_HELPER_TEST_RUN_ROOT='$RUN_ROOT' OPG_CONTEXT_HELPER_TEST_APPROVAL_ROOT='$OPG_ROOT/approvals' OPG_CONTEXT_HELPER_TEST_GROUP='$(id -gn)'; exec \"\$@\""
   write_mock "$PROJECT/patchGD_guard.sh" "printf 'core|%s\\n' \"\$*\" >>'$CASE/routes.log'; exit \"\$(cat '$CASE/core.rc')\""
   write_mock "$PROJECT/lib/opg_result_summary_v1.1.sh" "printf 'summary|%s|%s\\n' \"\$1\" \"\$2\" >>'$CASE/summary.log'; exit 0"
-  write_mock "$PROJECT/oem_apply.sh" "printf 'apply|sid=%s|home=%s|args=%s\\n' \"\$ORACLE_SID\" \"\$ORACLE_HOME\" \"\$*\" >>'$CASE/routes.log'; [[ -r \"\$2\" && -r \"\$3\" ]] || { printf 'OPG_RESULT|status=BLOCKED|phase=APPROVAL|exit_code=20\\n'; exit 20; }; exit 0"
+  write_mock "$PROJECT/oem_apply.sh" "printf 'apply|sid=%s|home=%s|args=%s\\n' \"\$ORACLE_SID\" \"\$ORACLE_HOME\" \"\$*\" >>'$CASE/routes.log'; [[ -r \"\$2\" && -r \"\$3\" ]] || { printf 'OPG_RESULT|status=BLOCKED|phase=APPROVAL|exit_code=20\\n'; exit 20; }; state_host=svtest.example; [[ ! -f '$CASE/mock-apply-wrong-host' ]] || state_host=wrong.example; printf '{\"schema_version\":1,\"run_id\":\"%s\",\"timestamp\":\"2026-08-24T10:30:00Z\",\"hostname\":\"%s\",\"target_oracle_home\":\"$HOME_DIR\",\"sid\":\"\",\"state\":\"12_COMPLETE\",\"phase\":\"COMPLETE\",\"exit_code\":0}\\n' \"\$1\" \"\$state_host\" >'$RUN_ROOT/'\"\$1\"'/execution_state.json'; exit 0"
   write_mock "$PROJECT/oem_approval_check.sh" "printf 'approval-check|%s\\n' \"\$*\" >>'$CASE/routes.log'; exit 0"
   export OPG_WRAPPER_TEST_MODE=1 OPG_TEST_ROOT="$CASE" OPG_TEST_OPG_ROOT="$OPG_ROOT" OPG_TEST_CONFIG="$CONFIG" OPG_TEST_CONTEXT_ROOT="$CONTEXT_ROOT"
   export OPG_TEST_TASK_ROOT="$TASK_ROOT" OPG_TEST_PROJECT_ROOT="$PROJECT" OPG_TEST_DISCOVERY_FIXTURE="$CASE/discovery.psv"
@@ -84,6 +87,23 @@ write_state() {
   local run=$1 state=$2 phase=${3:-TEST}
   mkdir -p "$RUN_ROOT/$run"
   printf '{"state":"%s","phase":"%s"}\n' "$state" "$phase" >"$RUN_ROOT/$run/execution_state.json"
+}
+
+prepare_approval_run() {
+  local run=$1 dir=$OPG_ROOT/approvals/$1 manifest_hash
+  mkdir -p "$dir"
+  chmod 0750 "$dir"
+  cat >"$dir/patch_manifest.json" <<EOF
+{"schema_version":1,"run_id":"$run","hostname":"svtest.example","target_oracle_home":"$HOME_DIR","month":"JUL2026"}
+EOF
+  manifest_hash=$(sha256sum "$dir/patch_manifest.json" | awk '{print $1}')
+  cat >"$dir/approval.json" <<EOF
+{"approved":true,"manifest_sha256":"$manifest_hash","hostname":"svtest.example","target_oracle_home":"$HOME_DIR","expires_epoch":2000000000,"manifest_signature_file":"$dir/patch_manifest.sig","approval_signature_file":"$dir/approval.sig"}
+EOF
+  printf 'READY|ASSESSMENT_READY|ready|evidence\n' >"$dir/findings.psv"
+  printf 'manifest-signature\n' >"$dir/patch_manifest.sig"
+  printf 'approval-signature\n' >"$dir/approval.sig"
+  chmod 0440 "$dir/patch_manifest.json" "$dir/approval.json" "$dir/findings.psv" "$dir/patch_manifest.sig" "$dir/approval.sig"
 }
 
 enable_pilot07_media() {
@@ -140,7 +160,10 @@ setup_case windowroute; run_wrapper create-window; rc=$?; run=$(json_get "$CONTE
 setup_case assessroute; run_wrapper assess; rc=$?; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); grep -q "^assess|sid=DB1|home=${HOME_DIR}|ld=${HOME_DIR}/lib:/lib:/usr/lib|args=${HOME_DIR} ${run} 39472050 39222882 JUL2026 12.2.0.1.52 p6880880_190000_Linux-x86-64.zip ${CONFIG}$" "$CASE/routes.log" || rc=99; record 'assess parameteropbouw' 10 "$rc"
 setup_case planroute; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 02_ASSESS_OK ASSESS; printf '42\n' >"$CASE/core.rc"; run_wrapper plan; rc=$?; grep -q "^core|plan --non-interactive --run-id ${run} --config ${CONFIG}$" "$CASE/routes.log" || rc=99; grep -q "^summary|${RUN_ROOT}/${run}|PLAN$" "$CASE/summary.log" || rc=98; record 'plan routing en exit-code preservation' 42 "$rc"
 setup_case stageroute; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; run_wrapper stage; rc=$?; grep -q "^stage|${run}$" "$CASE/routes.log" || rc=99; record 'stage routing' 0 "$rc"
-setup_case applyroute; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; mkdir -p "$OPG_ROOT/approvals/$run"; printf '{}\n' >"$OPG_ROOT/approvals/$run/patch_manifest.json"; printf '{}\n' >"$OPG_ROOT/approvals/$run/approval.json"; run_wrapper apply; rc=$?; grep -q "^apply|sid=DB1|home=${HOME_DIR}|args=${run} ${OPG_ROOT}/approvals/${run}/patch_manifest.json ${OPG_ROOT}/approvals/${run}/approval.json ${CONFIG}$" "$CASE/routes.log" || rc=99; record 'apply manifest/token path derivation' 0 "$rc"
+setup_case applyroute; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; prepare_approval_run "$run"; run_wrapper apply; rc=$?; grep -q "^apply|sid=DB1|home=${HOME_DIR}|args=${run} ${OPG_ROOT}/approvals/${run}/patch_manifest.json ${OPG_ROOT}/approvals/${run}/approval.json ${CONFIG}$" "$CASE/routes.log" || rc=99; [[ -f "$OPG_ROOT/approvals/$run/completion.json" && $(json_get "$OPG_ROOT/approvals/$run/completion.json" run_id) == "$run" ]] || rc=98; grep -q "OPG_COMPLETION_PUBLISH|run_id=${run}|status=SUCCESS" "$OUT" || rc=97; record 'succesvolle apply publiceert rungebonden completion' 0 "$rc"
+
+setup_case applypublishfail; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; prepare_approval_run "$run"; touch "$CASE/mock-apply-wrong-host"; run_wrapper apply; rc=$?; [[ $(json_get "$RUN_ROOT/$run/execution_state.json" state) == 12_COMPLETE && ! -e "$OPG_ROOT/approvals/$run/completion.json" ]] || rc=99; grep -q "OPG_COMPLETION_PUBLISH|run_id=${run}|status=FAILED" "$OUT" || rc=98; grep -q 'OPG_OEM_RESULT|status=UNKNOWN|phase=PUBLISH_COMPLETION|exit_code=30' "$OUT" || rc=97; record 'publicatiefout is zichtbaar zonder COMPLETE-state terug te draaien' 30 "$rc"
+sed -i 's/wrong[.]example/svtest.example/' "$RUN_ROOT/$run/execution_state.json"; run_wrapper publish-completion; rc=$?; [[ -f "$OPG_ROOT/approvals/$run/completion.json" ]] || rc=99; grep -q "OPG_COMPLETION_PUBLISH|run_id=${run}|status=SUCCESS" "$OUT" || rc=98; record 'publish-completion retry finaliseert bestaande COMPLETE-run' 0 "$rc"
 
 # 19. Ontbrekende approval wordt door bestaande apply-wrapper/core afgewezen.
 setup_case noapproval; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; run_wrapper apply; rc=$?; grep -q '^apply|' "$CASE/routes.log" || rc=99; grep -q 'status=BLOCKED|phase=APPROVAL|exit_code=20' "$OUT" || rc=98; record 'approval ontbreekt: bestaande apply-route faalt veilig' 20 "$rc"
@@ -179,6 +202,14 @@ setup_case p07media; enable_pilot07_media; run_wrapper prepare >/dev/null; run_w
 setup_case p07writable; enable_pilot07_media; chmod 0775 "$MEDIA_HELPER"; run_wrapper prepare >/dev/null; run_wrapper stage-media; record 'writable media-helper wordt geweigerd' 30 $?
 setup_case p07symlink; enable_pilot07_media; mv "$MEDIA_HELPER" "$LOCAL_SBIN/opg_media_stage_root.real"; ln -s opg_media_stage_root.real "$MEDIA_HELPER"; run_wrapper prepare >/dev/null; run_wrapper stage-media; record 'symlink media-helper wordt geweigerd' 30 $?
 setup_case p07missing; enable_pilot07_media; rm "$MEDIA_HELPER"; run_wrapper prepare >/dev/null; run_wrapper stage-media; record 'ontbrekende media-helper wordt fail-closed geweigerd' 30 $?
+
+setup_case configpaths; unset OPG_TEST_OPG_ROOT OPG_TEST_APPROVAL_ROOT; run_wrapper prepare; rc=$?; [[ -f "$CONTEXT_ROOT/current_run.json" ]] || rc=99; record 'OEM-wrapper leest OPG_ROOT en APPROVAL_ROOT uit config' 0 "$rc"
+setup_case relativeopg; sed -i "s|^OPG_ROOT=.*|OPG_ROOT=relative/oracle-patch-guard|" "$CONFIG"; unset OPG_TEST_OPG_ROOT OPG_TEST_APPROVAL_ROOT; run_wrapper prepare; record 'OEM-wrapper weigert relatieve OPG_ROOT' 20 $?
+setup_case missingapprovalroot; sed -i '/^APPROVAL_ROOT=/d' "$CONFIG"; unset OPG_TEST_OPG_ROOT OPG_TEST_APPROVAL_ROOT; run_wrapper prepare; record 'OEM-wrapper faalt bij ontbrekende APPROVAL_ROOT' 20 $?
+
+runtime_path_hits=0
+grep -F '/mnt/patch-share/oracle-patch-guard' "$ROOT/oem-tasks/opg_context_root.sh" "$ROOT/oem-tasks/opg_oem.sh" "$ROOT/oem-tasks/opg_stage_approval.sh" "$ROOT/oem-tasks/opg_media_stage_root.py" "$ROOT/project/oem_approval_check.sh" "$ROOT/signer/opg_list_pending.sh" >/dev/null 2>&1 && runtime_path_hits=1
+record 'actieve runtime bevat geen generieke Oracle Patch Guard-sharefallback' 0 "$runtime_path_hits"
 
 printf '\nOEM wrapper results: %s passed, %s failed\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

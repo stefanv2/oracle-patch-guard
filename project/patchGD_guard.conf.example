@@ -1,6 +1,8 @@
 # Oracle Patch Guard - voorbeeldconfiguratie
 # Kopieer naar /etc/oracle-patch-guard/patchGD_guard.conf en pas lokaal aan.
 
+OPG_ROOT=/mnt/patch-share/oracle-patch-guard
+APPROVAL_ROOT=/mnt/patch-share/oracle-patch-guard/approvals
 PATCH_ROOT=/mnt/patch-share/oracle-patches
 OPATCH_ROOT=/mnt/patch-share/oracle-patches/opatch
 LOCAL_MEDIA_MODE=required

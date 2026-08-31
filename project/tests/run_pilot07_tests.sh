@@ -99,6 +99,26 @@ os.setxattr(sys.argv[1], 'system.posix_acl_default', data, follow_symlinks=False
 PY
 }
 
+validate_local_with_fake_identity() {
+  local field=$1 value=$2
+  python3 - "$HELPER_ENGINE" "$CASE" "$field" "$value" <<'PY'
+import importlib.machinery, os, sys
+m = importlib.machinery.SourceFileLoader('opg_local_identity', sys.argv[1]).load_module()
+local = m.Path(sys.argv[2]) / 'u01/stage/oracle-patch-guard'
+field = {'owner': 4, 'group': 5}[sys.argv[3]]
+value = int(sys.argv[4])
+real_lstat = m.Path.lstat
+def lstat_with_fake_identity(path):
+    info = real_lstat(path)
+    if path == local:
+        values = list(info); values[field] = value
+        return os.stat_result(values)
+    return info
+m.Path.lstat = lstat_with_fake_identity
+m.validate_local_parents(local)
+PY
+}
+
 setup_case valid; stage; record 'RU/OJVM met alleen patch-ID-directory publiceren READY' 0 $?; verify; record 'gepubliceerde stage verifieert READY' 0 $?
 identity=$(manifest_hash); [[ $(cat "$(local_root)/ready/JUL2026/active_stage") == "$identity" ]]; record 'stage-identiteit is signed-manifest SHA256' 0 $?
 stage_root="$(local_root)/ready/JUL2026/$identity"
@@ -177,21 +197,27 @@ sign_manifest; stage; record 'OPatch ZIP met extra rootbestand wordt geblokkeerd
 
 setup_case u01owner; stage >/dev/null
 python3 - "$HELPER_ENGINE" "$CASE" <<'PY'
-import importlib.machinery, os, sys
+import importlib.machinery, os, stat, sys
 m = importlib.machinery.SourceFileLoader('opg_u01_owner', sys.argv[1]).load_module()
 u01 = m.Path(sys.argv[2]) / 'u01'; real_lstat = m.Path.lstat
 def lstat_with_oracle_owned_u01(path):
     info = real_lstat(path)
     if path == u01:
-        values = list(info); values[4] = 424243
+        values = list(info)
+        values[0] = stat.S_IFDIR | 0o775
+        values[4] = 424243
+        values[5] = 424244
         return os.stat_result(values)
     return info
 m.Path.lstat = lstat_with_oracle_owned_u01
 m.validate_local_parents(u01 / 'stage/oracle-patch-guard')
 PY
-record '/u01 mag oracle-owned 0755 zijn boven de trusted anchor' 0 $?
+record '/u01 oracle:oinstall 0775 valt buiten de trusted stage-boundary' 0 $?
 setup_case anchorowner; stage >/dev/null; export OPG_MEDIA_TEST_EXPECTED_OWNER_UID=424243; verify; record 'niet-root-owned trusted anchor wordt geblokkeerd' 20 $?; unset OPG_MEDIA_TEST_EXPECTED_OWNER_UID
 setup_case anchormode; stage >/dev/null; chmod 0775 "$CASE/u01/stage"; verify; record 'group-writable trusted anchor wordt geblokkeerd' 20 $?
+setup_case rootowner; stage >/dev/null; validate_local_with_fake_identity owner 424243; record 'verkeerde owner lokale stage-root wordt geblokkeerd' 20 $?
+setup_case rootgroup; stage >/dev/null; validate_local_with_fake_identity group 424244; record 'verkeerde group lokale stage-root wordt geblokkeerd' 20 $?
+setup_case rootmode; stage >/dev/null; chmod 0775 "$(local_root)"; verify; record 'verkeerde mode lokale stage-root wordt geblokkeerd' 20 $?
 setup_case anchorsymlink; stage >/dev/null; mv "$CASE/u01/stage" "$CASE/u01/stage.real"; ln -s stage.real "$CASE/u01/stage"; verify; record 'symlink trusted anchor wordt geblokkeerd' 20 $?
 setup_case rootsymlink; stage >/dev/null; mv "$(local_root)" "$CASE/u01/stage/root.real"; ln -s root.real "$(local_root)"; verify; record 'symlink lokale stage-root wordt geblokkeerd' 20 $?
 setup_case anchoracl; stage >/dev/null; add_default_oracle_write_acl "$CASE/u01/stage"; verify; record 'oracle write-ACL op trusted anchor wordt geblokkeerd' 20 $?

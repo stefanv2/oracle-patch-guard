@@ -90,11 +90,29 @@ gewijzigde of onleesbare stage resulteert in `UNKNOWN/BLOCKED` vóór downtime.
 De expliciete volgorde wordt:
 
 ```text
-prepare -> stage-media -> create-window -> assess -> plan -> stage -> approve -> apply
+prepare -> stage-media -> create-window -> assess -> plan -> stage -> approve -> apply -> publish-completion
 ```
 
 `stage-media` is idempotent wanneer exact dezelfde reeds volledig geverifieerde
 stage bestaat. Een conflicterende of incomplete stage wordt nooit hergebruikt.
+
+## Lifecycle completion evidence
+
+De bij `stage` gepubliceerde `execution_state.json` blijft de historische
+`03_PLAN_GENERATED / PLAN`-snapshot. Na een volledig succesvolle APPLY en pas
+nadat de lokale state `12_COMPLETE / COMPLETE / exit_code=0` is, voegt de
+begrensde lokale root-helper afzonderlijk `completion.json` toe aan exact de
+approvaldirectory van dezelfde RUN_ID. Geen bestaand PLAN-, approval- of
+signature-artifact wordt daarbij gewijzigd.
+
+Het completion-artifact bindt de lokale terminale identiteit, completiontijd,
+manifest-SHA256 en approval-SHA256. Het introduceert geen target-side private
+key en is dus target-published evidence binnen de root-helpertrustgrens, geen
+nieuwe cryptografische attestatie. Signer-side COMPLETE vereist daarnaast nog
+steeds volledige verificatie van de bestaande manifest- en approvalsignatures,
+public-keyfingerprint, conditionals en de relatie `completion_epoch <=
+expires_epoch`. Publicatiefalen blijft zichtbaar en retrybaar, maar draait een
+reeds toegepaste patch nooit terug.
 
 ## Scope
 

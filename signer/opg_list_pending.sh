@@ -15,11 +15,11 @@ Zonder optie / --pending  Toon uitsluitend correct gestagede runs zonder approva
 
 PENDING   PLAN is coherent gestaged en bevat nog geen approval-resultaat.
 APPROVED  Manifest en approval zijn volledig gebonden en RSA/SHA256-geverifieerd.
-COMPLETE  APPROVED plus betrouwbare terminale 12_COMPLETE-executionmetadata.
+COMPLETE  Geldige approval plus veilig, hashgebonden completion.json binnen expiry.
 UNKNOWN   Status kan niet betrouwbaar of ondubbelzinnig worden vastgesteld.
 
 Cleanup is bewust niet geïmplementeerd: er is geen afzonderlijk ondertekend
-completionbewijs op de approval-share dat destructieve retentie autoriseert.
+retentiebesluit dat destructieve cleanup autoriseert.
 EOF
 }
 
@@ -51,8 +51,53 @@ if [[ -n "$FILTER_RUN" && ! "$FILTER_RUN" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]
   exit 70
 fi
 
-APPROVAL_ROOT=${OPG_APPROVAL_ROOT:-/mnt/patch-share/oracle-patch-guard/approvals}
-APPROVAL_PUBLIC_KEY=${OPG_APPROVAL_PUBLIC_KEY:-/secure/oracle-patch-guard/keys/approval_public.pem}
+CONFIG_FILE=${OPG_CONFIG_FILE:-/etc/oracle-patch-guard/patchGD_guard.conf}
+
+config_path_value() {
+  local config=$1 wanted=$2 raw key value found='' mode perm
+  [[ -f "$config" && -r "$config" && ! -L "$config" ]] || return 1
+  mode=$(stat -c '%a' "$config" 2>/dev/null) || return 1
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  perm=$((8#$mode)); (( (perm & 0022) == 0 )) || return 1
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    raw=${raw%$'\r'}
+    [[ "$raw" =~ ^[[:space:]]*$ || "$raw" =~ ^[[:space:]]*# ]] && continue
+    [[ "$raw" == *=* ]] || continue
+    key=${raw%%=*}; value=${raw#*=}
+    key=${key#"${key%%[![:space:]]*}"}; key=${key%"${key##*[![:space:]]}"}
+    value=${value#"${value%%[![:space:]]*}"}; value=${value%"${value##*[![:space:]]}"}
+    [[ "$key" == "$wanted" ]] || continue
+    [[ -z "$found" ]] || return 2
+    found=$value
+  done <"$config"
+  [[ -n "$found" && "$found" == /* && "$found" =~ ^/[A-Za-z0-9_./-]+$ && "$found" != *'//'*
+     && "$found" != */../* && "$found" != */./* && "$found" != */.. && "$found" != */. ]] || return 3
+  printf '%s' "$found"
+}
+
+if [[ -n ${OPG_APPROVAL_ROOT:-} ]]; then
+  APPROVAL_ROOT=$OPG_APPROVAL_ROOT
+else
+  APPROVAL_ROOT=$(config_path_value "$CONFIG_FILE" APPROVAL_ROOT) || {
+    printf 'OPG signer UNKNOWN: APPROVAL_ROOT ontbreekt of is ongeldig in %s.\n' "$CONFIG_FILE" >&2
+    exit 30
+  }
+fi
+if [[ -n ${OPG_APPROVAL_PUBLIC_KEY:-} ]]; then
+  APPROVAL_PUBLIC_KEY=$OPG_APPROVAL_PUBLIC_KEY
+else
+  APPROVAL_PUBLIC_KEY=$(config_path_value "$CONFIG_FILE" APPROVAL_PUBLIC_KEY) || {
+    printf 'OPG signer UNKNOWN: APPROVAL_PUBLIC_KEY ontbreekt of is ongeldig in %s.\n' "$CONFIG_FILE" >&2
+    exit 30
+  }
+fi
+for resolved_path in "$APPROVAL_ROOT" "$APPROVAL_PUBLIC_KEY"; do
+  [[ "$resolved_path" == /* && "$resolved_path" =~ ^/[A-Za-z0-9_./-]+$ && "$resolved_path" != *'//'*
+     && "$resolved_path" != */../* && "$resolved_path" != */./* && "$resolved_path" != */.. && "$resolved_path" != */. ]] || {
+    printf 'OPG signer UNKNOWN: relatief of ongeldig runtimepad geweigerd.\n' >&2
+    exit 30
+  }
+done
 
 exec /usr/bin/python3 -I - "$MODE" "$APPROVAL_ROOT" "$APPROVAL_PUBLIC_KEY" "$MACHINE" "$FILTER_RUN" <<'PY'
 import datetime
@@ -72,10 +117,16 @@ root = Path(root_text)
 public_key = Path(key_text)
 safe_run = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 safe_sid = re.compile(r"^[A-Za-z0-9_#$]+$")
+safe_host_label = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 safe_hash = re.compile(r"^[0-9a-f]{64}$")
 safe_iso = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 required_input = ("patch_manifest.json", "assessment.json", "findings.psv", "execution_state.json")
 approval_names = ("approval.json", "patch_manifest.sig", "approval.sig")
+completion_keys = {
+    "schema_version", "run_id", "hostname", "sid", "target_oracle_home",
+    "patch_cycle", "completed_at", "completion_epoch", "state", "phase",
+    "exit_code", "manifest_sha256", "approval_sha256",
+}
 
 
 class InvalidRun(Exception):
@@ -146,20 +197,23 @@ def sanitize(value, fallback="UNKNOWN"):
     return value[:160] if value else fallback
 
 
-def created_epoch(value):
+def iso_epoch(value):
     if not safe_iso.fullmatch(value):
-        return 0
+        return None
     try:
         return int(datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=datetime.timezone.utc).timestamp())
     except ValueError:
-        return 0
+        return None
 
 
 def fallback_sid(run_id, host, cycle):
-    prefix = host + "-"
+    short_host = host.split(".", 1)[0]
+    if not safe_host_label.fullmatch(short_host):
+        return "UNKNOWN"
+    prefix = short_host + "-"
     marker = "-" + cycle + "-OEM-"
-    if not run_id.startswith(prefix) or marker not in run_id:
+    if run_id[:len(prefix)].casefold() != prefix.casefold() or marker not in run_id:
         return "UNKNOWN"
     candidate, suffix = run_id[len(prefix):].rsplit(marker, 1)
     if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z", suffix) or not safe_sid.fullmatch(candidate):
@@ -200,7 +254,7 @@ def verify_signature(signature, payload):
         raise InvalidRun("signature verification failed")
 
 
-def verify_approval(run_dir, manifest, conditions):
+def verify_approval_cryptographically(run_dir, manifest, conditions):
     token_path = run_dir / "approval.json"
     token = read_json(token_path)
     key_bytes = stable_bytes(public_key, 1024 * 1024)
@@ -224,7 +278,39 @@ def verify_approval(run_dir, manifest, conditions):
         raise InvalidRun("approval signature filename mismatch")
     verify_signature(run_dir / "patch_manifest.sig", run_dir / "patch_manifest.json")
     verify_signature(run_dir / "approval.sig", token_path)
-    return expires
+    approval_hash = hashlib.sha256(stable_bytes(token_path)).hexdigest()
+    return expires, manifest_hash, approval_hash
+
+
+def verify_completion(run_dir, run_id, manifest, expires, manifest_hash, approval_hash, expected_sid):
+    completion = read_json(run_dir / "completion.json")
+    if set(completion) != completion_keys:
+        raise InvalidRun("completion.json has incomplete or unknown fields")
+    completed_at = text(completion.get("completed_at"))
+    completion_epoch = integer(completion.get("completion_epoch"))
+    parsed_epoch = iso_epoch(completed_at)
+    sid = text(completion.get("sid"))
+    if (integer(completion.get("schema_version")) != 1 or
+            text(completion.get("run_id")) != run_id or
+            text(completion.get("hostname")) != text(manifest.get("hostname")) or
+            text(completion.get("target_oracle_home")) != text(manifest.get("target_oracle_home")) or
+            text(completion.get("patch_cycle")) != text(manifest.get("month")) or
+            not safe_sid.fullmatch(sid) or
+            (expected_sid != "UNKNOWN" and sid != expected_sid) or
+            text(completion.get("state")) != "12_COMPLETE" or
+            text(completion.get("phase")) != "COMPLETE" or
+            integer(completion.get("exit_code")) != 0 or
+            not safe_hash.fullmatch(text(completion.get("manifest_sha256"))) or
+            text(completion.get("manifest_sha256")) != manifest_hash or
+            not safe_hash.fullmatch(text(completion.get("approval_sha256"))) or
+            text(completion.get("approval_sha256")) != approval_hash):
+        raise InvalidRun("completion binding mismatch")
+    if (completion_epoch is None or completion_epoch < 0 or parsed_epoch is None or
+            completion_epoch != parsed_epoch):
+        raise InvalidRun("completion timestamp is not reliable")
+    if completion_epoch > expires:
+        raise InvalidRun("completion occurred after approval expiry")
+    return sid
 
 
 def inspect_run(entry):
@@ -268,33 +354,35 @@ def inspect_run(entry):
         conditions = parse_findings(run_dir / "findings.psv")
         state_name = text(state.get("state")); phase = text(state.get("phase"))
         plan_state = state_name == "03_PLAN_GENERATED" and phase == "PLAN"
-        complete_state = (state_name == "12_COMPLETE" and phase == "COMPLETE" and
-                          integer(state.get("exit_code")) == 0 and safe_iso.fullmatch(text(state.get("timestamp"))))
-        if not plan_state and not complete_state:
-            raise InvalidRun("execution state is neither PLAN nor COMPLETE")
+        if not plan_state:
+            raise InvalidRun("staged execution state is not immutable PLAN state")
         sid = text(state.get("sid"))
         if not safe_sid.fullmatch(sid):
             sid = fallback_sid(run_id, host, cycle)
         result.update(host=sanitize(host), sid=sanitize(sid), cycle=sanitize(cycle), created=created,
-                      epoch=integer(manifest.get("created_epoch")) or created_epoch(created))
+                      epoch=integer(manifest.get("created_epoch")) or iso_epoch(created) or 0)
         present = [os.path.lexists(run_dir / name) for name in approval_names]
+        completion_present = os.path.lexists(run_dir / "completion.json")
         if any(present):
             if not all(present):
                 raise InvalidRun("incomplete approval artifact set")
-            expires = verify_approval(run_dir, manifest, conditions)
-            if complete_state:
+            expires, manifest_hash, approval_hash = verify_approval_cryptographically(
+                run_dir, manifest, conditions)
+            if completion_present:
+                sid = verify_completion(run_dir, run_id, manifest, expires, manifest_hash, approval_hash, sid)
+                result["sid"] = sanitize(sid)
                 result["status"] = "COMPLETE"
-                result["reason"] = "terminale COMPLETE-state met geldige approval"
-            elif expires >= int(time.time()):
+                result["reason"] = "veilig completion-artifact met geldige historische approval"
+            else:
+                if expires < int(time.time()):
+                    raise InvalidRun("approval expired")
                 result["status"] = "APPROVED"
                 result["reason"] = "approval cryptografisch geverifieerd"
-            else:
-                raise InvalidRun("approval expired")
-        elif plan_state:
+        elif not completion_present:
             result["status"] = "PENDING"
             result["reason"] = "READY FOR APPROVAL"
         else:
-            raise InvalidRun("COMPLETE has no cryptographically verified approval")
+            raise InvalidRun("completion exists without cryptographically verified approval")
     except (InvalidRun, OSError, ValueError, subprocess.SubprocessError) as exc:
         result["status"] = "UNKNOWN"
         result["reason"] = sanitize(str(exc), "status is niet betrouwbaar vastgesteld")

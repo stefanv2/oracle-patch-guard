@@ -13,7 +13,7 @@
 #   /var/log/oracle-patch-guard/<RUN_ID>/
 #
 # Doel:
-#   /mnt/patch-share/oracle-patch-guard/approvals/<RUN_ID>/
+#   <APPROVAL_ROOT>/<RUN_ID>/ (uit patchGD_guard.conf)
 #
 # Dit script:
 #   - approveert NIETS
@@ -28,8 +28,30 @@ IFS=$'\n\t'
 
 SCRIPT_NAME=${0##*/}
 
-RUN_ROOT=${OPG_STAGE_RUN_ROOT:-/var/log/oracle-patch-guard}
-APPROVAL_ROOT=${OPG_STAGE_APPROVAL_ROOT:-/mnt/patch-share/oracle-patch-guard/approvals}
+CONFIG_FILE=${OPG_CONFIG_FILE:-/etc/oracle-patch-guard/patchGD_guard.conf}
+
+config_path_value() {
+    local wanted=$1 raw key value found='' mode perm
+    [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] || return 1
+    mode=$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null) || return 1
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+    perm=$((8#$mode)); (( (perm & 0022) == 0 )) || return 1
+    while IFS= read -r raw || [[ -n "$raw" ]]; do
+        raw=${raw%$'\r'}
+        [[ "$raw" =~ ^[[:space:]]*$ || "$raw" =~ ^[[:space:]]*# ]] && continue
+        [[ "$raw" == *=* ]] || continue
+        key=${raw%%=*}; value=${raw#*=}
+        key=${key#"${key%%[![:space:]]*}"}; key=${key%"${key##*[![:space:]]}"}
+        value=${value#"${value%%[![:space:]]*}"}; value=${value%"${value##*[![:space:]]}"}
+        [[ "$key" == "$wanted" ]] || continue
+        [[ -z "$found" ]] || return 2
+        found=$value
+    done <"$CONFIG_FILE"
+    [[ -n "$found" && "$found" == /* && "$found" =~ ^/[A-Za-z0-9_./-]+$ && "$found" != *'//'*
+       && "$found" != */../* && "$found" != */./* && "$found" != */.. && "$found" != */. ]] || return 3
+    printf '%s' "$found"
+}
+
 APPROVAL_DIRECTORY_OWNER=${OPG_APPROVAL_DIRECTORY_OWNER:-root}
 APPROVAL_GROUP=${OPG_APPROVAL_GROUP:-oinstall}
 SUDO_BIN=${OPG_STAGE_SUDO_BIN:-/usr/bin/sudo}
@@ -143,6 +165,9 @@ RUN_ID=$1
     error "Unsafe RUN_ID: $RUN_ID"
     exit "$EXIT_USAGE"
 }
+
+if [[ -n ${OPG_STAGE_RUN_ROOT:-} ]]; then RUN_ROOT=$OPG_STAGE_RUN_ROOT; else RUN_ROOT=$(config_path_value RUN_ROOT) || { printf 'ERROR: RUN_ROOT ontbreekt of is ongeldig in %s\n' "$CONFIG_FILE" >&2; exit "$EXIT_ERROR"; }; fi
+if [[ -n ${OPG_STAGE_APPROVAL_ROOT:-} ]]; then APPROVAL_ROOT=$OPG_STAGE_APPROVAL_ROOT; else APPROVAL_ROOT=$(config_path_value APPROVAL_ROOT) || { printf 'ERROR: APPROVAL_ROOT ontbreekt of is ongeldig in %s\n' "$CONFIG_FILE" >&2; exit "$EXIT_ERROR"; }; fi
 
 command -v python3 >/dev/null 2>&1 || {
     error "python3 ontbreekt."

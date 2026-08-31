@@ -186,7 +186,7 @@ for run_id in "${READY_RUNS[@]}"; do
     continue
   fi
 
-  "$APPROVE_RUN" "$run_id" </dev/null
+  printf 'APPROVE\n' | "$APPROVE_RUN" "$run_id"
   approve_rc=$?
   if (( approve_rc != 0 )); then
     failed_count=$((failed_count + 1))

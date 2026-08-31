@@ -23,21 +23,51 @@ fail() {
 }
 
 usage() {
-  printf 'Gebruik: %s {prepare|stage-media|create-window|assess|plan|stage|apply|approval-check|show-context|new-run}\n' "$SCRIPT_NAME" >&2
+  printf 'Gebruik: %s {prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run}\n' "$SCRIPT_NAME" >&2
   exit "$EXIT_USAGE"
 }
 
 case "$COMMAND" in
-  prepare|stage-media|create-window|assess|plan|stage|apply|approval-check|show-context|new-run) ;;
+  prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run) ;;
   *) usage ;;
 esac
+
+trim() {
+  local value=$1
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+config_path_value() {
+  local config=$1 wanted=$2 raw key value found='' line_no=0 mode perm owner
+  [[ -f "$config" && -r "$config" && ! -L "$config" ]] || fail "$EXIT_BLOCKED" CONFIG "Centrale Patch Guard-config ontbreekt of is onveilig: ${config}"
+  mode=$(stat -c '%a' "$config" 2>/dev/null) || fail "$EXIT_UNKNOWN" CONFIG 'Configmode kon niet worden bepaald.'
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || fail "$EXIT_UNKNOWN" CONFIG 'Configmode is ongeldig.'
+  perm=$((8#$mode)); (( (perm & 0022) == 0 )) || fail "$EXIT_BLOCKED" CONFIG 'Centrale config is group/world-writable.'
+  if [[ ${TEST_MODE:-false} != true ]]; then owner=$(stat -c '%U' "$config" 2>/dev/null) || fail "$EXIT_UNKNOWN" CONFIG 'Configowner kon niet worden bepaald.'; [[ "$owner" == root ]] || fail "$EXIT_BLOCKED" CONFIG 'Live config moet root-owned zijn.'; fi
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    line_no=$((line_no + 1)); raw=${raw%$'\r'}; raw=$(trim "$raw")
+    [[ -n "$raw" && ${raw:0:1} != '#' ]] || continue
+    [[ "$raw" == *=* ]] || continue
+    key=$(trim "${raw%%=*}"); value=$(trim "${raw#*=}")
+    [[ "$key" == "$wanted" ]] || continue
+    [[ -z "$found" ]] || fail "$EXIT_BLOCKED" CONFIG "Dubbele sleutel ${wanted} in ${config}."
+    found=$value
+  done <"$config"
+  [[ -n "$found" ]] || fail "$EXIT_BLOCKED" CONFIG "Verplichte configsleutel ontbreekt of is leeg: ${wanted}"
+  [[ "$found" == /* && "$found" =~ ^/[A-Za-z0-9_./-]+$ && "$found" != *'//'*
+     && "$found" != */../* && "$found" != */./* && "$found" != */.. && "$found" != */. ]] || fail "$EXIT_BLOCKED" CONFIG "Ongeldig absoluut pad voor ${wanted}."
+  printf '%s' "$found"
+}
 
 TEST_MODE=false
 if [[ ${OPG_WRAPPER_TEST_MODE:-0} == 1 ]]; then
   TEST_MODE=true
   [[ ${OPG_TEST_ROOT:-} == /tmp/opg-oem-wrapper-tests.* ]] || fail "$EXIT_USAGE" INIT 'Ongeldige testroot.'
-  OPG_ROOT=${OPG_TEST_OPG_ROOT:-${OPG_TEST_ROOT}/central/oracle-patch-guard}
   CONFIG_FILE=${OPG_TEST_CONFIG:-${OPG_TEST_ROOT}/etc/patchGD_guard.conf}
+  if [[ -n ${OPG_TEST_OPG_ROOT:-} ]]; then OPG_ROOT=$OPG_TEST_OPG_ROOT; else OPG_ROOT=$(config_path_value "$CONFIG_FILE" OPG_ROOT) || exit $?; fi
+  if [[ -n ${OPG_TEST_APPROVAL_ROOT:-} ]]; then APPROVAL_ROOT=$OPG_TEST_APPROVAL_ROOT; elif [[ -n ${OPG_TEST_OPG_ROOT:-} ]]; then APPROVAL_ROOT=${OPG_ROOT}/approvals; else APPROVAL_ROOT=$(config_path_value "$CONFIG_FILE" APPROVAL_ROOT) || exit $?; fi
   CONTEXT_ROOT=${OPG_TEST_CONTEXT_ROOT:-${OPG_TEST_ROOT}/var/lib/oracle-patch-guard}
   TASK_ROOT=${OPG_TEST_TASK_ROOT:-${OPG_TEST_ROOT}/oem-tasks}
   PROJECT_ROOT=${OPG_TEST_PROJECT_ROOT:-${OPG_TEST_ROOT}/current/project}
@@ -54,8 +84,9 @@ if [[ ${OPG_WRAPPER_TEST_MODE:-0} == 1 ]]; then
   MEDIA_STAGE_HELPER_GROUP=${OPG_TEST_MEDIA_STAGE_HELPER_GROUP:-$(id -gn)}
   MEDIA_STAGE_HELPER_PARENT_STOP=${OPG_TEST_MEDIA_STAGE_HELPER_PARENT_STOP:-${OPG_TEST_ROOT}/local-sbin}
 else
-  OPG_ROOT=/mnt/patch-share/oracle-patch-guard
   CONFIG_FILE=/etc/oracle-patch-guard/patchGD_guard.conf
+  OPG_ROOT=$(config_path_value "$CONFIG_FILE" OPG_ROOT) || exit $?
+  APPROVAL_ROOT=$(config_path_value "$CONFIG_FILE" APPROVAL_ROOT) || exit $?
   CONTEXT_ROOT=/var/lib/oracle-patch-guard
   TASK_ROOT=${OPG_ROOT}/oem-tasks
   PROJECT_ROOT=${OPG_ROOT}/current/project
@@ -73,6 +104,11 @@ else
   MEDIA_STAGE_HELPER_PARENT_STOP=/
 fi
 
+for deployment_path in "$OPG_ROOT" "$APPROVAL_ROOT"; do
+  [[ "$deployment_path" == /* && "$deployment_path" =~ ^/[A-Za-z0-9_./-]+$ && "$deployment_path" != *'//'*
+     && "$deployment_path" != */../* && "$deployment_path" != */./* && "$deployment_path" != */.. && "$deployment_path" != */. ]] || fail "$EXIT_BLOCKED" CONFIG 'Relatief of ongeldig deploymentpad geweigerd.'
+done
+
 CONTEXT_FILE=${CONTEXT_ROOT}/current_run.json
 ACTIVE_CYCLE_FILE=${OPG_ROOT}/config/active_cycle
 PREPARE_SCRIPT=${TASK_ROOT}/opg_prepare_host.sh
@@ -84,18 +120,11 @@ APPLY_SCRIPT=${PROJECT_ROOT}/oem_apply.sh
 APPROVAL_CHECK_SCRIPT=${PROJECT_ROOT}/oem_approval_check.sh
 SUMMARY_SCRIPT=${PROJECT_ROOT}/lib/opg_result_summary_v1.1.sh
 
-PATCH_ROOT=/mnt/patch-share/oracle-patches
-OPATCH_ROOT=${PATCH_ROOT}/opatch
+PATCH_ROOT=
+OPATCH_ROOT=
 RUN_ROOT=/var/log/oracle-patch-guard
 ORATAB_FILE=/etc/oratab
 LOCAL_MEDIA_MODE=disabled
-
-trim() {
-  local value=$1
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  printf '%s' "$value"
-}
 
 require_safe_file() {
   local path=$1 description=$2 mode perm
@@ -131,6 +160,9 @@ load_local_paths() {
       *) ;;
     esac
   done <"$CONFIG_FILE"
+  for key in PATCH_ROOT OPATCH_ROOT RUN_ROOT; do
+    [[ -n ${seen[$key]+x} ]] || fail "$EXIT_BLOCKED" CONFIG "Verplichte configsleutel ontbreekt: ${key}."
+  done
   if [[ "$TEST_MODE" != true && "$LOCAL_MEDIA_MODE" != required ]]; then fail "$EXIT_BLOCKED" CONFIG 'Pilot07 productie vereist LOCAL_MEDIA_MODE=required; share-fallback is geweigerd.'; fi
 }
 
@@ -408,9 +440,23 @@ sudo_context_helper() {
   "$SUDO_BIN" -n "$CONTEXT_HELPER" "$@"
 }
 
+publish_completion_evidence() {
+  local rc=0
+  require_context_helper
+  sudo_context_helper publish-completion "$RUN_ID" || rc=$?
+  if (( rc != 0 )); then
+    printf 'OPG_COMPLETION_PUBLISH|run_id=%s|status=FAILED|reason=helper_exit_%s\n' "$RUN_ID" "$rc" >&2
+    printf 'OPG_OEM_RESULT|status=UNKNOWN|phase=PUBLISH_COMPLETION|exit_code=%s|run_id=%s\n' "$EXIT_UNKNOWN" "$RUN_ID"
+    return "$EXIT_UNKNOWN"
+  fi
+  printf 'OPG_COMPLETION_PUBLISH|run_id=%s|status=SUCCESS\n' "$RUN_ID"
+  return 0
+}
+
 clean_oracle_env() {
   /usr/bin/env -i HOME="${HOME:-/tmp}" USER="${USER:-unknown}" LOGNAME="${LOGNAME:-${USER:-unknown}}" LANG=C \
-    ORACLE_HOME="$ORACLE_HOME" ORACLE_SID="$ORACLE_SID" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$SAFE_PATH" "$@"
+    ORACLE_HOME="$ORACLE_HOME" ORACLE_SID="$ORACLE_SID" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$SAFE_PATH" \
+    OPG_ROOT="$OPG_ROOT" OPG_APPROVAL_ROOT="$APPROVAL_ROOT" OPG_CONFIG_FILE="$CONFIG_FILE" "$@"
 }
 
 archive_context_for_new_run() {
@@ -462,11 +508,18 @@ case "$COMMAND" in
     ;;
   stage)
     load_or_create_context false; require_state 03_PLAN_GENERATED; require_script "$STAGE_SCRIPT" stage
-    /bin/bash "$STAGE_SCRIPT" "$RUN_ID"
+    OPG_STAGE_APPROVAL_ROOT="$APPROVAL_ROOT" /bin/bash "$STAGE_SCRIPT" "$RUN_ID"
     ;;
   apply)
     load_or_create_context false; require_state 03_PLAN_GENERATED; require_script "$APPLY_SCRIPT" apply
-    clean_oracle_env /bin/bash "$APPLY_SCRIPT" "$RUN_ID" "${OPG_ROOT}/approvals/${RUN_ID}/patch_manifest.json" "${OPG_ROOT}/approvals/${RUN_ID}/approval.json" "$CONFIG_FILE"
+    rc=0
+    clean_oracle_env /bin/bash "$APPLY_SCRIPT" "$RUN_ID" "${APPROVAL_ROOT}/${RUN_ID}/patch_manifest.json" "${APPROVAL_ROOT}/${RUN_ID}/approval.json" "$CONFIG_FILE" || rc=$?
+    (( rc == 0 )) || exit "$rc"
+    publish_completion_evidence
+    ;;
+  publish-completion)
+    load_or_create_context false; require_state 12_COMPLETE
+    publish_completion_evidence
     ;;
   approval-check)
     load_or_create_context false; require_state 03_PLAN_GENERATED; require_script "$APPROVAL_CHECK_SCRIPT" approval-check

@@ -1,7 +1,8 @@
 Cmnd_Alias OPG_CONTEXT = /usr/local/sbin/opg_context_root.sh prepare-root, \
                          /usr/local/sbin/opg_context_root.sh publish, \
                          /usr/local/sbin/opg_context_root.sh rotate *, \
-                         /usr/local/sbin/opg_context_root.sh publish-approval-stage *
+                         /usr/local/sbin/opg_context_root.sh publish-approval-stage *, \
+                         /usr/local/sbin/opg_context_root.sh publish-completion *
 
 oracle ALL=(root) NOPASSWD: OPG_CONTEXT
 

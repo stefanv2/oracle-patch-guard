@@ -72,8 +72,8 @@ while (( $# > 0 )); do
 done
 
 # Veilige ingebouwde configuratie; lokale config overschrijft deze waarden.
-PATCH_ROOT=/mnt/patch-share/oracle-patches
-OPATCH_ROOT=/mnt/patch-share/oracle-patches/opatch
+PATCH_ROOT=
+OPATCH_ROOT=
 RUN_ROOT=/var/log/oracle-patch-guard
 LOCK_ROOT=/var/lock/oracle-patch-guard
 ORATAB_FILE=/etc/oratab
@@ -145,6 +145,15 @@ elif [[ "$CONFIG_FILE" != /etc/oracle-patch-guard/patchGD_guard.conf || ${OPG_TE
   printf 'Configuratiebestand niet leesbaar: %s\n' "$CONFIG_FILE" >&2
   exit "$EXIT_INVALID_PARAMS"
 fi
+for required_path_setting in PATCH_ROOT OPATCH_ROOT RUN_ROOT LOCK_ROOT; do
+  required_path_value=${!required_path_setting:-}
+  [[ "$required_path_value" == /* && "$required_path_value" =~ ^/[A-Za-z0-9_./-]+$ &&
+     "$required_path_value" != *'//'* && "$required_path_value" != */../* &&
+     "$required_path_value" != */./* && "$required_path_value" != */.. && "$required_path_value" != */. ]] || {
+    printf 'Ontbrekend of ongeldig absoluut runtimepad voor %s.\n' "$required_path_setting" >&2
+    exit "$EXIT_INVALID_PARAMS"
+  }
+done
 for numeric_setting in INTEGRITY_CHECK_TIMEOUT_SECONDS LISTENER_STOP_TIMEOUT_SECONDS LISTENER_READY_TIMEOUT_SECONDS LISTENER_POLL_SECONDS; do
   [[ ${!numeric_setting:-} =~ ^[1-9][0-9]*$ ]] || { printf 'Ongeldige positieve integer voor %s.\n' "$numeric_setting" >&2; exit "$EXIT_INVALID_PARAMS"; }
 done
@@ -318,6 +327,41 @@ whenever sqlerror exit failure rollback
 alter system register;
 exit success
 SQL
+  opg_atomic_write "${RUN_DIR}/datapatch_containers.sql" <<'SQL'
+set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
+whenever sqlerror exit failure rollback
+select 'DATAPATCH_CONTAINER|'||con_id||'|'||name||'|'||open_mode
+from v$containers where con_id = 1 or con_id > 2 order by con_id;
+exit success
+SQL
+  opg_atomic_write "${RUN_DIR}/datapatch_sqlpatch_cdb.sql" <<SQL
+set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
+whenever sqlerror exit failure rollback
+select 'CDB_SQLPATCH|'||r.con_id||'|'||c.name||'|'||r.patch_id||'|'||r.status||'|'||
+       to_char(r.action_time,'YYYYMMDDHH24MISSFF6')
+from cdb_registry_sqlpatch r join v\$containers c on c.con_id=r.con_id
+where r.patch_id in (${DB_PATCH},${OJVM_PATCH})
+  and (r.con_id = 1 or r.con_id > 2)
+  and r.action_time = (
+    select max(x.action_time) from cdb_registry_sqlpatch x
+    where x.con_id=r.con_id and x.patch_id=r.patch_id
+  )
+order by r.con_id, r.patch_id;
+exit success
+SQL
+  opg_atomic_write "${RUN_DIR}/datapatch_sqlpatch_noncdb.sql" <<SQL
+set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
+whenever sqlerror exit failure rollback
+select 'CDB_SQLPATCH|0|NONCDB|'||r.patch_id||'|'||r.status||'|'||
+       to_char(r.action_time,'YYYYMMDDHH24MISSFF6')
+from dba_registry_sqlpatch r
+where r.patch_id in (${DB_PATCH},${OJVM_PATCH})
+  and r.action_time = (
+    select max(x.action_time) from dba_registry_sqlpatch x where x.patch_id=r.patch_id
+  )
+order by r.patch_id;
+exit success
+SQL
   opg_atomic_write "${RUN_DIR}/validate.sql" <<SQL
 set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
 whenever sqlerror exit failure rollback
@@ -332,10 +376,16 @@ select 'DB|'||name||'|'||database_role||'|'||open_mode||'|'||cdb from v\$databas
 select 'PDB|'||listagg(name||'='||open_mode, ';') within group(order by con_id) from v\$pdbs where con_id > 2;
 select 'SERVICES|'||listagg(name, ';') within group(order by name) from v\$active_services where name not like 'SYS$%';
 select 'CDB_REGISTRY|'||con_id||'|'||comp_id||'|'||status from cdb_registry order by con_id, comp_id;
-select 'CDB_SQLPATCH|'||patch_id||'|'||status from (
-  select con_id,patch_id,status,row_number() over(partition by con_id,patch_id order by action_time desc) rn
-  from cdb_registry_sqlpatch where patch_id in (${DB_PATCH},${OJVM_PATCH})
-) where rn=1 order by con_id, patch_id;
+select 'CDB_SQLPATCH|'||r.con_id||'|'||c.name||'|'||r.patch_id||'|'||r.status||'|'||
+       to_char(r.action_time,'YYYYMMDDHH24MISSFF6')
+from cdb_registry_sqlpatch r join v\$containers c on c.con_id=r.con_id
+where r.patch_id in (${DB_PATCH},${OJVM_PATCH})
+  and (r.con_id = 1 or r.con_id > 2)
+  and r.action_time = (
+    select max(x.action_time) from cdb_registry_sqlpatch x
+    where x.con_id=r.con_id and x.patch_id=r.patch_id
+  )
+order by r.con_id, r.patch_id;
 exit success
 SQL
   opg_atomic_write "${RUN_DIR}/utlrp_wrapper.sql" <<'SQL'
@@ -1723,28 +1773,258 @@ verify_database_open_state() {
     grep -Fxq 'STARTUP_STATE|OPEN|ACTIVE|READ WRITE' "$output"
 }
 
-restore_pdb_state() {
-  local sid=$1 states entry pdb mode sql_file output
+prepare_pdbs_for_datapatch() {
+  local sid=$1 cdb states entry pdb mode tag con_id name open_mode extra
+  local oracle_name_regex='^[A-Za-z][A-Za-z0-9_$#]{0,29}$'
+  local before_output after_output sql_file expected_file alter_count=0 expected_count=0 actual_count=0
+  local -a entries=()
+  local -A expected_modes=() current_modes=() container_ids=() seen_ids=() final_modes=() final_ids=()
+  cdb=$(opg_read_original_state "$sid" cdb)
+  expected_file="${RUN_DIR}/datapatch_expected_containers_${sid}.psv"
+  if [[ "$cdb" == NO ]]; then
+    printf '0|NONCDB\n' | opg_atomic_write "$expected_file"
+    return $?
+  fi
+  [[ "$cdb" == YES ]] || return 1
+
   states=$(opg_read_original_state "$sid" pdb_status)
-  [[ -n "$states" ]] || return 0
-  sql_file="${RUN_DIR}/restore_pdb_${sid}.sql"
-  {
-    printf 'whenever sqlerror exit failure rollback\n'
+  if [[ -n "$states" ]]; then
     IFS=';' read -ra entries <<<"$states"
     for entry in "${entries[@]}"; do
       pdb=${entry%%=*}; mode=${entry#*=}
-      [[ "$pdb" =~ ^[A-Za-z][A-Za-z0-9_$#]{0,29}$ ]] || return 1
-      case "$mode" in
-        'READ WRITE') printf 'alter pluggable database "%s" open read write;\n' "$pdb" ;;
-        'READ ONLY') printf 'alter pluggable database "%s" open read only;\n' "$pdb" ;;
-        MOUNTED) printf 'alter pluggable database "%s" close immediate;\n' "$pdb" ;;
+      [[ "$pdb" =~ $oracle_name_regex && "$pdb" != "PDB\$SEED" ]] || return 1
+      [[ -z ${expected_modes[$pdb]+x} ]] || return 1
+      case "$mode" in 'READ WRITE'|'READ ONLY'|MOUNTED) ;; *) return 1 ;; esac
+      expected_modes[$pdb]=$mode
+      expected_count=$((expected_count + 1))
+    done
+  fi
+
+  before_output="${RUN_DIR}/datapatch_containers_before_${sid}.log"
+  opg_sqlplus "$sid" "datapatch_containers_before_${sid}" "${RUN_DIR}/datapatch_containers.sql" "$before_output" &&
+    opg_verify_command_success_text "$before_output" || return 1
+  while IFS='|' read -r tag con_id name open_mode extra; do
+    [[ "$tag" == DATAPATCH_CONTAINER && -z "$extra" ]] || return 1
+    [[ "$con_id" =~ ^[0-9]+$ && "$name" =~ $oracle_name_regex ]] || return 1
+    [[ "$open_mode" == 'READ WRITE' || "$open_mode" == 'READ ONLY' || "$open_mode" == MOUNTED ]] || return 1
+    [[ -z ${seen_ids[$con_id]+x} && -z ${current_modes[$name]+x} ]] || return 1
+    if [[ "$con_id" == 1 ]]; then
+      [[ "$name" == "CDB\$ROOT" && "$open_mode" == 'READ WRITE' ]] || return 1
+    else
+      [[ "$con_id" -gt 2 && -n ${expected_modes[$name]+x} ]] || return 1
+    fi
+    seen_ids[$con_id]=$name; current_modes[$name]=$open_mode; container_ids[$name]=$con_id
+    actual_count=$((actual_count + 1))
+  done < <(grep '^DATAPATCH_CONTAINER|' "$before_output")
+  [[ $actual_count -eq $((expected_count + 1)) && ${seen_ids[1]:-} == "CDB\$ROOT" ]] || return 1
+  for pdb in "${!expected_modes[@]}"; do [[ -n ${current_modes[$pdb]+x} ]] || return 1; done
+
+  {
+    printf "1|CDB\$ROOT\n"
+    for pdb in "${!expected_modes[@]}"; do printf '%s|%s\n' "${container_ids[$pdb]}" "$pdb"; done | sort -t'|' -k1,1n
+  } | opg_atomic_write "$expected_file" || return 1
+  for pdb in "${!expected_modes[@]}"; do
+    [[ ${current_modes[$pdb]} == 'READ WRITE' ]] || alter_count=$((alter_count + 1))
+  done
+
+  sql_file="${RUN_DIR}/prepare_datapatch_pdb_${sid}.sql"
+  {
+    printf 'whenever sqlerror exit failure rollback\n'
+    for entry in "${entries[@]}"; do
+      pdb=${entry%%=*}; open_mode=${current_modes[$pdb]}
+      [[ "$open_mode" == 'READ WRITE' ]] && continue
+      printf 'prompt DATAPATCH_PDB_PREPARE|%s|current=%s|desired=READ WRITE\n' "$pdb" "$open_mode"
+      [[ "$open_mode" == 'READ ONLY' ]] && printf 'alter pluggable database "%s" close immediate;\n' "$pdb"
+      printf 'alter pluggable database "%s" open read write;\n' "$pdb"
+    done
+    printf 'exit success\n'
+  } | opg_atomic_write "$sql_file" || return 1
+  if (( alter_count > 0 )); then
+    opg_sqlplus "$sid" "prepare_datapatch_pdb_${sid}" "$sql_file" "${RUN_DIR}/prepare_datapatch_pdb_${sid}.log" &&
+      opg_verify_command_success_text "${RUN_DIR}/prepare_datapatch_pdb_${sid}.log" || return 1
+  else
+    printf 'DATAPATCH_PDB_PREPARE|UNCHANGED|sid=%s\n' "$sid" >"${RUN_DIR}/prepare_datapatch_pdb_${sid}.log"
+  fi
+
+  after_output="${RUN_DIR}/datapatch_containers_after_${sid}.log"
+  opg_sqlplus "$sid" "datapatch_containers_after_${sid}" "${RUN_DIR}/datapatch_containers.sql" "$after_output" &&
+    opg_verify_command_success_text "$after_output" || return 1
+  actual_count=0
+  while IFS='|' read -r tag con_id name open_mode extra; do
+    [[ "$tag" == DATAPATCH_CONTAINER && -z "$extra" && "$con_id" =~ ^[0-9]+$ ]] || return 1
+    [[ "$name" =~ $oracle_name_regex && "$open_mode" == 'READ WRITE' ]] || return 1
+    [[ -z ${final_ids[$con_id]+x} && -z ${final_modes[$name]+x} ]] || return 1
+    [[ ${seen_ids[$con_id]:-} == "$name" ]] || return 1
+    final_ids[$con_id]=$name; final_modes[$name]=$open_mode
+    actual_count=$((actual_count + 1))
+  done < <(grep '^DATAPATCH_CONTAINER|' "$after_output")
+  [[ $actual_count -eq $((expected_count + 1)) ]] || return 1
+  while IFS='|' read -r con_id name extra; do
+    [[ -z "$extra" && ${final_ids[$con_id]:-} == "$name" ]] || return 1
+  done <"$expected_file"
+}
+
+validate_datapatch_sqlpatch_output() {
+  local sid=$1 output=$2 expected_file tag con_id name patch_id status action_time extra key label failed=0
+  local oracle_name_regex='^[A-Za-z][A-Za-z0-9_$#]{0,29}$'
+  local -a patch_ids=("$DB_PATCH")
+  local -A expected_containers=() expected_patches=() seen=()
+  expected_file="${RUN_DIR}/datapatch_expected_containers_${sid}.psv"
+  [[ -s "$expected_file" && -r "$output" ]] || return 1
+  [[ "$DB_PATCH" =~ ^[0-9]+$ ]] || return 1
+  if [[ -n "$OJVM_PATCH" ]]; then
+    [[ "$OJVM_PATCH" =~ ^[0-9]+$ && "$OJVM_PATCH" != "$DB_PATCH" ]] || return 1
+    patch_ids+=("$OJVM_PATCH")
+  fi
+  for patch_id in "${patch_ids[@]}"; do expected_patches[$patch_id]=1; done
+  while IFS='|' read -r con_id name extra; do
+    [[ -z "$extra" && "$con_id" =~ ^[0-9]+$ && "$name" =~ $oracle_name_regex ]] || return 1
+    [[ -z ${expected_containers[$con_id]+x} ]] || return 1
+    expected_containers[$con_id]=$name
+  done <"$expected_file"
+  [[ ${#expected_containers[@]} -gt 0 ]] || return 1
+
+  while IFS='|' read -r tag con_id name patch_id status action_time extra; do
+    if [[ "$tag" != CDB_SQLPATCH || -n "$extra" || ! "$con_id" =~ ^[0-9]+$ ||
+          ! "$name" =~ $oracle_name_regex || ! "$patch_id" =~ ^[0-9]+$ ||
+          ! "$action_time" =~ ^[0-9]{20}$ ]]; then
+      opg_log ERROR "DATAPATCH_CONTAINER_VALIDATION|sid=${sid}|result=FAIL|reason=unparseable_record"
+      return 1
+    fi
+    [[ ${expected_containers[$con_id]:-} == "$name" && -n ${expected_patches[$patch_id]+x} ]] || {
+      opg_log ERROR "DATAPATCH_CONTAINER_VALIDATION|sid=${sid}|container=${name}|con_id=${con_id}|patch=${patch_id}|result=FAIL|reason=unexpected_record"
+      return 1
+    }
+    key="${con_id}|${patch_id}"
+    [[ -z ${seen[$key]+x} ]] || {
+      opg_log ERROR "DATAPATCH_CONTAINER_VALIDATION|sid=${sid}|container=${name}|con_id=${con_id}|patch=${patch_id}|result=FAIL|reason=ambiguous_duplicate"
+      return 1
+    }
+    seen[$key]=$status
+    [[ "$patch_id" == "$DB_PATCH" ]] && label=RU || label=OJVM
+    opg_log INFO "DATAPATCH_CONTAINER_VALIDATION|sid=${sid}|container=${name}|con_id=${con_id}|patch_type=${label}|patch_id=${patch_id}|status=${status}"
+    [[ "$status" == SUCCESS ]] || failed=1
+  done < <(grep '^CDB_SQLPATCH|' "$output")
+  for con_id in "${!expected_containers[@]}"; do
+    name=${expected_containers[$con_id]}
+    for patch_id in "${patch_ids[@]}"; do
+      key="${con_id}|${patch_id}"
+      if [[ -z ${seen[$key]+x} ]]; then
+        [[ "$patch_id" == "$DB_PATCH" ]] && label=RU || label=OJVM
+        opg_log ERROR "DATAPATCH_CONTAINER_VALIDATION|sid=${sid}|container=${name}|con_id=${con_id}|patch_type=${label}|patch_id=${patch_id}|status=MISSING"
+        failed=1
+      fi
+    done
+  done
+  (( failed == 0 )) || return 1
+  opg_log INFO "DATAPATCH_CONTAINER_VALIDATION|sid=${sid}|result=PASS|containers=${#expected_containers[@]}|patches=${#patch_ids[@]}"
+}
+
+validate_datapatch_sqlpatch() {
+  local sid=$1 cdb output sql_file
+  cdb=$(opg_read_original_state "$sid" cdb)
+  output="${RUN_DIR}/datapatch_sqlpatch_${sid}.log"
+  case "$cdb" in
+    YES) sql_file="${RUN_DIR}/datapatch_sqlpatch_cdb.sql" ;;
+    NO) sql_file="${RUN_DIR}/datapatch_sqlpatch_noncdb.sql" ;;
+    *) return 1 ;;
+  esac
+  opg_sqlplus "$sid" "datapatch_sqlpatch_${sid}" "$sql_file" "$output" &&
+    opg_verify_command_success_text "$output" &&
+    validate_datapatch_sqlpatch_output "$sid" "$output"
+}
+
+restore_pdb_state() {
+  local sid=$1 states entry pdb mode current_mode sql_file output before_sql before_output after_output
+  local expected_count=0 current_count=0 alter_count=0 restore_rc=0
+  local -a entries=()
+  local -A expected_modes=() current_modes=() final_modes=()
+  states=$(opg_read_original_state "$sid" pdb_status)
+  [[ -n "$states" ]] || return 0
+
+  IFS=';' read -ra entries <<<"$states"
+  for entry in "${entries[@]}"; do
+    pdb=${entry%%=*}; mode=${entry#*=}
+    [[ "$pdb" =~ ^[A-Za-z][A-Za-z0-9_$#]{0,29}$ && "$pdb" != "PDB\$SEED" ]] || return 1
+    [[ -z ${expected_modes[$pdb]+x} ]] || return 1
+    case "$mode" in 'READ WRITE'|'READ ONLY'|MOUNTED) ;; *) return 1 ;; esac
+    expected_modes[$pdb]=$mode
+    expected_count=$((expected_count + 1))
+  done
+
+  before_sql="${RUN_DIR}/pdb_state_${sid}.sql"
+  opg_atomic_write "$before_sql" <<'SQL'
+set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
+whenever sqlerror exit failure rollback
+select 'PDB_STATE|'||name||'|'||open_mode from v$pdbs where con_id > 2 order by con_id;
+exit success
+SQL
+  before_output="${RUN_DIR}/pdb_state_before_${sid}.log"
+  opg_sqlplus "$sid" "pdb_state_before_${sid}" "$before_sql" "$before_output" &&
+    opg_verify_command_success_text "$before_output" || return 1
+  while IFS='|' read -r entry pdb mode current_mode; do
+    [[ "$entry" == PDB_STATE && -z "$current_mode" && "$pdb" =~ ^[A-Za-z][A-Za-z0-9_$#]{0,29}$ ]] || return 1
+    [[ "$mode" == 'READ WRITE' || "$mode" == 'READ ONLY' || "$mode" == MOUNTED ]] || return 1
+    [[ -z ${current_modes[$pdb]+x} ]] || return 1
+    current_modes[$pdb]=$mode
+    current_count=$((current_count + 1))
+  done < <(grep '^PDB_STATE|' "$before_output")
+  [[ $current_count -eq $expected_count ]] || return 1
+  for pdb in "${!expected_modes[@]}"; do [[ -n ${current_modes[$pdb]+x} ]] || return 1; done
+  for pdb in "${!expected_modes[@]}"; do
+    [[ ${current_modes[$pdb]} == "${expected_modes[$pdb]}" ]] || alter_count=$((alter_count + 1))
+  done
+
+  sql_file="${RUN_DIR}/restore_pdb_${sid}.sql"
+  {
+    printf 'whenever sqlerror exit failure rollback\n'
+    for entry in "${entries[@]}"; do
+      pdb=${entry%%=*}; mode=${entry#*=}
+      current_mode=${current_modes[$pdb]}
+      printf 'prompt PDB_RESTORE_BEFORE|%s|current=%s|desired=%s\n' "$pdb" "$current_mode" "$mode"
+      [[ "$current_mode" == "$mode" ]] && continue
+      case "${current_mode}:${mode}" in
+        'MOUNTED:READ WRITE') printf 'alter pluggable database "%s" open read write;\n' "$pdb" ;;
+        'MOUNTED:READ ONLY') printf 'alter pluggable database "%s" open read only;\n' "$pdb" ;;
+        'READ WRITE:MOUNTED'|'READ ONLY:MOUNTED') printf 'alter pluggable database "%s" close immediate;\n' "$pdb" ;;
+        'READ WRITE:READ ONLY')
+          printf 'alter pluggable database "%s" close immediate;\nalter pluggable database "%s" open read only;\n' "$pdb" "$pdb"
+          ;;
+        'READ ONLY:READ WRITE')
+          printf 'alter pluggable database "%s" close immediate;\nalter pluggable database "%s" open read write;\n' "$pdb" "$pdb"
+          ;;
         *) return 1 ;;
       esac
     done
     printf 'exit success\n'
   } | opg_atomic_write "$sql_file" || return 1
   output="${RUN_DIR}/restore_pdb_${sid}.log"
-  opg_sqlplus "$sid" "restore_pdb_${sid}" "$sql_file" "$output" && opg_verify_command_success_text "$output"
+  if (( alter_count > 0 )); then
+    opg_sqlplus "$sid" "restore_pdb_${sid}" "$sql_file" "$output"
+    restore_rc=$?
+    if (( restore_rc == 0 )) && ! opg_verify_command_success_text "$output"; then restore_rc=1; fi
+  else
+    printf 'PDB_RESTORE|UNCHANGED|sid=%s\n' "$sid" >"$output"
+  fi
+
+  after_output="${RUN_DIR}/pdb_state_after_${sid}.log"
+  opg_sqlplus "$sid" "pdb_state_after_${sid}" "$before_sql" "$after_output" &&
+    opg_verify_command_success_text "$after_output" || return 1
+  current_count=0
+  while IFS='|' read -r entry pdb mode current_mode; do
+    [[ "$entry" == PDB_STATE && -z "$current_mode" && "$pdb" =~ ^[A-Za-z][A-Za-z0-9_$#]{0,29}$ ]] || return 1
+    [[ "$mode" == 'READ WRITE' || "$mode" == 'READ ONLY' || "$mode" == MOUNTED ]] || return 1
+    [[ -z ${final_modes[$pdb]+x} ]] || return 1
+    final_modes[$pdb]=$mode
+    current_count=$((current_count + 1))
+  done < <(grep '^PDB_STATE|' "$after_output")
+  [[ $current_count -eq $expected_count ]] || return 1
+  for pdb in "${!expected_modes[@]}"; do
+    [[ ${final_modes[$pdb]:-} == "${expected_modes[$pdb]}" ]] || return 1
+  done
+  if (( restore_rc != 0 )); then
+    opg_log WARN "PDB_RESTORE_COMMAND_FAILED_BUT_FINAL_STATE_VERIFIED|sid=${sid}|exit_code=${restore_rc}|evidence=${after_output}"
+  fi
 }
 
 apply_binary_patches() {
@@ -1802,7 +2082,6 @@ start_original_databases() {
 
       if [[ "$previous_rc" == 0 ]] &&
          verify_successful_database_startup "$sid" "$output"; then
-        restore_pdb_state "$sid" || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED RESTORE_PDB "Oorspronkelijke PDB-toestand kon niet veilig worden hersteld voor ${sid}." 1; return 1; }
         opg_write_completion_marker "$marker" "$output" "$sid" startup || {
           opg_mark_failure MANUAL_INTERVENTION_REQUIRED START_DATABASES             "Startup completion-marker kon niet veilig worden hersteld voor ${sid}." 1
           return 1
@@ -1820,7 +2099,6 @@ start_original_databases() {
       opg_mark_failure PARTIAL START_DATABASES "Startup mislukt voor ${sid}." 1
       return 1
     fi
-    restore_pdb_state "$sid" || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED RESTORE_PDB "Oorspronkelijke PDB-toestand kon niet veilig worden hersteld voor ${sid}." 1; return 1; }
     opg_write_completion_marker "$marker" "$output" "$sid" startup || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED START_DATABASES "Startup completion-marker kon niet worden geschreven voor ${sid}." 1; return 1; }
   done < <(opg_manifest_sids)
   register_original_databases || return 1
@@ -1835,21 +2113,37 @@ run_datapatch_all() {
     [[ "$running" == true ]] || continue
     output="${RUN_DIR}/datapatch_${sid}.log"
     marker="${RUN_DIR}/datapatch_${sid}.complete"
-    if [[ -e "$marker" ]]; then
-      opg_completion_marker_valid "$marker" "$output" "$sid" datapatch || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Ongeldig datapatch completion-marker voor ${sid}." 1; return 1; }
-      continue
-    fi
-    if [[ -e "$output" ]]; then
+    if [[ ! -e "$marker" && -e "$output" ]]; then
       previous_rc=$(opg_last_command_exit "datapatch_${sid}")
       [[ -n "$previous_rc" && "$previous_rc" != 0 ]] || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Eerdere datapatch zonder geldig completion-marker is ambigu voor ${sid}." 1; return 1; }
     fi
-    export ORACLE_HOME=$TARGET_ORACLE_HOME ORACLE_SID=$sid PATH="$TARGET_ORACLE_HOME/OPatch:$TARGET_ORACLE_HOME/bin:$SAFE_PATH"
-    if ! opg_run_capture "datapatch_${sid}" "$output" "$TARGET_ORACLE_HOME/OPatch/datapatch" -verbose ||
-       ! opg_verify_command_success_text "$output"; then
-      opg_mark_failure PARTIAL DATAPATCH "datapatch mislukt voor ${sid}; overige databases worden niet als geslaagd gemarkeerd." 1
+    prepare_pdbs_for_datapatch "$sid" || {
+      opg_mark_failure MANUAL_INTERVENTION_REQUIRED PREPARE_DATAPATCH_PDB "Verwachte containers konden niet betrouwbaar worden vastgesteld of voor datapatch worden geopend voor ${sid}." 1
       return 1
+    }
+    if [[ -e "$marker" ]]; then
+      opg_completion_marker_valid "$marker" "$output" "$sid" datapatch || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Ongeldig datapatch completion-marker voor ${sid}." 1; return 1; }
+      validate_datapatch_sqlpatch "$sid" || {
+        opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Per-container SQLPATCH-hercontrole is mislukt voor ${sid}." 1
+        return 1
+      }
+    else
+      export ORACLE_HOME=$TARGET_ORACLE_HOME ORACLE_SID=$sid PATH="$TARGET_ORACLE_HOME/OPatch:$TARGET_ORACLE_HOME/bin:$SAFE_PATH"
+      if ! opg_run_capture "datapatch_${sid}" "$output" "$TARGET_ORACLE_HOME/OPatch/datapatch" -verbose ||
+         ! opg_verify_command_success_text "$output"; then
+        opg_mark_failure PARTIAL DATAPATCH "datapatch mislukt voor ${sid}; overige databases worden niet als geslaagd gemarkeerd." 1
+        return 1
+      fi
+      validate_datapatch_sqlpatch "$sid" || {
+        opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Per-container SQLPATCH-validatie is mislukt voor ${sid}." 1
+        return 1
+      }
+      opg_write_completion_marker "$marker" "$output" "$sid" datapatch || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Datapatch completion-marker kon niet worden geschreven voor ${sid}." 1; return 1; }
     fi
-    opg_write_completion_marker "$marker" "$output" "$sid" datapatch || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Datapatch completion-marker kon niet worden geschreven voor ${sid}." 1; return 1; }
+    restore_pdb_state "$sid" || {
+      opg_mark_failure MANUAL_INTERVENTION_REQUIRED RESTORE_PDB "Oorspronkelijke PDB-toestand kon na datapatch niet veilig worden hersteld voor ${sid}." 1
+      return 1
+    }
   done < <(opg_manifest_sids)
   opg_write_state 09_DATAPATCH_COMPLETE DATAPATCH
 }
@@ -1912,9 +2206,7 @@ validate_all() {
     awk -F'|' '$1=="SQLPATCH" && $3!="SUCCESS"{bad=1} END{exit bad}' "$output" || failed=1
     compare_registry_with_baseline "$sid" "$cdb" "$output" validation || failed=1
     if [[ "$cdb" == YES ]]; then
-      grep -qx "CDB_SQLPATCH|${DB_PATCH}|SUCCESS" "$output" || failed=1
-      grep -qx "CDB_SQLPATCH|${OJVM_PATCH}|SUCCESS" "$output" || failed=1
-      awk -F'|' '$1=="CDB_SQLPATCH" && $3!="SUCCESS"{bad=1} END{exit bad}' "$output" || failed=1
+      validate_datapatch_sqlpatch_output "$sid" "$output" || failed=1
     fi
     invalid_before=$(awk -F, -v sid="\"${sid}\"" '$1==sid{v=$2;gsub(/^"|"$/,"",v);print v;exit}' "${RUN_DIR}/invalid_objects_before.csv")
     invalid_after=$(grep '^INVALID|' "$output" | tail -1 | cut -d'|' -f2)

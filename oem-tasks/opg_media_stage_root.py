@@ -399,19 +399,6 @@ def validate_local_parents(local):
     if local != anchor / "oracle-patch-guard":
         die(EXIT_BLOCKED, "lokale stage-root ligt niet direct onder de trusted stage anchor")
 
-    # Boven de anchor is ownership bewust geen trust-eis. Het pad moet wel een
-    # echte, niet group/world-writable directoryketen zijn.
-    current = anchor.parent
-    upper_stop = Path(os.environ["OPG_MEDIA_TEST_ROOT"]) / "u01" if os.environ.get("OPG_MEDIA_TEST_MODE") == "1" else Path("/")
-    while True:
-        info = current.lstat()
-        if not stat.S_ISDIR(info.st_mode) or current.is_symlink() or stat.S_IMODE(info.st_mode) & 0o022:
-            die(EXIT_BLOCKED, f"stagepad boven trusted anchor is onveilig: {current}")
-        if current == upper_stop: break
-        if current == Path("/"):
-            die(EXIT_BLOCKED, "trusted stage anchor ligt buiten de verwachte padgrens")
-        current = current.parent
-
     current = anchor
     while True:
         info = current.lstat()
@@ -461,10 +448,34 @@ def roots():
         return (p / "central", p / "central/oracle-patch-guard",
                 p / "u01/stage/oracle-patch-guard", p / "public.pem", os.getgid())
     import grp
-    return (Path("/mnt/patch-share/oracle-patches"),
-            Path("/mnt/patch-share/oracle-patch-guard"),
-            Path("/u01/stage/oracle-patch-guard"),
-            Path("/etc/oracle-patch-guard/approval_public.pem"),
+    config_path = Path("/etc/oracle-patch-guard/patchGD_guard.conf")
+    try:
+        info = config_path.lstat()
+    except OSError as exc:
+        die(EXIT_BLOCKED, f"runtimeconfig ontbreekt: {exc}")
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or
+            stat.S_IMODE(info.st_mode) & 0o022):
+        die(EXIT_BLOCKED, "runtimeconfig heeft onveilige owner/mode/type")
+    wanted = {"PATCH_ROOT", "OPG_ROOT", "LOCAL_STAGE_ROOT", "APPROVAL_PUBLIC_KEY"}
+    values = {}
+    for number, raw in enumerate(config_path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key not in wanted:
+            continue
+        if key in values or not value or not value.startswith("/") or not re.fullmatch(r"/[A-Za-z0-9_./-]+", value):
+            die(EXIT_BLOCKED, f"ongeldige/dubbele runtimepadconfig op regel {number}: {key}")
+        parts = Path(value).parts
+        if ".." in parts or "." in parts or "//" in value:
+            die(EXIT_BLOCKED, f"onveilig runtimepad voor {key}")
+        values[key] = value
+    missing = wanted - values.keys()
+    if missing:
+        die(EXIT_BLOCKED, f"verplichte runtimepaden ontbreken: {','.join(sorted(missing))}")
+    return (Path(values["PATCH_ROOT"]), Path(values["OPG_ROOT"]),
+            Path(values["LOCAL_STAGE_ROOT"]), Path(values["APPROVAL_PUBLIC_KEY"]),
             grp.getgrnam("oinstall").gr_gid)
 
 

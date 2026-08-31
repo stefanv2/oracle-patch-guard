@@ -192,6 +192,50 @@ opg_mock_command() {
   case "$label" in
     startup_verify_*)
       printf 'STARTUP_STATE|%s|%s|%s\n' "${MOCK_STARTUP_INSTANCE_STATUS:-OPEN}" "${MOCK_STARTUP_DATABASE_STATUS:-ACTIVE}" "${MOCK_STARTUP_OPEN_MODE:-READ WRITE}" >>"$output_file" ;;
+    datapatch_containers_before_*|datapatch_containers_after_*)
+      local container_sid container_states container_entry container_name container_mode container_id=3
+      container_sid=${label#datapatch_containers_before_}; container_sid=${container_sid#datapatch_containers_after_}
+      if [[ -n ${MOCK_DATAPATCH_CONTAINER_ROWS:-} ]]; then
+        printf '%s\n' "$MOCK_DATAPATCH_CONTAINER_ROWS" | tr ';' '\n' >>"$output_file"
+      else
+        printf "DATAPATCH_CONTAINER|1|CDB\$ROOT|READ WRITE\n" >>"$output_file"
+        container_states=${MOCK_PDB_CURRENT_STATES:-$(opg_read_original_state "$container_sid" pdb_status 2>/dev/null || true)}
+        while IFS= read -r container_entry; do
+          [[ -n "$container_entry" ]] || continue
+          container_name=${container_entry%%=*}; container_mode=${container_entry#*=}
+          printf 'DATAPATCH_CONTAINER|%s|%s|%s\n' "$container_id" "$container_name" "$container_mode" >>"$output_file"
+          container_id=$((container_id + 1))
+        done < <(printf '%s\n' "$container_states" | tr ';' '\n')
+      fi ;;
+    prepare_datapatch_pdb_*)
+      if (( rc == 0 )); then
+        local prepare_sid prepare_states prepare_entry prepare_name prepared=''
+        prepare_sid=${label#prepare_datapatch_pdb_}
+        prepare_states=$(opg_read_original_state "$prepare_sid" pdb_status 2>/dev/null || true)
+        while IFS= read -r prepare_entry; do
+          [[ -n "$prepare_entry" ]] || continue
+          prepare_name=${prepare_entry%%=*}
+          prepared+="${prepared:+;}${prepare_name}=READ WRITE"
+        done < <(printf '%s\n' "$prepare_states" | tr ';' '\n')
+        MOCK_PDB_CURRENT_STATES=${MOCK_DATAPATCH_PREPARE_FINAL_STATES:-$prepared}
+        export MOCK_PDB_CURRENT_STATES
+      fi
+      printf 'PDB datapatch preparation command completed.\n' >>"$output_file" ;;
+    pdb_state_before_*|pdb_state_after_*)
+      local pdb_states pdb_entry pdb_name pdb_mode pdb_sid
+      pdb_sid=${label#pdb_state_before_}; pdb_sid=${pdb_sid#pdb_state_after_}
+      pdb_states=${MOCK_PDB_CURRENT_STATES:-$(opg_read_original_state "$pdb_sid" pdb_status 2>/dev/null || true)}
+      while IFS= read -r pdb_entry; do
+        [[ -n "$pdb_entry" ]] || continue
+        pdb_name=${pdb_entry%%=*}; pdb_mode=${pdb_entry#*=}
+        printf 'PDB_STATE|%s|%s\n' "$pdb_name" "$pdb_mode" >>"$output_file"
+      done < <(printf '%s\n' "$pdb_states" | tr ';' '\n')
+      ;;
+    restore_pdb_*)
+      MOCK_PDB_CURRENT_STATES=${MOCK_PDB_RESTORE_FINAL_STATES:-$(opg_read_original_state "${label#restore_pdb_}" pdb_status 2>/dev/null || true)}
+      export MOCK_PDB_CURRENT_STATES
+      if [[ -n ${MOCK_PDB_RESTORE_ERROR:-} ]]; then printf '%s\n' "$MOCK_PDB_RESTORE_ERROR" >>"$output_file"; else printf 'PDB restore command completed successfully.\n' >>"$output_file"; fi
+      ;;
     startup_*)
       [[ ${MOCK_STARTUP_ORA32004:-false} == true ]] && printf 'ORA-32004: obsolete or deprecated parameter(s) specified for RDBMS instance\n' >>"$output_file"
       [[ -n ${MOCK_STARTUP_ERROR:-} ]] && printf '%s\n' "$MOCK_STARTUP_ERROR" >>"$output_file"
@@ -239,21 +283,49 @@ opg_mock_command() {
       printf 'OPatch Version: %s\n' "$mock_active_version" >>"$output_file" ;;
     conflict_db_ru|conflict_ojvm)
       printf 'Prereq CheckConflictAgainstOHWithDetail passed.\n' >>"$output_file" ;;
+    datapatch_sqlpatch_*)
+      local sqlpatch_sid expected_file expected_con_id expected_name expected_patch mock_status=${MOCK_DATAPATCH_SQLPATCH_STATUS:-SUCCESS}
+      sqlpatch_sid=${label#datapatch_sqlpatch_}
+      if [[ -n ${MOCK_DATAPATCH_SQLPATCH_ROWS:-} ]]; then
+        printf '%s\n' "$MOCK_DATAPATCH_SQLPATCH_ROWS" | tr ';' '\n' >>"$output_file"
+      else
+        expected_file="${RUN_DIR}/datapatch_expected_containers_${sqlpatch_sid}.psv"
+        while IFS='|' read -r expected_con_id expected_name; do
+          for expected_patch in "${DB_PATCH:-0}" "${OJVM_PATCH:-0}"; do
+            [[ -n "$expected_patch" ]] || continue
+            printf 'CDB_SQLPATCH|%s|%s|%s|%s|20260830120000000000\n' \
+              "$expected_con_id" "$expected_name" "$expected_patch" "$mock_status" >>"$output_file"
+          done
+        done <"$expected_file"
+      fi ;;
     datapatch_*) printf 'SQL Patching tool complete on %s\n' "${label#datapatch_}" >>"$output_file" ;;
     validation_*)
       local validation_sid=${label#validation_}
-      local mock_sqlpatch_status=SUCCESS mock_registry_rows validation_cdb
+      local mock_sqlpatch_status=SUCCESS mock_registry_rows validation_cdb validation_expected_file validation_con_id validation_name validation_patch
       [[ ${MOCK_VALIDATION_SQLPATCH_BAD:-false} == true ]] && mock_sqlpatch_status='WITH ERRORS'
       validation_cdb=$(opg_read_original_state "$validation_sid" cdb 2>/dev/null || printf YES)
-      printf 'DB|%s|%s|%s|%s\nPDB|%s\nSERVICES|%s\nSQLPATCH|%s|%s\nSQLPATCH|%s|%s\nCDB_SQLPATCH|%s|%s\nCDB_SQLPATCH|%s|%s\nINVALID|%s\n' \
+      printf 'DB|%s|%s|%s|%s\nPDB|%s\nSERVICES|%s\nSQLPATCH|%s|%s\nSQLPATCH|%s|%s\nINVALID|%s\n' \
         "$validation_sid" "$(opg_read_original_state "$validation_sid" role 2>/dev/null || printf PRIMARY)" \
         "$(opg_read_original_state "$validation_sid" open_mode 2>/dev/null || printf 'READ WRITE')" \
         "$validation_cdb" \
         "$(opg_read_original_state "$validation_sid" pdb_status 2>/dev/null || true)" \
         "$(opg_read_original_state "$validation_sid" services 2>/dev/null || true)" \
         "${DB_PATCH:-0}" "$mock_sqlpatch_status" "${OJVM_PATCH:-0}" "$mock_sqlpatch_status" \
-        "${DB_PATCH:-0}" "$mock_sqlpatch_status" "${OJVM_PATCH:-0}" "$mock_sqlpatch_status" \
         "${MOCK_VALIDATION_INVALID_COUNT:-0}" >>"$output_file"
+      if [[ "$validation_cdb" == YES ]]; then
+        if [[ -n ${MOCK_DATAPATCH_SQLPATCH_ROWS:-} ]]; then
+          printf '%s\n' "$MOCK_DATAPATCH_SQLPATCH_ROWS" | tr ';' '\n' >>"$output_file"
+        else
+          validation_expected_file="${RUN_DIR}/datapatch_expected_containers_${validation_sid}.psv"
+          while IFS='|' read -r validation_con_id validation_name; do
+            for validation_patch in "${DB_PATCH:-0}" "${OJVM_PATCH:-0}"; do
+              [[ -n "$validation_patch" ]] || continue
+              printf 'CDB_SQLPATCH|%s|%s|%s|%s|20260830120000000000\n' \
+                "$validation_con_id" "$validation_name" "$validation_patch" "$mock_sqlpatch_status" >>"$output_file"
+            done
+          done <"$validation_expected_file"
+        fi
+      fi
       mock_registry_rows=${MOCK_REGISTRY_AFTER:-${MOCK_REGISTRY_BEFORE:-REGISTRY|CATALOG|VALID}}
       printf '%s\n' "$mock_registry_rows" | tr ';' '\n' >>"$output_file"
       if [[ -z ${MOCK_REGISTRY_AFTER:-} && -z ${MOCK_REGISTRY_BEFORE:-} && "$validation_cdb" == YES ]]; then

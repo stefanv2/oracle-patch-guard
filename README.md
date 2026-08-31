@@ -36,6 +36,31 @@ cryptographic bindings, and only then permits downtime or patch mutation.
 - OEM integration through constrained wrappers and local privileged helpers;
 - signer-side status reporting and batch approval orchestration.
 
+## Stable 2026-08-31 baseline
+
+The stable baseline adds the live-validated lifecycle around the existing
+PLAN → APPROVE → APPLY contract:
+
+- exact per-container datapatch validation for `CDB$ROOT` and every expected
+  user PDB; a missing, duplicate, ambiguous or non-SUCCESS RU/OJVM record is
+  fail-closed;
+- user PDBs that were READ ONLY or MOUNTED are temporarily opened READ WRITE
+  for datapatch and are restored to their original state after successful
+  validation; `PDB$SEED` is excluded from the user-PDB validation set;
+- fresh-host bootstrap installs the constrained root helpers, validated
+  sudoers fragment, protected runtime configuration and `/u01/stage` anchors;
+- runtime and approval roots are resolved from protected configuration rather
+  than runtime share-path fallbacks;
+- batch approval asks once and then delegates every selected run to the sole
+  single-run signing implementation;
+- successful APPLY publishes hash-bound `completion.json` evidence, allowing a
+  historically valid COMPLETE to remain COMPLETE after approval expiry.
+
+The baseline was validated in non-production on Oracle Database 19.32 with a
+CDB and user PDB, DB RU 39472050 and OJVM RU 39222882. The complete live flow
+finished successfully, including completion publication. See
+[`RELEASE_NOTES_20260831.md`](RELEASE_NOTES_20260831.md).
+
 ## Repository layout
 
 - `project/` — patch guard core, checks, OEM wrappers, fixtures and tests;
@@ -68,10 +93,23 @@ bash tests/run_oem_wrapper_tests.sh
 bash tests/run_pilot07_tests.sh
 bash tests/run_signer_pending_tests.sh
 bash tests/run_signer_batch_tests.sh
+bash tests/run_completion_publication_tests.sh
+# Requires root because real uid/gid/mode ownership is asserted:
+sudo bash tests/run_bootstrap_tests.sh
 ```
 
-The current public-release baseline is 265/265 passing regressions. See
-`PILOT07_VALIDATION_REPORT.md` and `PUBLIC_RELEASE_AUDIT.md` for details.
+The current stable baseline is 351/351 passing regressions. The original Pilot07
+public-release evidence remains in `PILOT07_VALIDATION_REPORT.md` and
+`PUBLIC_RELEASE_AUDIT.md`; completion-publication validation is documented in
+`COMPLETION_PUBLICATION_VALIDATION_REPORT.md` and config-driven deployment-path
+validation in `DEPLOYMENT_PATH_VALIDATION_REPORT.md`.
+
+## Release discipline
+
+The deployed `current` link must reference an immutable, validated release
+directory. Do not place ad-hoc fixes in `current`. Prepare and test future
+changes in a separate RC/release directory, record its evidence, and only then
+move `current` to that immutable release.
 
 ## Important limitations
 

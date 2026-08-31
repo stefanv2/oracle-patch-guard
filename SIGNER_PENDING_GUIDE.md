@@ -56,16 +56,53 @@ runs, nieuwste eerst, met `HOST SID CYCLE CREATED STATUS RUN_ID`.
 - `APPROVED`: approval-token is inhoudelijk gebonden aan exact manifest,
   host en Oracle Home; expiry en conditionals zijn geldig; manifest- en
   approval-signature zijn met de manifestgebonden public key geverifieerd.
-- `COMPLETE`: dezelfde cryptografisch betrouwbare approval plus coherente
-  `12_COMPLETE / COMPLETE / exit_code=0` executionmetadata.
+- `COMPLETE`: dezelfde volledig geverifieerde approval plus een veilig regulier
+  `completion.json` dat exact aan RUN_ID, host, Oracle Home, cycle, manifest-
+  SHA256 en approval-SHA256 is gebonden. De completiontimestamp is canoniek,
+  komt exact overeen met `completion_epoch` en ligt op of vóór de ondertekende
+  `expires_epoch`.
 - `UNKNOWN`: corrupte, incomplete, inconsistente of onveilig getypeerde data,
-  een ontbrekende/onjuiste signature, verlopen approval of een status die niet
+  een ontbrekende/onjuiste signature, verlopen approval zonder betrouwbaar
+  completion-artifact, completion na expiry of een status die niet
   ondubbelzinnig kan worden vastgesteld.
 
 Alle runs worden per directory geïsoleerd beoordeeld. Een fout bij één target
 maakt andere targets niet UNKNOWN. Alleen SID mag uit het strikt gecontroleerde
 `HOST-SID-CYCLE-OEM-timestamp` RUN_ID-formaat worden afgeleid wanneer de
 executionmetadata geen SID bevat.
+
+## Completion evidence en trust boundary
+
+De tijdens `stage` gepubliceerde `execution_state.json` blijft de immutable
+historische PLAN-state en wordt nooit overschreven. Na een succesvolle APPLY
+publiceert de lokaal geïnstalleerde root-owned helper afzonderlijk
+`completion.json` in exact dezelfde RUN_ID-directory. Het artifact bevat geen
+nieuwe target-side signature: er wordt bewust geen private signingkey op het
+target geïntroduceerd.
+
+De helper construeert completion evidence zelf uit de lokale coherente
+`12_COMPLETE / COMPLETE / exit_code=0` state, de root-controlled actieve
+context en de bestaande manifest- en approvalbytes. Publicatie is atomisch,
+rungebonden en non-overwriting. De signer vertrouwt completion niet zelfstandig:
+hij verifieert nog steeds beide bestaande signatures, de manifestgebonden
+public-keyfingerprint, alle approvalbindings en conditionals, en vergelijkt
+daarna beide SHA256-bindings en de completiontijd met de approval-expiry.
+
+Dit is target-published lifecycle evidence binnen de bestaande target/root-
+helpertrustgrens, geen cryptografische targetattestatie. Een gecompromitteerde
+root blijft buiten deze bescherming. `completion.json` kan later input zijn
+voor een afzonderlijk ontworpen retentionbeleid, maar autoriseert nu geen
+automatische cleanup.
+
+## Runtimepaden
+
+De signer resolveert `APPROVAL_ROOT` en `APPROVAL_PUBLIC_KEY` standaard uit
+`/etc/oracle-patch-guard/patchGD_guard.conf`, zonder het bestand te sourcen.
+Voor de bestaande signer-layout hebben `OPG_APPROVAL_ROOT` en
+`OPG_APPROVAL_PUBLIC_KEY` expliciet precedence; `OPG_CONFIG_FILE` kan een ander
+veilig configbestand aanwijzen. Alle opgeloste waarden moeten absolute,
+lexicaal veilige paden zijn. Een ontbrekende, lege, dubbele, relatieve of
+ongeldige waarde resulteert in `UNKNOWN`/exit 30.
 
 ## Aanbevolen multi-targetworkflow
 

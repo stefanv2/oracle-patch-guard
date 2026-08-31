@@ -158,6 +158,10 @@ force_partial_start_state() {
   printf '\nMOCK_RESUME_INVENTORY=BOTH\n' >>"$FIXTURE_ENV"
 }
 
+mock_datapatch_sqlpatch_rows() {
+  printf "\nMOCK_DATAPATCH_SQLPATCH_ROWS='%s'\n" "$1" >>"$FIXTURE_ENV"
+}
+
 # 1. Gezonde single-instance database.
 setup_case healthy; assess R1; record 'gezonde single-instance met geaccepteerde rebuild-route' 10 $? "$CASE_DIR/R1.out"
 [[ ${OPG_STOP_AFTER_FIRST:-0} == 1 ]] && { printf '\nResultaat: %s geslaagd, %s mislukt\n' "$PASS" "$FAIL"; (( FAIL == 0 )); exit $?; }
@@ -404,6 +408,106 @@ setup_case localkeychange autostart_n; printf 'DBN:%s:N\n' "$HOME_DIR" >"$ORATAB
 guard apply --non-interactive --run-id R61 --approved-manifest "$RUN_ROOT/R61/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'Pilot07 gewijzigde artifact-keyidentiteit blokkeert vóór downtime' 20 $? "$CASE_DIR/apply.out"; assert_no_downtime_started 'artifact-keywijziging bereikt geen downtime' R61
 
 unset OPG_TEST_LOCAL_STAGE_ROOT OPG_TEST_MEDIA_STAGE_HELPER
+
+# P0-contract: user-PDB's staan tijdens datapatch READ WRITE. Daarna wordt de
+# oorspronkelijke state idempotent hersteld en opnieuw uit de database gelezen.
+setup_case pdbalreadyrw; assess R63 >/dev/null; plan R63 >/dev/null; token=$(approval R63); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=READ WRITE'\n" >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id R63 --approved-manifest "$RUN_ROOT/R63/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
+rc=$?; ! grep -qi '^alter pluggable database' "$RUN_ROOT/R63/prepare_datapatch_pdb_DB1.sql" || rc=99; ! grep -qi '^alter pluggable database' "$RUN_ROOT/R63/restore_pdb_DB1.sql" || rc=98
+record 'PDB reeds READ WRITE blijft UNCHANGED zonder ALTER' 0 "$rc" "$CASE_DIR/apply.out"
+
+setup_case pdbmountedtorw; assess R64 >/dev/null; plan R64 >/dev/null; token=$(approval R64); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=MOUNTED'\n" >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id R64 --approved-manifest "$RUN_ROOT/R64/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
+rc=$?; grep -Fqx 'alter pluggable database "PDB1" open read write;' "$RUN_ROOT/R64/prepare_datapatch_pdb_DB1.sql" || rc=99; ! grep -qi '^alter pluggable database' "$RUN_ROOT/R64/restore_pdb_DB1.sql" || rc=98
+record 'PDB MOUNTED wordt vóór datapatch gericht READ WRITE' 0 "$rc" "$CASE_DIR/apply.out"
+
+setup_case pdbalreadyro; sed -i 's/PDB1=READ WRITE/PDB1=READ ONLY/' "$CASE_DIR/fixture/database_inventory.csv"; assess R65 >/dev/null; plan R65 >/dev/null; token=$(approval R65); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=READ ONLY'\n" >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id R65 --approved-manifest "$RUN_ROOT/R65/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
+rc=$?; grep -Fqx 'alter pluggable database "PDB1" open read write;' "$RUN_ROOT/R65/prepare_datapatch_pdb_DB1.sql" || rc=99; grep -Fqx 'alter pluggable database "PDB1" open read only;' "$RUN_ROOT/R65/restore_pdb_DB1.sql" || rc=98
+record 'PDB READ ONLY wordt tijdelijk READ WRITE en daarna READ ONLY' 0 "$rc" "$CASE_DIR/apply.out"
+
+setup_case pdbalreadymounted; sed -i 's/PDB1=READ WRITE/PDB1=MOUNTED/' "$CASE_DIR/fixture/database_inventory.csv"; assess R66 >/dev/null; plan R66 >/dev/null; token=$(approval R66); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=MOUNTED'\n" >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id R66 --approved-manifest "$RUN_ROOT/R66/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
+rc=$?; grep -Fqx 'alter pluggable database "PDB1" open read write;' "$RUN_ROOT/R66/prepare_datapatch_pdb_DB1.sql" || rc=99; grep -Fqx 'alter pluggable database "PDB1" close immediate;' "$RUN_ROOT/R66/restore_pdb_DB1.sql" || rc=98
+record 'PDB oorspronkelijk MOUNTED wordt na datapatch weer MOUNTED' 0 "$rc" "$CASE_DIR/apply.out"
+
+setup_case pdbfinalmismatch; sed -i 's/PDB1=READ WRITE/PDB1=MOUNTED/' "$CASE_DIR/fixture/database_inventory.csv"; assess R67 >/dev/null; plan R67 >/dev/null; token=$(approval R67); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=MOUNTED'\nMOCK_PDB_RESTORE_FINAL_STATES='PDB1=READ WRITE'\n" >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id R67 --approved-manifest "$RUN_ROOT/R67/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
+rc=$?; [[ -e "$RUN_ROOT/R67/datapatch_DB1.log" ]] || rc=99; grep -Fq '"phase": "RESTORE_PDB"' "$RUN_ROOT/R67/execution_state.json" || rc=98
+record 'afwijkende PDB-eindstate na datapatch faalt gesloten' 40 "$rc" "$CASE_DIR/apply.out"
+
+setup_case pdbseed; assess R68 >/dev/null; plan R68 >/dev/null; token=$(approval R68); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=READ WRITE'\n" >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id R68 --approved-manifest "$RUN_ROOT/R68/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
+rc=$?; grep -Fq 'where con_id > 2' "$RUN_ROOT/R68/pdb_state_DB1.sql" || rc=99; ! grep -Fq "PDB\$SEED" "$RUN_ROOT/R68/restore_pdb_DB1.sql" || rc=98
+record "PDB\$SEED blijft buiten restore-mutaties" 0 "$rc" "$CASE_DIR/apply.out"
+
+setup_case pdbmultiple; sed -i 's/PDB1=READ WRITE/PDB1=READ WRITE;PDB2=READ ONLY/' "$CASE_DIR/fixture/database_inventory.csv"; assess R69 >/dev/null; plan R69 >/dev/null; token=$(approval R69); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=MOUNTED;PDB2=READ ONLY'\n" >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id R69 --approved-manifest "$RUN_ROOT/R69/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
+rc=$?; grep -Fqx 'alter pluggable database "PDB1" open read write;' "$RUN_ROOT/R69/prepare_datapatch_pdb_DB1.sql" || rc=99; grep -Fqx 'alter pluggable database "PDB2" open read write;' "$RUN_ROOT/R69/prepare_datapatch_pdb_DB1.sql" || rc=98; grep -Fqx 'alter pluggable database "PDB2" open read only;' "$RUN_ROOT/R69/restore_pdb_DB1.sql" || rc=97
+record 'multiple PDBs tijdelijk READ WRITE en exact hersteld' 0 "$rc" "$CASE_DIR/apply.out"
+
+setup_case pdbrace65019; sed -i 's/PDB1=READ WRITE/PDB1=MOUNTED/' "$CASE_DIR/fixture/database_inventory.csv"; assess R70 >/dev/null; plan R70 >/dev/null; token=$(approval R70); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=MOUNTED'\nMOCK_RC_restore_pdb_DB1=1\nMOCK_PDB_RESTORE_FINAL_STATES='PDB1=MOUNTED'\nMOCK_PDB_RESTORE_ERROR='ORA-65019: pluggable database PDB1 already open'\n" >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id R70 --approved-manifest "$RUN_ROOT/R70/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
+rc=$?; grep -Fq 'ORA-65019' "$RUN_ROOT/R70/restore_pdb_DB1.log" || rc=99; grep -Fq 'PDB_RESTORE_COMMAND_FAILED_BUT_FINAL_STATE_VERIFIED' "$RUN_ROOT/R70/commands.log" || rc=98
+record 'ORA-65019 met exact correcte verse eindstate blijft idempotent' 0 "$rc" "$CASE_DIR/apply.out"
+
+# P0: exacte expected-container x expected-patch cardinaliteit.
+p0_ts=20260830120000000000
+p0_root_ru="CDB_SQLPATCH|1|CDB\$ROOT|39472050|SUCCESS|${p0_ts}"
+p0_root_ojvm="CDB_SQLPATCH|1|CDB\$ROOT|39222882|SUCCESS|${p0_ts}"
+p0_pdb1_ru="CDB_SQLPATCH|3|PDB1|39472050|SUCCESS|${p0_ts}"
+p0_pdb1_ojvm="CDB_SQLPATCH|3|PDB1|39222882|SUCCESS|${p0_ts}"
+
+setup_case p0noncdb; sed -i 's/"YES","PDB1=READ WRITE"/"NO",""/' "$CASE_DIR/fixture/database_inventory.csv"; assess P0R1 >/dev/null; plan P0R1 >/dev/null; token=$(approval P0R1)
+guard apply --non-interactive --run-id P0R1 --approved-manifest "$RUN_ROOT/P0R1/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
+record 'P0 non-CDB behoudt geldige datapatch-flow' 0 $? "$CASE_DIR/apply.out"
+
+setup_case p0rootonly; sed -i 's/"PDB1=READ WRITE"/""/' "$CASE_DIR/fixture/database_inventory.csv"; assess P0R2 >/dev/null; plan P0R2 >/dev/null; token=$(approval P0R2)
+guard apply --non-interactive --run-id P0R2 --approved-manifest "$RUN_ROOT/P0R2/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
+rc=$?; grep -Fqx "1|CDB\$ROOT" "$RUN_ROOT/P0R2/datapatch_expected_containers_DB1.psv" || rc=99; record "P0 CDB met alleen CDB\$ROOT slaagt" 0 "$rc" "$CASE_DIR/apply.out"
+
+setup_case p0multiopen; sed -i 's/PDB1=READ WRITE/PDB1=READ WRITE;PDB2=READ WRITE/' "$CASE_DIR/fixture/database_inventory.csv"; assess P0R3 >/dev/null; plan P0R3 >/dev/null; token=$(approval P0R3)
+guard apply --non-interactive --run-id P0R3 --approved-manifest "$RUN_ROOT/P0R3/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
+rc=$?; [[ $(grep -c '^CDB_SQLPATCH|' "$RUN_ROOT/P0R3/datapatch_sqlpatch_DB1.log") -eq 6 ]] || rc=99; record 'P0 meerdere OPEN PDBs hebben RU overal SUCCESS' 0 "$rc" "$CASE_DIR/apply.out"
+
+setup_case p0ruojvm; assess P0R4 >/dev/null; plan P0R4 >/dev/null; token=$(approval P0R4)
+guard apply --non-interactive --run-id P0R4 --approved-manifest "$RUN_ROOT/P0R4/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
+rc=$?; grep -Fq 'result=PASS|containers=2|patches=2' "$RUN_ROOT/P0R4/commands.log" || rc=99; record 'P0 RU en OJVM slagen voor iedere container' 0 "$rc" "$CASE_DIR/apply.out"
+
+setup_case p0mounted; sed -i 's/PDB1=READ WRITE/PDB1=MOUNTED/' "$CASE_DIR/fixture/database_inventory.csv"; assess P0R5 >/dev/null; plan P0R5 >/dev/null; token=$(approval P0R5); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=MOUNTED'\n" >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id P0R5 --approved-manifest "$RUN_ROOT/P0R5/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
+rc=$?; grep -Fqx 'alter pluggable database "PDB1" open read write;' "$RUN_ROOT/P0R5/prepare_datapatch_pdb_DB1.sql" || rc=99; grep -Fqx 'alter pluggable database "PDB1" close immediate;' "$RUN_ROOT/P0R5/restore_pdb_DB1.sql" || rc=98; grep -Fqx 'PDB_STATE|PDB1|MOUNTED' "$RUN_ROOT/P0R5/pdb_state_after_DB1.log" || rc=97
+record 'P0 oorspronkelijk MOUNTED wordt gepatcht en exact hersteld' 0 "$rc" "$CASE_DIR/apply.out"
+
+setup_case p0missingru; assess P0R6 >/dev/null; plan P0R6 >/dev/null; token=$(approval P0R6); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};${p0_pdb1_ojvm}"
+guard apply --non-interactive --run-id P0R6 --approved-manifest "$RUN_ROOT/P0R6/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 ontbrekende RU voor één PDB faalt gesloten' 40 $? "$CASE_DIR/apply.out"
+
+# Permanente reproductie van de oorspronkelijke false-PASS: root is volledig,
+# maar de verwachte PDB mist OJVM. De oude generieke greps zouden beide patch-ID's zien.
+setup_case p0originalfalsepass; assess P0R7 >/dev/null; plan P0R7 >/dev/null; token=$(approval P0R7); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};${p0_pdb1_ru}"
+guard apply --non-interactive --run-id P0R7 --approved-manifest "$RUN_ROOT/P0R7/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
+rc=$?; grep -Fq 'container=PDB1|con_id=3|patch_type=OJVM|patch_id=39222882|status=MISSING' "$RUN_ROOT/P0R7/commands.log" || rc=99; record 'P0 oorspronkelijke false-PASS mist OJVM en faalt gesloten' 40 "$rc" "$CASE_DIR/apply.out"
+
+setup_case p0missingpdb; assess P0R8 >/dev/null; plan P0R8 >/dev/null; token=$(approval P0R8); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm}"
+guard apply --non-interactive --run-id P0R8 --approved-manifest "$RUN_ROOT/P0R8/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 volledig ontbrekende PDB faalt gesloten' 40 $? "$CASE_DIR/apply.out"
+
+setup_case p0badstatus; assess P0R9 >/dev/null; plan P0R9 >/dev/null; token=$(approval P0R9); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};${p0_pdb1_ru};CDB_SQLPATCH|3|PDB1|39222882|WITH ERRORS|${p0_ts}"
+guard apply --non-interactive --run-id P0R9 --approved-manifest "$RUN_ROOT/P0R9/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 laatste status niet SUCCESS faalt gesloten' 40 $? "$CASE_DIR/apply.out"
+
+setup_case p0duplicate; assess P0R10 >/dev/null; plan P0R10 >/dev/null; token=$(approval P0R10); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};${p0_pdb1_ru};${p0_pdb1_ojvm};${p0_pdb1_ojvm}"
+guard apply --non-interactive --run-id P0R10 --approved-manifest "$RUN_ROOT/P0R10/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 dubbele container-patchregistratie is ambigu en faalt' 40 $? "$CASE_DIR/apply.out"
+
+setup_case p0badconid; assess P0R11 >/dev/null; plan P0R11 >/dev/null; token=$(approval P0R11); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};CDB_SQLPATCH|X|PDB1|39472050|SUCCESS|${p0_ts};${p0_pdb1_ojvm}"
+guard apply --non-interactive --run-id P0R11 --approved-manifest "$RUN_ROOT/P0R11/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 onparseerbare con_id faalt gesloten' 40 $? "$CASE_DIR/apply.out"
+
+setup_case p0unknownset; assess P0R12 >/dev/null; plan P0R12 >/dev/null; token=$(approval P0R12); printf "\nMOCK_DATAPATCH_CONTAINER_ROWS='DATAPATCH_CONTAINER|1|CDB\$ROOT|READ WRITE'\n" >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id P0R12 --approved-manifest "$RUN_ROOT/P0R12/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 onbetrouwbare verwachte containerset faalt gesloten' 40 $? "$CASE_DIR/apply.out"
+
+setup_case p0openfail; sed -i 's/PDB1=READ WRITE/PDB1=MOUNTED/' "$CASE_DIR/fixture/database_inventory.csv"; assess P0R13 >/dev/null; plan P0R13 >/dev/null; token=$(approval P0R13); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=MOUNTED'\nMOCK_RC_prepare_datapatch_pdb_DB1=1\n" >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id P0R13 --approved-manifest "$RUN_ROOT/P0R13/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 noodzakelijke PDB kan niet worden geopend en faalt gesloten' 40 $? "$CASE_DIR/apply.out"
+
+setup_case p0restorefail; sed -i 's/PDB1=READ WRITE/PDB1=MOUNTED/' "$CASE_DIR/fixture/database_inventory.csv"; assess P0R14 >/dev/null; plan P0R14 >/dev/null; token=$(approval P0R14); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=MOUNTED'\nMOCK_PDB_RESTORE_FINAL_STATES='PDB1=READ WRITE'\n" >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id P0R14 --approved-manifest "$RUN_ROOT/P0R14/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 oorspronkelijke PDB-state kan niet worden hersteld en faalt gesloten' 40 $? "$CASE_DIR/apply.out"
 
 printf '\nResultaat: %s geslaagd, %s mislukt\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

@@ -40,6 +40,9 @@ set -o pipefail
 umask 077
 run_id=${1:-}
 [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] || exit 2
+confirmation=
+IFS= read -r confirmation || exit 20
+[[ "$confirmation" == APPROVE ]] || exit 20
 printf '%s\n' "$run_id" >>"$OPG_APPROVE_LOG"
 [[ "$run_id" != "${OPG_FAIL_RUN:-}" ]] || exit 55
 dir=$OPG_APPROVAL_ROOT/$run_id
@@ -87,7 +90,7 @@ run_batch() {
 }
 
 sign_direct() {
-  OPG_APPROVAL_ROOT=$APPROVALS OPG_TEST_PRIVATE=$PRIVATE OPG_APPROVE_LOG=$LOG \
+  printf 'APPROVE\n' | OPG_APPROVAL_ROOT=$APPROVALS OPG_TEST_PRIVATE=$PRIVATE OPG_APPROVE_LOG=$LOG \
     OPG_FAIL_RUN='' "$BIN/opg_approve_run.sh" "$1"
 }
 
