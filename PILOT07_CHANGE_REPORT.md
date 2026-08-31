@@ -1,5 +1,10 @@
 # Pilot07 change report
 
+> **HISTORICAL — Pilot07 wijzigingsevidence.** Dit report beschrijft de
+> oorspronkelijke Pilot07-wijzigingen en is geen volledig current runbook. Zie
+> [README.md](README.md) en
+> [RELEASE_NOTES_20260831.md](RELEASE_NOTES_20260831.md) voor stable-20260831.
+
 ## Functionele wijziging
 
 - Nieuwe expliciete OEM-fase `stage-media` vóór maintenance-window/assess.
@@ -8,8 +13,9 @@
 - Core bindt PLAN aan lokale stage-identiteit, artifact-manifest/key-SHA256 en
   V2 tree hashes; APPLY en resume herverifiëren uitsluitend lokaal.
 - De media-parentboundary begint bij de vaste trusted anchor `/u01/stage`.
-  `/u01` hoeft niet root-owned te zijn, maar mag niet group/world-writable of
-  een symlink zijn. Anchor en stage-root blijven strikt root-owned en veilig.
+  `/u01` en hogere directories vallen buiten de OPG stage trust policy en
+  krijgen geen aanvullende owner-, mode-, write-bit- of symlinkvoorwaarde.
+  Anchor en stage-root blijven strikt root-owned en veilig.
 - De RU/OJVM ZIP-validator accepteert naast de patch-ID-directory uitsluitend
   optioneel exact één regulier rootbestand `PatchSearch.xml`. OPatch blijft
   beperkt tot `OPatch/`; alle andere rootentries blijven fail-closed.

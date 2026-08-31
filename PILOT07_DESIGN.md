@@ -1,5 +1,11 @@
 # Pilot07: lokale immutable patchmedia
 
+> **PARTIALLY STALE — historisch Pilot07-ontwerp.** Dit document is de
+> ontwerpvoorganger van stable-20260831 en geen volledig huidig runbook. Zie
+> [README.md](README.md) en
+> [RELEASE_NOTES_20260831.md](RELEASE_NOTES_20260831.md) voor de actuele
+> baseline.
+
 ## Besluit
 
 Pilot07 gebruikt de centrale share uitsluitend als transportbron voor drie
@@ -38,11 +44,12 @@ waarvan de gevalideerde ZIP-entry execute-semantiek bevat 0750. Bestaande
 gepubliceerde stages worden niet overschreven. Andere cycli en identiteiten
 kunnen naast elkaar bestaan.
 
-`/u01/stage` is de expliciete trusted stage anchor (`root:root 0755`). `/u01`
-mag een andere owner hebben, waaronder `oracle:oinstall 0755`, zolang de keten
-boven de anchor geen symlink of group/world-write bevat. De stage-securityclaim
-is inhoudsgericht: verse signed-manifest/V2/SHA256-verificatie blokkeert een
-inhoudelijk gemuteerde of vervangen stage vóór ieder gebruik. Zie
+`/u01/stage` is de expliciete trusted stage anchor (`root:root 0755`). De OPG
+stage trust policy begint bij deze anchor; `/u01` en hogere directories vallen
+erbuiten en krijgen van OPG geen aanvullende owner-, mode-, write-bit- of
+symlinkvoorwaarde. De stage-securityclaim is inhoudsgericht: verse
+signed-manifest/V2/SHA256-verificatie blokkeert een inhoudelijk gemuteerde of
+vervangen stage vóór ieder gebruik. Zie
 `PILOT07_SECURITY_ANALYSIS.md` voor de bewuste pathname-beperking.
 
 De term immutable duidt hier op de cryptografisch gebonden artifactidentiteit,

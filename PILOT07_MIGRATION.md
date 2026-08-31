@@ -1,10 +1,16 @@
 # Migratie Pilot06c naar Pilot07
 
+> **SUPERSEDED — historische Pilot07-migratieprocedure.** Gebruik dit document
+> niet als deployment- of runbookinstructie voor de huidige stable baseline.
+> De fresh-host bootstrap installeert inmiddels de root-helpers, sudoers,
+> runtimeconfiguratie en stage anchors. Zie [README.md](README.md) en
+> [RELEASE_NOTES_20260831.md](RELEASE_NOTES_20260831.md).
+
 Pilot06c blijft immutable en bestaande Pilot06c-runs worden niet geconverteerd.
 Pilot07 vereist altijd een nieuwe RUN_ID, nieuwe context, nieuw plan en nieuwe
 approval.
 
-## Installatie als root
+## Installatie als root (historische Pilot07-procedure)
 
 1. Kopieer `oem-tasks/opg_media_stage_root.sh` naar
    `/usr/local/sbin/opg_media_stage_root.sh`.
@@ -16,10 +22,11 @@ approval.
 3. Maak de expliciete trusted stage anchor `/u01/stage` als `root:root 0755` en
    `/u01/stage/oracle-patch-guard` als `root:oinstall 0750`. Beide moeten echte
    directories zonder symlink zijn, niet group/world-writable en zonder
-   access/default ACL die `oracle` of `oinstall` schrijfrecht geeft. `/u01` mag
-   bewust bijvoorbeeld `oracle:oinstall 0755` zijn; het pad boven de anchor mag
-   alleen niet group/world-writable zijn en geen symlink bevatten. De helper
-   bewaakt de vaste anchor/stage-root en accepteert geen arbitraire paden.
+   access/default ACL die `oracle` of `oinstall` schrijfrecht geeft. De huidige
+   OPG stage trust boundary begint bij `/u01/stage`; `/u01` en hogere
+   directories vallen buiten deze policy en krijgen van OPG geen aanvullende
+   owner-, mode-, write-bit- of symlinkvoorwaarde. De helper bewaakt de vaste
+   anchor/stage-root en accepteert geen arbitraire paden.
 4. Installeer de sudoersregel uit
    `config/examples/oracle-patch-guard-context.sudoers` met `visudo -cf`.
 5. Plaats de artifact-verificatiesleutel als

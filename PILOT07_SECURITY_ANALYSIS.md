@@ -1,5 +1,10 @@
 # Pilot07 security- en failure-analyse
 
+> **HISTORICAL — Pilot07 security-evidence.** De manifest-, V2-, TOCTOU- en
+> failure-analyse blijft als pilotevidence behouden. Gebruik voor de huidige
+> stable baseline [README.md](README.md) en
+> [RELEASE_NOTES_20260831.md](RELEASE_NOTES_20260831.md).
+
 ## Dreigingen en controles
 
 | Dreiging | Fail-closed controle |
@@ -49,9 +54,9 @@ Oracle/OPatch bruikbaar zonder root-ownershipconflict.
 
 Symlinks, hardlinks en speciale files blijven verboden. Voor de root-owned
 beheerstructuur blijft een POSIX default/access ACL die `oracle` of een van
-diens groepen schrijfrecht geeft fail-closed. Boven de anchor mogen directories
-zoals `/u01` een andere owner hebben, mits de keten geen symlink bevat en
-nergens group/world-writable is.
+diens groepen schrijfrecht geeft fail-closed. De OPG stage trust policy begint
+bij `/u01/stage`; `/u01` en hogere directories vallen erbuiten en krijgen van
+OPG geen aanvullende owner-, mode-, write-bit- of symlinkvoorwaarde.
 
 Dit is pragmatisch geen garantie van lokale pathname-integriteit tegen een
 kwaadwillende target-`oracle`-gebruiker die eigenaar is van `/u01`: die kan de
