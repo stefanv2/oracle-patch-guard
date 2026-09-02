@@ -166,7 +166,7 @@ opg_run_capture() {
   if [[ ${DRY_RUN:-false} == true && ${OPG_READ_ONLY_PHASE:-false} != true ]]; then
     printf 'DRY_RUN: %s\n' "$command_text" >"$output_file"
     rc=0
-  elif [[ ${OPG_TEST_MODE:-0} == 1 ]]; then
+  elif [[ ${OPG_TEST_MODE:-0} == 1 && ${OPG_TEST_EXECUTE_CAPTURE:-false} != true ]]; then
     opg_mock_command "$label" "$output_file" "$@"
     rc=$?
   elif command -v timeout >/dev/null 2>&1; then

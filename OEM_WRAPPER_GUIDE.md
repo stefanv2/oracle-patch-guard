@@ -148,6 +148,16 @@ Dit is alleen toegestaan vanuit `12_COMPLETE`, `BLOCKED`, `UNKNOWN` of `MANUAL_I
 
 ## OEM-tasks
 
+Een herhaalbare readinesscontrole kan los van een formele run worden gestart:
+
+```bash
+/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh precheck
+```
+
+Richt hiervoor in OEM de taak `OPG_PRECHECK` in. PRECHECK gebruikt dezelfde
+assessmentregels als PLAN, maar maakt geen `current_run.json`, formeel manifest
+of approval-artifacts en kan APPLY niet autoriseren.
+
 Gebruik op iedere geselecteerde host exact dezelfde commands:
 
 ```bash

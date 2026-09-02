@@ -23,12 +23,12 @@ fail() {
 }
 
 usage() {
-  printf 'Gebruik: %s {prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run}\n' "$SCRIPT_NAME" >&2
+  printf 'Gebruik: %s {precheck|prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run}\n' "$SCRIPT_NAME" >&2
   exit "$EXIT_USAGE"
 }
 
 case "$COMMAND" in
-  prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run) ;;
+  precheck|prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run) ;;
   *) usage ;;
 esac
 
@@ -459,6 +459,19 @@ clean_oracle_env() {
     OPG_ROOT="$OPG_ROOT" OPG_APPROVAL_ROOT="$APPROVAL_ROOT" OPG_CONFIG_FILE="$CONFIG_FILE" "$@"
 }
 
+run_precheck() {
+  local run_stamp precheck_run_id
+  discover_all
+  run_stamp=${OPG_TEST_PRECHECK_RUN_STAMP:-$(date -u '+%Y%m%dT%H%M%SZ')}
+  [[ "$run_stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || fail "$EXIT_UNKNOWN" PRECHECK 'PRECHECK-tijdstempel is ongeldig.'
+  precheck_run_id=${SHORT_HOST}-${ORACLE_SID}-${PATCH_CYCLE}-PRECHECK-${run_stamp}
+  [[ "$precheck_run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] || fail "$EXIT_BLOCKED" PRECHECK 'Afgeleide PRECHECK RUN_ID is ongeldig of te lang.'
+  [[ ! -e "${RUN_ROOT}/${precheck_run_id}" ]] || fail "$EXIT_BLOCKED" PRECHECK "Afgeleide PRECHECK RUN_ID bestaat al: ${precheck_run_id}"
+  require_script "$CORE_SCRIPT" core
+  clean_oracle_env /bin/bash "$CORE_SCRIPT" precheck --non-interactive --target-oracle-home "$ORACLE_HOME" \
+    --run-id "$precheck_run_id" --config "$CONFIG_FILE" "$DB_RU_PATCH_ID" "$OJVM_PATCH_ID" "$PATCH_CYCLE" "$OPATCH_VERSION" "$OPATCH_ZIP"
+}
+
 archive_context_for_new_run() {
   local reason=${OPG_NEW_RUN_REASON:-} state old_run
   [[ -n "$reason" && ${#reason} -le 160 && "$reason" =~ ^[A-Za-z0-9][A-Za-z0-9_.:,/@+-]*(\ [A-Za-z0-9_.:,/@+-]+)*$ ]] || fail "$EXIT_USAGE" CONTEXT 'new-run vereist een veilige OPG_NEW_RUN_REASON (maximaal 160 tekens).'
@@ -477,6 +490,9 @@ archive_context_for_new_run() {
 }
 
 case "$COMMAND" in
+  precheck)
+    run_precheck
+    ;;
   prepare)
     require_script "$PREPARE_SCRIPT" prepare
     /bin/bash "$PREPARE_SCRIPT" || exit $?

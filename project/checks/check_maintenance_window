@@ -8,12 +8,14 @@ phase=${OPG_CHECK_PHASE:-assess}
 target_home=${TARGET_ORACLE_HOME:-}
 expected_host=${HOST_NAME:-$(hostname -f 2>/dev/null || hostname)}
 expected_run=${RUN_ID:-}
+binding_mode=${OPG_WINDOW_BINDING_MODE:-formal}
 
 unknown() { printf 'UNKNOWN: %s\n' "$*"; exit 3; }
 blocked() { printf 'BLOCKED: %s\n' "$*"; exit 2; }
 field() { awk -F= -v key="$1" '$1==key{sub(/^[^=]*=/,"");print;exit}' "$manifest"; }
 
 [[ -n "$manifest" ]] || unknown 'MAINTENANCE_WINDOW_MANIFEST is niet geconfigureerd.'
+[[ "$binding_mode" == formal || "$binding_mode" == precheck ]] || unknown "ongeldige window-bindingmode: $binding_mode"
 [[ -f "$manifest" && ! -L "$manifest" && -r "$manifest" ]] || unknown "manifest is niet veilig leesbaar: $manifest"
 owner=$(stat -c '%U' "$manifest" 2>/dev/null) || unknown 'eigenaar kon niet worden bepaald.'
 mode=$(stat -c '%a' "$manifest" 2>/dev/null) || unknown 'mode kon niet worden bepaald.'
@@ -30,7 +32,9 @@ allowed_home=$(field allowed_oracle_home); manifest_run=$(field run_id); minimum
 [[ "$start" =~ (Z|[+-][0-9]{2}:[0-9]{2})$ && "$end" =~ (Z|[+-][0-9]{2}:[0-9]{2})$ ]] || blocked 'start/end moeten ISO-8601 met timezone of Z zijn.'
 [[ "$minimum" =~ ^[0-9]+$ && "$minimum" -gt 0 ]] || blocked 'min_remaining_minutes moet een positief geheel getal zijn.'
 [[ "$hostname_value" == "$expected_host" ]] || blocked "hostname mismatch: manifest=$hostname_value target=$expected_host"
-[[ -z "$manifest_run" || "$manifest_run" == "$expected_run" ]] || blocked "run_id mismatch: manifest=$manifest_run target=$expected_run"
+if [[ "$binding_mode" == formal ]]; then
+  [[ -z "$manifest_run" || "$manifest_run" == "$expected_run" ]] || blocked "run_id mismatch: manifest=$manifest_run target=$expected_run"
+fi
 canonical_target=$(cd -P -- "$target_home" 2>/dev/null && pwd -P) || unknown 'target Oracle Home is niet canoniek oplosbaar.'
 canonical_allowed=$(cd -P -- "$allowed_home" 2>/dev/null && pwd -P) || blocked 'allowed_oracle_home bestaat niet of is niet canoniek.'
 [[ "$canonical_target" == "$canonical_allowed" ]] || blocked "Oracle Home mismatch: allowed=$canonical_allowed target=$canonical_target"

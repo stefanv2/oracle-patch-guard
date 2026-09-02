@@ -14,8 +14,13 @@ vervanging voor lokale change-, backup-, recovery- en securityprocedures.
 Oracle Patch Guard (OPG) beheert Oracle-patching als een gecontroleerde flow:
 
 ```text
-PLAN → APPROVE → APPLY
+PRECHECK → PLAN → APPROVE → APPLY
 ```
+
+PRECHECK is een herhaalbare, read-only readinesscontrole. Deze gebruikt dezelfde
+assessmentregels als PLAN, maar maakt geen formeel manifest, wijzigt geen actieve
+runcontext en kan APPLY nooit autoriseren. PLAN voert de actuele checks altijd
+opnieuw uit en legt daarna pas de formele patchintentie vast.
 
 PLAN legt assessment, target, Oracle Home en staged media vast in een immutable
 manifest. APPROVE bindt een cryptografische goedkeuring aan exact dat manifest.

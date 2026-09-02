@@ -14,6 +14,7 @@ source "${SCRIPT_DIR}/lib/opg_core.sh"
 usage() {
   cat <<'EOF'
 Gebruik:
+  patchGD_guard.sh precheck [opties] DB_PATCH OJVM_PATCH MONTH OPATCH_VERSION OPATCH_ZIPFILE
   patchGD_guard.sh assess  [opties] DB_PATCH OJVM_PATCH MONTH OPATCH_VERSION OPATCH_ZIPFILE
   patchGD_guard.sh plan    [opties] DB_PATCH OJVM_PATCH MONTH OPATCH_VERSION OPATCH_ZIPFILE
   patchGD_guard.sh apply   [opties] DB_PATCH OJVM_PATCH MONTH OPATCH_VERSION OPATCH_ZIPFILE
@@ -22,7 +23,7 @@ Gebruik:
   patchGD_guard.sh cleanup [opties] --run-id RUN_ID
 
 Verplichte/bruikbare opties:
-  --target-oracle-home PAD   Exacte Oracle Home (verplicht voor assess)
+  --target-oracle-home PAD   Exacte Oracle Home (verplicht voor precheck/assess)
   --run-id ID                Unieke run-ID
   --config BESTAND           Configuratiebestand
   --dry-run                  Genereer/registreer opdrachten, voer ze niet uit
@@ -180,8 +181,12 @@ fi
 HOST_NAME=${OPG_HOSTNAME_OVERRIDE:-$(hostname -f 2>/dev/null || hostname)}
 EXEC_USER=${OPG_USER_OVERRIDE:-$(id -un)}
 
-if [[ -z "$RUN_ID" && "$COMMAND" =~ ^(assess|plan)$ ]]; then
-  RUN_ID="$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+if [[ -z "$RUN_ID" && "$COMMAND" =~ ^(precheck|assess|plan)$ ]]; then
+  if [[ "$COMMAND" == precheck ]]; then
+    RUN_ID="PRECHECK-$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+  else
+    RUN_ID="$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+  fi
 fi
 if [[ -z "$RUN_ID" ]] || ! opg_validate_run_id "$RUN_ID"; then
   printf 'Een geldige --run-id is verplicht.\n' >&2
@@ -408,7 +413,7 @@ check_path_space() {
 }
 
 run_optional_check() {
-  local name=$1 command_text=$2 required=$3 mock_key=${4:-$1} output rc
+  local name=$1 command_text=$2 required=$3 mock_key=${4:-$1} output rc execute_in_test=false
   # Positie 3 blijft bewust onderdeel van de bestaande check-interface.
   : "$required"
   output="${RUN_DIR}/${name}.txt"
@@ -416,12 +421,16 @@ run_optional_check() {
     local variable value
     variable="MOCK_CHECK_${mock_key^^}"
     value=${!variable:-UNKNOWN}
-    printf '%s\n' "$value" >"$output"
-    case "$value" in
-      VERIFIED|OK|HEALTHY|NONE) return 0 ;;
-      BLOCKED|UNHEALTHY|ACTIVE) return 2 ;;
-      *) return 3 ;;
-    esac
+    if [[ "$value" == EXECUTE ]]; then
+      execute_in_test=true
+    else
+      printf '%s\n' "$value" >"$output"
+      case "$value" in
+        VERIFIED|OK|HEALTHY|NONE) return 0 ;;
+        BLOCKED|UNHEALTHY|ACTIVE) return 2 ;;
+        *) return 3 ;;
+      esac
+    fi
   fi
   if [[ -z "$command_text" ]]; then
     printf 'NOT_CONFIGURED\n' >"$output"; return 3
@@ -432,8 +441,12 @@ run_optional_check() {
   export TARGET_ORACLE_HOME RUN_DIR RUN_ID HOST_NAME DB_PATCH OJVM_PATCH MONTH OPATCH_VERSION OPATCH_ZIPFILE
   export PATCH_ROOT OPATCH_ROOT ORATAB_FILE ORAINST_LOC BACKUP_CHECK_COMMAND
   export RECOVERY_BASE_IMAGE RECOVERY_BASE_IMAGE_SHA256 OPATCH_ZIP_SHA256 HOME_RECOVERY_PROCEDURE HOME_REBUILD_MIN_FREE_MB
-  export MAINTENANCE_WINDOW_MANIFEST OPG_CHECK_PHASE RECOVERY_MANIFEST_FILE
-  opg_run_capture "$name" "$output" "$command_text"; rc=$?
+  export MAINTENANCE_WINDOW_MANIFEST OPG_CHECK_PHASE OPG_WINDOW_BINDING_MODE RECOVERY_MANIFEST_FILE
+  if [[ "$execute_in_test" == true ]]; then
+    OPG_TEST_EXECUTE_CAPTURE=true opg_run_capture "$name" "$output" "$command_text"; rc=$?
+  else
+    opg_run_capture "$name" "$output" "$command_text"; rc=$?
+  fi
   return "$rc"
 }
 
@@ -745,6 +758,7 @@ EOF
 }
 
 write_patch_manifest() {
+  local publish=${1:-true}
   local db_dir="${PATCH_ROOT}/${MONTH}/${DB_PATCH}" ojvm_dir="${PATCH_ROOT}/${MONTH}/${OJVM_PATCH}"
   local zip="${OPATCH_ROOT}/${OPATCH_ZIPFILE}" db_hash ojvm_hash zip_hash oratab_hash db_count recovery_hash window_hash registry_hash approval_key_hash
   if [[ "$LOCAL_MEDIA_MODE" == required ]]; then
@@ -763,6 +777,7 @@ write_patch_manifest() {
   [[ "$db_hash" != UNAVAILABLE ]] || opg_add_finding UNKNOWN DB_PATCH_INTEGRITY_UNAVAILABLE "DB-RU-integriteitscontrole kon niet betrouwbaar worden voltooid." "$db_dir"
   [[ "$ojvm_hash" != UNAVAILABLE ]] || opg_add_finding UNKNOWN OJVM_PATCH_INTEGRITY_UNAVAILABLE "OJVM-integriteitscontrole kon niet betrouwbaar worden voltooid." "$ojvm_dir"
   [[ "$approval_key_hash" != UNAVAILABLE ]] || opg_add_finding BLOCKED APPROVAL_TRUST_UNAVAILABLE "Approval-public-key ontbreekt, is niet leesbaar, is geen regulier bestand of is een symlink." "${APPROVAL_PUBLIC_KEY:-UNCONFIGURED}"
+  [[ "$publish" == true ]] || return 0
   opg_atomic_write "${RUN_DIR}/patch_manifest.json" <<EOF
 {
   "schema_version": 1,
@@ -799,6 +814,160 @@ write_patch_manifest() {
 EOF
   opg_sha256 "${RUN_DIR}/patch_manifest.json" >"${RUN_DIR}/patch_manifest.sha256"
   chmod 0440 "${RUN_DIR}/patch_manifest.json" "${RUN_DIR}/patch_manifest.sha256" 2>/dev/null || true
+}
+
+precheck_summary_severity() {
+  local ids=$1
+  awk -F'|' -v ids="$ids" '
+    BEGIN { count=split(ids, values, " "); for (i=1; i<=count; i++) wanted[values[i]]=1 }
+    $2 in wanted {
+      if ($1=="BLOCKED") blocked=1
+      else if ($1=="UNKNOWN") unknown=1
+      else if ($1=="CONDITIONAL") conditional=1
+    }
+    END {
+      if (blocked) print "BLOCKED"
+      else if (unknown) print "UNKNOWN"
+      else if (conditional) print "CONDITIONAL"
+    }
+  ' "${RUN_DIR}/findings.psv"
+}
+
+precheck_summary_add() {
+  local id=$1 success=$2 evidence=$3 ids=$4 severity
+  severity=$(precheck_summary_severity "$ids")
+  if [[ -z "$severity" ]]; then
+    [[ "$success" == true ]] || return 0
+    severity=READY
+  fi
+  printf '%s|%s|Readiness-samenvatting op basis van bestaande controles.|%s\n' \
+    "$severity" "$id" "$evidence" >>"${RUN_DIR}/precheck_summary.psv"
+}
+
+write_precheck_summary() {
+  local success sid running
+  : >"${RUN_DIR}/precheck_summary.psv"
+
+  success=false
+  [[ -s "${RUN_DIR}/patch_metadata.txt" && -s "${RUN_DIR}/patch_checksums.sha256" ]] && success=true
+  precheck_summary_add MEDIA_READINESS "$success" "${RUN_DIR}/patch_checksums.sha256" \
+    'MEDIA_STAGE_UNAVAILABLE DB_PATCH_MISSING OJVM_PATCH_MISSING OPATCH_ZIP_MISSING PATCH_SYMLINK README_MISSING PATCH_FILE_HASH_FAILED DB_PATCH_INTEGRITY_UNAVAILABLE OJVM_PATCH_INTEGRITY_UNAVAILABLE'
+
+  success=false
+  [[ -s "${RUN_DIR}/host_info.txt" && -s "${RUN_DIR}/oracle_version.txt" && -s "${RUN_DIR}/inventory_before.txt" ]] && success=true
+  precheck_summary_add PLATFORM_HOME_READINESS "$success" "${RUN_DIR}/host_info.txt" \
+    'MISSING_DEPENDENCY OS_UNSUPPORTED ARCH_UNSUPPORTED SQLPLUS_MISSING OPATCH_MISSING HOME_OWNER_UNKNOWN HOME_OWNER_MISMATCH EXECUTION_USER_MISMATCH LOCAL_INVENTORY_MISSING CENTRAL_INVENTORY_MISSING ORACLE_VERSION_FAILED ORACLE_VERSION_UNSUPPORTED INVENTORY_INCONSISTENT APPROVAL_TRUST_UNAVAILABLE'
+
+  success=false
+  [[ -s "${RUN_DIR}/opatch_media_validation.txt" && -s "${RUN_DIR}/opatch_version.txt" ]] && success=true
+  precheck_summary_add OPATCH_READINESS "$success" "${RUN_DIR}/opatch_media_validation.txt" \
+    'OPATCH_MEDIA_VALID OPATCH_MEDIA_INVALID OPATCH_MEDIA_UNKNOWN OPATCH_VERSION OPATCH_SELF_UPGRADE'
+
+  success=false
+  [[ -s "${RUN_DIR}/conflict_db_ru.txt" && -s "${RUN_DIR}/conflict_ojvm.txt" ]] && success=true
+  precheck_summary_add PATCH_CONFLICT_READINESS "$success" "${RUN_DIR}/conflict_db_ru.txt;${RUN_DIR}/conflict_ojvm.txt" \
+    'DB_PATCH_MISSING OJVM_PATCH_MISSING DB_RU_CONFLICT OJVM_CONFLICT'
+
+  success=false
+  [[ -e "${RUN_DIR}/oratab_raw.txt" ]] && success=true
+  precheck_summary_add TOPOLOGY_READINESS "$success" "${RUN_DIR}/oratab_raw.txt" \
+    'ASM_OR_GI_DETECTED GRID_HOME RAC_SEHA_DETECTED UNSUPPORTED_TOPOLOGY ASM_STORAGE_DETECTED DATA_GUARD_UNSUPPORTED'
+
+  success=false
+  [[ -s "${RUN_DIR}/database_state_before.csv" ]] && (( $(wc -l <"${RUN_DIR}/database_state_before.csv") > 1 )) && success=true
+  precheck_summary_add DATABASE_RUNTIME_READINESS "$success" "${RUN_DIR}/database_state_before.csv" \
+    'DATABASE_INVENTORY_FAILED NO_DATABASES SHARED_HOME UNEXPECTED_DATABASE PMON_HOME_MISMATCH DATABASE_QUERY_FAILED DATA_GUARD_UNSUPPORTED REGISTRY_BASELINE_UNAVAILABLE'
+
+  success=false
+  if [[ -s "${RUN_DIR}/database_state_before.csv" ]] && awk -F, '
+    NR>1 { value=$9; gsub(/"/, "", value); rows++; if (value=="" || value=="NONE") bad=1 }
+    END { exit !(rows>0 && !bad) }
+  ' "${RUN_DIR}/database_state_before.csv"; then success=true; fi
+  precheck_summary_add LISTENER_READINESS "$success" "${RUN_DIR}/database_state_before.csv" \
+    'INVALID_LISTENER_NAME LISTENER_HOME_MISMATCH'
+
+  success=false
+  if [[ -s "${RUN_DIR}/registry_components_before.psv" ]]; then
+    success=true
+    while IFS='|' read -r sid running; do
+      [[ "$running" == true ]] || continue
+      if [[ ! -s "${RUN_DIR}/inventory_${sid}.txt" ]] || ! grep -Fqx 'SQLPATCH_ERRORS|0' "${RUN_DIR}/inventory_${sid}.txt"; then
+        success=false
+        break
+      fi
+    done < <(awk -F, 'NR>1 { sid=$1; running=$4; gsub(/"/, "", sid); gsub(/"/, "", running); print sid "|" running }' "${RUN_DIR}/database_state_before.csv")
+  fi
+  precheck_summary_add REGISTRY_SQLPATCH_READINESS "$success" "${RUN_DIR}/registry_components_before.psv" \
+    'REGISTRY_QUERY_FAILED REGISTRY_COMPONENT_UNHEALTHY REGISTRY_COMPONENT_UNKNOWN REGISTRY_BASELINE_UNAVAILABLE INVALID_COMPONENTS SQLPATCH_ERROR DATABASE_QUERY_FAILED'
+
+  success=false
+  if [[ -s "${RUN_DIR}/invalid_objects_before.csv" ]] && awk -F, '
+    NR>1 { value=$2; gsub(/"/, "", value); rows++; if (value !~ /^[0-9]+$/ || value != 0) bad=1 }
+    END { exit !(rows>0 && !bad) }
+  ' "${RUN_DIR}/invalid_objects_before.csv"; then success=true; fi
+  precheck_summary_add INVALID_OBJECT_READINESS "$success" "${RUN_DIR}/invalid_objects_before.csv" \
+    'PREEXISTING_INVALIDS DATABASE_QUERY_FAILED PMON_HOME_MISMATCH'
+
+  success=false
+  grep -q '^READY|' "${RUN_DIR}/assess_datapump.txt" 2>/dev/null && success=true
+  precheck_summary_add DATAPUMP_READINESS "$success" "${RUN_DIR}/assess_datapump.txt" \
+    'ACTIVE_DATAPUMP DATAPUMP_UNKNOWN'
+
+  success=false
+  [[ -s "${RUN_DIR}/dataguard.txt" ]] && success=true
+  precheck_summary_add DATAGUARD_READINESS "$success" "${RUN_DIR}/dataguard.txt" \
+    'DATA_GUARD_UNSUPPORTED DATAGUARD_UNHEALTHY DATAGUARD_UNKNOWN'
+
+  success=false
+  [[ "$DATABASE_BACKUP_VERIFIED" == true && "$ORACLE_HOME_RECOVERY_VERIFIED" == true && -s "${RUN_DIR}/backup.txt" && -s "${RUN_DIR}/oracle_home_recovery.txt" ]] && success=true
+  precheck_summary_add BACKUP_RECOVERY_READINESS "$success" "${RUN_DIR}/backup.txt;${RUN_DIR}/oracle_home_recovery.txt" \
+    'BACKUP_NOT_VERIFIED HOME_RECOVERY_REBUILD_VERIFIED HOME_RECOVERY_NOT_VERIFIED HOME_RECOVERY_UNKNOWN'
+
+  success=true
+  for sid in HOME_SPACE INVENTORY_SPACE STAGE_SPACE TMP_SPACE; do
+    grep -Fq "READY|${sid}|" "${RUN_DIR}/findings.psv" || success=false
+  done
+  precheck_summary_add CAPACITY_READINESS "$success" "${RUN_DIR}/findings.psv" \
+    'HOME_SPACE INVENTORY_SPACE STAGE_SPACE TMP_SPACE'
+
+  success=false
+  [[ -e "${RUN_DIR}/prior_runs.txt" ]] && success=true
+  precheck_summary_add RUN_COORDINATION_READINESS "$success" "${RUN_DIR}/prior_runs.txt" \
+    'PRIOR_INCOMPLETE_RUN PRIOR_RUNNING'
+
+  success=false
+  if grep -Eq '^(READY:|OK$|VERIFIED$)' "${RUN_DIR}/maintenance_window.txt" 2>/dev/null; then success=true; fi
+  precheck_summary_add MAINTENANCE_WINDOW_READINESS "$success" "${RUN_DIR}/maintenance_window.txt" \
+    'WINDOW_INVALID WINDOW_UNKNOWN'
+}
+
+emit_precheck_result() {
+  local severity id sid_list timestamp
+  sid_list=$(opg_manifest_sids 2>/dev/null | paste -sd, -)
+  [[ -n "$sid_list" ]] || sid_list=UNKNOWN
+  timestamp=$(opg_now)
+  {
+    printf 'RESULT|host=%s|sid=%s|cycle=%s|timestamp=%s|run_id=%s|status=%s|exit_code=%s\n' \
+      "$HOST_NAME" "$sid_list" "$MONTH" "$timestamp" "$RUN_ID" "$ASSESSMENT_STATUS" "$ASSESSMENT_EXIT"
+    while IFS='|' read -r severity id _; do
+      [[ -n "$severity" && -n "$id" ]] || continue
+      printf 'FINDING|severity=%s|id=%s\n' "$severity" "$id"
+    done <"${RUN_DIR}/findings.psv"
+    while IFS='|' read -r severity id _; do
+      [[ -n "$severity" && -n "$id" ]] || continue
+      printf 'FINDING|severity=%s|id=%s\n' "$severity" "$id"
+    done <"${RUN_DIR}/precheck_summary.psv"
+  } | opg_atomic_write "${RUN_DIR}/precheck_result.psv"
+  while IFS='|' read -r severity id _; do
+    [[ -n "$severity" && -n "$id" ]] || continue
+    printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s\n' "$RUN_ID" "$severity" "$id"
+  done <"${RUN_DIR}/findings.psv"
+  while IFS='|' read -r severity id _; do
+    [[ -n "$severity" && -n "$id" ]] || continue
+    printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s\n' "$RUN_ID" "$severity" "$id"
+  done <"${RUN_DIR}/precheck_summary.psv"
+  printf 'OPG_PRECHECK_RESULT|host=%s|sid=%s|cycle=%s|timestamp=%s|run_id=%s|status=%s|exit_code=%s\n' \
+    "$HOST_NAME" "$sid_list" "$MONTH" "$timestamp" "$RUN_ID" "$ASSESSMENT_STATUS" "$ASSESSMENT_EXIT"
 }
 
 compare_opatch_versions() {
@@ -861,18 +1030,32 @@ validate_opatch_media() {
 }
 
 perform_assessment() {
+  local assessment_mode=${1:-formal}
   local owner central_inventory local_inventory db_dir ojvm_dir zip readme_count opatch_actual rc os_id os_version arch expected_owner
   local media_rc version_relation
-  local OPG_READ_ONLY_PHASE=true OPG_CHECK_PHASE=assess RECOVERY_MANIFEST_FILE
+  local OPG_READ_ONLY_PHASE=true OPG_CHECK_PHASE=assess OPG_WINDOW_BINDING_MODE=formal RECOVERY_MANIFEST_FILE OPG_STATE_READ_ONLY=false
+  [[ "$assessment_mode" == formal || "$assessment_mode" == precheck ]] || return "$EXIT_INVALID_PARAMS"
+  if [[ "$assessment_mode" == precheck ]]; then
+    OPG_STATE_READ_ONLY=true
+    OPG_WINDOW_BINDING_MODE=precheck
+  fi
   init_new_run || return $?
+  : >"${RUN_DIR}/findings.psv"; BLOCKED_COUNT=0; UNKNOWN_COUNT=0; CONDITIONAL_COUNT=0
+  DATABASE_BACKUP_VERIFIED=false; ORACLE_HOME_RECOVERY_VERIFIED=false; ROLLBACK_PLAN_VERIFIED=false
   if ! initialize_local_media; then
+    if [[ "$assessment_mode" == precheck ]]; then
+      opg_add_finding BLOCKED MEDIA_STAGE_UNAVAILABLE "Lokale immutable patchmedia kon niet betrouwbaar worden gevalideerd." "${LOCAL_STAGE_ROOT}"
+      opg_determine_assessment_status
+      write_precheck_summary
+      emit_precheck_result
+      return "$ASSESSMENT_EXIT"
+    fi
     opg_write_state BLOCKED MEDIA
     opg_result_line "$EXIT_BLOCKED" BLOCKED MEDIA
     return "$EXIT_BLOCKED"
   fi
   RECOVERY_MANIFEST_FILE="${RUN_DIR}/recovery_manifest.json"
   write_sql_files
-  : >"${RUN_DIR}/findings.psv"; BLOCKED_COUNT=0; UNKNOWN_COUNT=0; CONDITIONAL_COUNT=0
   opg_write_state 01_ASSESS_STARTED ASSESS
 
   if [[ ${OPG_TEST_MODE:-0} != 1 ]]; then
@@ -989,7 +1172,11 @@ perform_assessment() {
   [[ ${MOCK_ACTIVE_DATAPUMP:-false} == true ]] && opg_add_finding BLOCKED ACTIVE_DATAPUMP "Actieve Data Pump-taak gevonden." MOCK
   [[ ${MOCK_SQLPATCH_ERROR:-false} == true ]] && opg_add_finding BLOCKED SQLPATCH_ERROR "Bestaande SQL-patchfout gevonden." MOCK
 
-  write_patch_manifest
+  if [[ "$assessment_mode" == precheck ]]; then
+    write_patch_manifest false
+  else
+    write_patch_manifest true
+  fi
   opg_determine_assessment_status
   write_assessment_artifacts
   opg_atomic_write "${RUN_DIR}/rollback_plan.txt" <<EOF
@@ -1001,6 +1188,11 @@ Oracle Home-herstel geverifieerd: ${ORACLE_HOME_RECOVERY_VERIFIED}
 Bij binary patchfalen: stop, bewaar home/inventory/logs en volg de patch-README plus de lokaal goedgekeurde herstelprocedure.
 DB-RU: ${DB_PATCH}; OJVM: ${OJVM_PATCH}; Home: ${TARGET_ORACLE_HOME}
 EOF
+  if [[ "$assessment_mode" == precheck ]]; then
+    write_precheck_summary
+    emit_precheck_result
+    return "$ASSESSMENT_EXIT"
+  fi
   if [[ "$ASSESSMENT_STATUS" == READY || "$ASSESSMENT_STATUS" == CONDITIONAL ]]; then
     opg_write_state 02_ASSESS_OK ASSESS
   else
@@ -1295,7 +1487,7 @@ write_preapply_report() {
 perform_preapply_recheck() {
   local rc opatch_actual central_inventory os_id os_version arch owner db_dir ojvm_dir stored_recovery_hash current_recovery_hash
   local assessed_opatch planned_upgrade version_relation media_rc stored_approval_key_hash current_approval_key_hash
-  local OPG_READ_ONLY_PHASE=true OPG_CHECK_PHASE=preapply RECOVERY_MANIFEST_FILE="${RUN_DIR}/preapply_recovery_manifest.json"
+  local OPG_READ_ONLY_PHASE=true OPG_CHECK_PHASE=preapply OPG_WINDOW_BINDING_MODE=formal RECOVERY_MANIFEST_FILE="${RUN_DIR}/preapply_recovery_manifest.json"
   PREAPPLY_BLOCKED=0; PREAPPLY_UNKNOWN=0; : >"${RUN_DIR}/preapply_findings.psv"
   db_dir="${PATCH_ROOT}/${MONTH}/${DB_PATCH}"; ojvm_dir="${PATCH_ROOT}/${MONTH}/${OJVM_PATCH}"
 
@@ -2491,6 +2683,7 @@ trap 'handle_signal INT' INT
 trap 'handle_signal HUP' HUP
 
 case "$COMMAND" in
+  precheck) perform_assessment precheck; exit $? ;;
   assess) perform_assessment; exit $? ;;
   plan) generate_plan; exit $? ;;
   apply) perform_apply; exit $? ;;

@@ -30,6 +30,16 @@ record() {
   fi
 }
 
+record_precheck() {
+  local name=$1 expected=$2 actual=$3 output_file=$4 last_line
+  last_line=$(tail -n 1 "$output_file" 2>/dev/null || true)
+  if [[ "$expected" == "$actual" && "$last_line" == OPG_PRECHECK_RESULT\|*"|exit_code=${expected}" ]]; then
+    printf 'ok - %s (rc=%s, OPG_PRECHECK_RESULT=ok)\n' "$name" "$actual"; PASS=$((PASS+1))
+  else
+    printf 'not ok - %s (verwacht=%s actueel=%s result=%s)\n' "$name" "$expected" "$actual" "${last_line:-ONTBREEKT}"; FAIL=$((FAIL+1))
+  fi
+}
+
 assert_no_downtime_started() {
   local name=$1 run=$2
   if compgen -G "$RUN_ROOT/$run/shutdown_*.log" >/dev/null || compgen -G "$RUN_ROOT/$run/listener_stop_*.log" >/dev/null; then
@@ -116,6 +126,21 @@ EOF
 assess() {
   local run=$1
   guard assess --non-interactive --target-oracle-home "$HOME_DIR" --run-id "$run" 39472050 39222882 JUL2026 12.2.0.1.52 p6880880_190000_Linux-x86-64.zip >"$CASE_DIR/${run}.out" 2>&1
+}
+precheck() {
+  local run=$1
+  guard precheck --non-interactive --target-oracle-home "$HOME_DIR" --run-id "$run" 39472050 39222882 JUL2026 12.2.0.1.52 p6880880_190000_Linux-x86-64.zip >"$CASE_DIR/${run}.out" 2>&1
+}
+enable_slow_sha256() {
+  local delay=${1:-2} mock_bin="$CASE_DIR/mock-bin"
+  mkdir -p "$mock_bin"
+  cat >"$mock_bin/sha256sum" <<EOF
+#!/usr/bin/env bash
+sleep $delay
+exec /usr/bin/sha256sum "\$@"
+EOF
+  chmod 0750 "$mock_bin/sha256sum"
+  sed -i "s|^SAFE_PATH=.*|SAFE_PATH=$mock_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|" "$CONFIG"
 }
 plan() {
   local run=$1
@@ -508,6 +533,158 @@ guard apply --non-interactive --run-id P0R13 --approved-manifest "$RUN_ROOT/P0R1
 
 setup_case p0restorefail; sed -i 's/PDB1=READ WRITE/PDB1=MOUNTED/' "$CASE_DIR/fixture/database_inventory.csv"; assess P0R14 >/dev/null; plan P0R14 >/dev/null; token=$(approval P0R14); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=MOUNTED'\nMOCK_PDB_RESTORE_FINAL_STATES='PDB1=READ WRITE'\n" >>"$FIXTURE_ENV"
 guard apply --non-interactive --run-id P0R14 --approved-manifest "$RUN_ROOT/P0R14/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 oorspronkelijke PDB-state kan niet worden hersteld en faalt gesloten' 40 $? "$CASE_DIR/apply.out"
+
+# PRECHECK gebruikt exact de bestaande assessmentfunctie, maar publiceert geen
+# formele state of manifest en kan daardoor nooit een APPLY autoriseren.
+setup_case precheckready
+(
+  # De productiefixture bevat bewust een verplichte CONDITIONAL voor home
+  # recovery. Valideer READY daarom rechtstreeks via dezelfde statusengine.
+  # shellcheck source=project/lib/opg_core.sh
+  source "$ROOT/lib/opg_core.sh"
+  # De ingeladen statusfunctie leest deze variabelen indirect.
+  # shellcheck disable=SC2034
+  BLOCKED_COUNT=0 UNKNOWN_COUNT=0 CONDITIONAL_COUNT=0
+  opg_determine_assessment_status
+  [[ "$ASSESSMENT_STATUS" == READY && "$ASSESSMENT_EXIT" == 0 ]]
+)
+record 'PRECHECK READY-classificatie gebruikt bestaande assessmentstatus' 0 $?
+
+setup_case precheckconditional; precheck PC1; rc=$?
+[[ ! -e "$RUN_ROOT/PC1/execution_state.json" && ! -e "$RUN_ROOT/PC1/patch_manifest.json" && ! -e "$RUN_ROOT/PC1/approval.json" ]] || rc=99
+grep -Fq 'CONDITIONAL|HOME_RECOVERY_REBUILD_VERIFIED|' "$RUN_ROOT/PC1/findings.psv" || rc=98
+record_precheck 'PRECHECK CONDITIONAL zonder formele state/approval' 10 "$rc" "$CASE_DIR/PC1.out"
+summary_rc=0
+for summary_id in PATCH_CONFLICT_READINESS TOPOLOGY_READINESS DATABASE_RUNTIME_READINESS LISTENER_READINESS INVALID_OBJECT_READINESS DATAPUMP_READINESS DATAGUARD_READINESS CAPACITY_READINESS RUN_COORDINATION_READINESS MAINTENANCE_WINDOW_READINESS; do
+  grep -Fq "OPG_PRECHECK_FINDING|run_id=PC1|severity=READY|id=${summary_id}" "$CASE_DIR/PC1.out" || summary_rc=99
+done
+record 'succesvolle PRECHECK-controles tonen compacte READY-summary' 0 "$summary_rc"
+
+setup_case precheckblocked; printf '\nMOCK_RC_conflict_db_ru=1\n' >>"$FIXTURE_ENV"; precheck PB1; rc=$?
+grep -Fq 'BLOCKED|DB_RU_CONFLICT|' "$RUN_ROOT/PB1/findings.psv" || rc=99
+record_precheck 'PRECHECK BLOCKED toont blocker machineleesbaar' 20 "$rc" "$CASE_DIR/PB1.out"
+blocked_summary_rc=0
+grep -Fq 'OPG_PRECHECK_FINDING|run_id=PB1|severity=BLOCKED|id=PATCH_CONFLICT_READINESS' "$CASE_DIR/PB1.out" || blocked_summary_rc=99
+grep -Fq 'OPG_PRECHECK_FINDING|run_id=PB1|severity=READY|id=PATCH_CONFLICT_READINESS' "$CASE_DIR/PB1.out" && blocked_summary_rc=98
+record 'BLOCKED onderliggende check krijgt nooit misleidende READY-summary' 0 "$blocked_summary_rc"
+
+setup_case precheckunknown; printf '\nMOCK_CHECK_ORACLE_HOME_RECOVERY=UNKNOWN\n' >>"$FIXTURE_ENV"; precheck PU1; rc=$?
+grep -Fq 'UNKNOWN|HOME_RECOVERY_UNKNOWN|' "$RUN_ROOT/PU1/findings.psv" || rc=99
+[[ ! -e "$RUN_ROOT/PU1/execution_state.json" && ! -e "$RUN_ROOT/PU1/patch_manifest.json" && ! -e "$RUN_ROOT/PU1/approval.json" ]] || rc=98
+record_precheck 'PRECHECK UNKNOWN blijft fail-closed' 30 "$rc" "$CASE_DIR/PU1.out"
+unknown_summary_rc=0
+grep -Fq 'OPG_PRECHECK_FINDING|run_id=PU1|severity=UNKNOWN|id=BACKUP_RECOVERY_READINESS' "$CASE_DIR/PU1.out" || unknown_summary_rc=99
+grep -Fq 'OPG_PRECHECK_FINDING|run_id=PU1|severity=READY|id=BACKUP_RECOVERY_READINESS' "$CASE_DIR/PU1.out" && unknown_summary_rc=98
+record 'UNKNOWN onderliggende check blijft UNKNOWN in PRECHECK-summary' 0 "$unknown_summary_rc"
+
+setup_case precheckrepeat; precheck PR1 >/dev/null; first_rc=$?; precheck PR2; second_rc=$?
+[[ "$first_rc" == 10 && -d "$RUN_ROOT/PR1" && -d "$RUN_ROOT/PR2" ]] || second_rc=99
+record_precheck 'twee PRECHECK-runs gebruiken onafhankelijke directories' 10 "$second_rc" "$CASE_DIR/PR2.out"
+
+setup_case precheckcollision
+guard precheck --non-interactive --target-oracle-home "$HOME_DIR" --run-id PCRACE 39472050 39222882 JUL2026 12.2.0.1.52 p6880880_190000_Linux-x86-64.zip >"$CASE_DIR/race-a.out" 2>&1 & race_a=$!
+guard precheck --non-interactive --target-oracle-home "$HOME_DIR" --run-id PCRACE 39472050 39222882 JUL2026 12.2.0.1.52 p6880880_190000_Linux-x86-64.zip >"$CASE_DIR/race-b.out" 2>&1 & race_b=$!
+wait "$race_a"; race_a_rc=$?; wait "$race_b"; race_b_rc=$?
+race_rc=0
+if [[ "$race_a_rc:$race_b_rc" != 10:20 && "$race_a_rc:$race_b_rc" != 20:10 ]]; then race_rc=99; fi
+[[ -d "$RUN_ROOT/PCRACE" && ! -e "$RUN_ROOT/PCRACE/execution_state.json" && ! -e "$RUN_ROOT/PCRACE/patch_manifest.json" ]] || race_rc=98
+[[ $(find "$RUN_ROOT" -mindepth 1 -maxdepth 1 -type d -name PCRACE | wc -l) -eq 1 ]] || race_rc=97
+record 'gelijke PRECHECK RUN_ID wordt atomisch eenmaal geclaimd' 0 "$race_rc"
+
+setup_case precheckresolved; printf '\nMOCK_RC_conflict_db_ru=1\n' >>"$FIXTURE_ENV"; precheck PF1 >/dev/null; blocked_rc=$?
+sed -i '/MOCK_RC_conflict_db_ru=1/d' "$FIXTURE_ENV"; precheck PF2; fixed_rc=$?
+[[ "$blocked_rc" == 20 && "$fixed_rc" == 10 && ! -e "$RUN_ROOT/PF2/execution_state.json" ]] || fixed_rc=99
+record_precheck 'opgelost probleem wordt door nieuwe PRECHECK opnieuw beoordeeld' 10 "$fixed_rc" "$CASE_DIR/PF2.out"
+
+setup_case precheckplan; precheck PP-CHECK >/dev/null; guard plan --non-interactive --target-oracle-home "$HOME_DIR" --run-id PP-FORMAL 39472050 39222882 JUL2026 12.2.0.1.52 p6880880_190000_Linux-x86-64.zip >"$CASE_DIR/PP-FORMAL.out" 2>&1; rc=$?
+[[ "$rc" == 0 && -f "$RUN_ROOT/PP-FORMAL/patch_manifest.json" && -f "$RUN_ROOT/PP-FORMAL/execution_state.json" && ! -e "$RUN_ROOT/PP-CHECK/patch_manifest.json" ]] || rc=99
+grep -Fq '"run_id": "PP-FORMAL"' "$RUN_ROOT/PP-FORMAL/patch_manifest.json" || rc=98
+grep -Fq 'PP-CHECK' "$RUN_ROOT/PP-FORMAL/patch_manifest.json" && rc=97
+record 'PLAN na PRECHECK maakt een eigen formeel manifest' 0 "$rc" "$CASE_DIR/PP-FORMAL.out"
+plan_summary_rc=0
+[[ ! -e "$RUN_ROOT/PP-FORMAL/precheck_summary.psv" ]] || plan_summary_rc=99
+grep -Fq '_READINESS' "$CASE_DIR/PP-FORMAL.out" && plan_summary_rc=98
+record 'PLAN produceert geen PRECHECK-summary-findings' 0 "$plan_summary_rc"
+
+setup_case precheckrerun; precheck PR-CHECK >/dev/null; printf '\nMOCK_RC_conflict_db_ru=1\n' >>"$FIXTURE_ENV"
+guard plan --non-interactive --target-oracle-home "$HOME_DIR" --run-id PR-FORMAL 39472050 39222882 JUL2026 12.2.0.1.52 p6880880_190000_Linux-x86-64.zip >"$CASE_DIR/PR-FORMAL.out" 2>&1; rc=$?
+grep -Fq 'BLOCKED|DB_RU_CONFLICT|' "$RUN_ROOT/PR-FORMAL/findings.psv" || rc=99
+record 'PLAN vertrouwt PRECHECK niet en voert checks opnieuw uit' 20 "$rc" "$CASE_DIR/PR-FORMAL.out"
+
+setup_case precheckwindow
+window_manifest="$CASE_DIR/maintenance_window.conf"
+window_start=$(date -u -d "@$(( $(date +%s) - 60 ))" '+%Y-%m-%dT%H:%M:%SZ')
+window_end=$(date -u -d "@$(( $(date +%s) + 7200 ))" '+%Y-%m-%dT%H:%M:%SZ')
+cat >"$window_manifest" <<EOF
+hostname=$(hostname -f 2>/dev/null || hostname)
+change_id=PRECHECK-WINDOW-TEST
+start=$window_start
+end=$window_end
+allowed_oracle_home=$HOME_DIR
+run_id=OLDER-FORMAL-RUN
+min_remaining_minutes=30
+EOF
+chmod 0640 "$window_manifest"
+printf '\nMAINTENANCE_WINDOW_CHECK_COMMAND=%s/checks/check_maintenance_window\nMAINTENANCE_WINDOW_MANIFEST=%s\n' "$ROOT" "$window_manifest" >>"$CONFIG"
+sed -i 's/^MOCK_CHECK_MAINTENANCE_WINDOW=.*/MOCK_CHECK_MAINTENANCE_WINDOW=EXECUTE/' "$FIXTURE_ENV"
+printf '{"run_id":"FORMAL-RUN","state":"APPROVED"}\n' >"$CASE_DIR/current_run.json"
+mkdir "$CASE_DIR/approval-root"; printf 'signed-approval-sentinel\n' >"$CASE_DIR/approval-root/approval.sig"
+context_before=$(sha256sum "$CASE_DIR/current_run.json" | awk '{print $1}')
+approval_before=$(sha256sum "$CASE_DIR/approval-root/approval.sig" | awk '{print $1}')
+precheck PWINDOW; precheck_window_rc=$?
+[[ $precheck_window_rc -eq 10 ]] || precheck_window_rc=99
+grep -Fq 'READY: change_id=PRECHECK-WINDOW-TEST' "$RUN_ROOT/PWINDOW/maintenance_window.txt" || precheck_window_rc=98
+grep -Fq 'WINDOW_INVALID' "$RUN_ROOT/PWINDOW/findings.psv" && precheck_window_rc=97
+[[ ! -e "$RUN_ROOT/PWINDOW/execution_state.json" && ! -e "$RUN_ROOT/PWINDOW/patch_manifest.json" && ! -e "$RUN_ROOT/PWINDOW/approval.json" ]] || precheck_window_rc=96
+[[ "$context_before" == "$(sha256sum "$CASE_DIR/current_run.json" | awk '{print $1}')" && "$approval_before" == "$(sha256sum "$CASE_DIR/approval-root/approval.sig" | awk '{print $1}')" ]] || precheck_window_rc=95
+record_precheck 'PRECHECK valideert window-readiness zonder formele RUN_ID-binding' 10 "$precheck_window_rc" "$CASE_DIR/PWINDOW.out"
+
+guard assess --non-interactive --target-oracle-home "$HOME_DIR" --run-id PWINDOW-FORMAL 39472050 39222882 JUL2026 12.2.0.1.52 p6880880_190000_Linux-x86-64.zip >"$CASE_DIR/PWINDOW-FORMAL.out" 2>&1; formal_window_rc=$?
+grep -Fq 'BLOCKED: run_id mismatch:' "$RUN_ROOT/PWINDOW-FORMAL/maintenance_window.txt" || formal_window_rc=99
+grep -Fq 'BLOCKED|WINDOW_INVALID|' "$RUN_ROOT/PWINDOW-FORMAL/findings.psv" || formal_window_rc=98
+record 'formele ASSESS behoudt strikte maintenance-window RUN_ID-binding' 20 "$formal_window_rc" "$CASE_DIR/PWINDOW-FORMAL.out"
+
+setup_case precheckapply; precheck PA1 >/dev/null
+guard apply --non-interactive --run-id PA1 --approved-manifest "$RUN_ROOT/PA1/patch_manifest.json" --approval-token "$RUN_ROOT/PA1/approval.json" >"$CASE_DIR/apply.out" 2>&1
+rc=$?; grep -Fq 'Bestaande runcontext ontbreekt.' "$CASE_DIR/apply.out" || rc=99
+record 'PRECHECK kan APPLY nooit autoriseren' 20 "$rc"; assert_no_downtime_started 'PRECHECK-APPLY bereikt geen downtime' PA1
+
+setup_case precheckmulti multiple_databases; printf 'DB1:%s:Y\nDB2:%s:Y\n' "$HOME_DIR" "$HOME_DIR" >"$ORATAB"; precheck PM1 >/dev/null; assess PM2 >/dev/null
+cut -d'|' -f1,2 "$RUN_ROOT/PM1/findings.psv" | sort >"$CASE_DIR/precheck.findings"
+cut -d'|' -f1,2 "$RUN_ROOT/PM2/findings.psv" | sort >"$CASE_DIR/assess.findings"
+cmp -s "$CASE_DIR/precheck.findings" "$CASE_DIR/assess.findings"; record 'multi-SID PRECHECK en ASSESS gebruiken identieke regels' 0 $?
+
+setup_case precheckreadonly; precheck PRO1 >/dev/null; rc=$?
+if compgen -G "$RUN_ROOT/PRO1/shutdown_*.log" >/dev/null || compgen -G "$RUN_ROOT/PRO1/listener_stop_*.log" >/dev/null || compgen -G "$RUN_ROOT/PRO1/apply_*.log" >/dev/null || compgen -G "$RUN_ROOT/PRO1/datapatch_*.log" >/dev/null; then rc=99; fi
+[[ ! -e "$RUN_ROOT/PRO1/patch_manifest.sha256" ]] || rc=98
+record 'PRECHECK blijft read-only en publiceert geen manifesthash' 10 "$rc"
+
+for signal in TERM INT; do
+  setup_case "prechecksignal${signal,,}"
+  enable_slow_sha256 2
+  signal_run="PS${signal}"
+  signal_context="$CASE_DIR/current_run.json"
+  signal_approval_root="$CASE_DIR/approvals"
+  mkdir -p "$signal_approval_root/FORMAL-RUN"
+  printf '{"run_id":"FORMAL-RUN","state":"APPROVED"}\n' >"$signal_context"
+  printf 'signed-approval-sentinel\n' >"$signal_approval_root/FORMAL-RUN/approval.sig"
+  context_before=$(sha256sum "$signal_context" | awk '{print $1}')
+  approval_before=$(find "$signal_approval_root" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)
+  guard precheck --non-interactive --target-oracle-home "$HOME_DIR" --run-id "$signal_run" 39472050 39222882 JUL2026 12.2.0.1.52 p6880880_190000_Linux-x86-64.zip >"$CASE_DIR/${signal_run}.out" 2>&1 & signal_pid=$!
+  for _ in {1..200}; do
+    [[ -d "$RUN_ROOT/$signal_run" ]] && break
+    kill -0 "$signal_pid" 2>/dev/null || break
+    sleep 0.01
+  done
+  kill -s "$signal" "$signal_pid" 2>/dev/null || true
+  wait "$signal_pid"; signal_rc=$?
+  isolation_rc=0
+  [[ "$signal_rc" -ne 0 && -d "$RUN_ROOT/$signal_run" ]] || isolation_rc=99
+  [[ ! -e "$RUN_ROOT/$signal_run/execution_state.json" && ! -e "$RUN_ROOT/$signal_run/patch_manifest.json" && ! -e "$RUN_ROOT/$signal_run/approval.json" ]] || isolation_rc=98
+  [[ "$context_before" == "$(sha256sum "$signal_context" | awk '{print $1}')" ]] || isolation_rc=97
+  [[ "$approval_before" == "$(find "$signal_approval_root" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)" ]] || isolation_rc=96
+  record "${signal} tijdens PRECHECK schrijft geen formele lifecycle-artifacts" 0 "$isolation_rc"
+done
 
 printf '\nResultaat: %s geslaagd, %s mislukt\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

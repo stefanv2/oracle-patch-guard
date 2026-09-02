@@ -13,8 +13,12 @@ staged media, cryptografische goedkeuring en multi-target-ondersteuning.
 De gecontroleerde workflow is:
 
 ```text
-PLAN → APPROVE → APPLY
+PRECHECK → PLAN → APPROVE → APPLY
 ```
+
+PRECHECK voert dezelfde readinesschecks read-only en herhaalbaar uit, zonder
+formeel manifest, approval staging of wijziging van de actieve runcontext. Een
+latere PLAN voert deze checks altijd opnieuw uit.
 
 PLAN legt een fail-closed preflight-assessment vast en bindt het exacte target,
 de Oracle Home, patchmedia en recovery-evidence in een immutable manifest.

@@ -102,12 +102,16 @@ BLOCKED=DBHOST03-ORCL3-JUL2026-OEM-20260827T120002Z
 UNKNOWN=DBHOST04-ORCL4-JUL2026-OEM-20260827T120003Z
 APPROVED=DBHOST05-ORCL5-JUL2026-OEM-20260827T120004Z
 COMPLETE=DBHOST06-ORCL6-JUL2026-OEM-20260827T120005Z
+PRECHECK_ONLY=DBHOST21-ORCL21-JUL2026-PRECHECK-20260827T120006Z
 make_run "$READY_A" DBHOST01 ORCL1 1787832000
 make_run "$CONDITIONAL" DBHOST02 ORCL2 1787832001 CONDITIONAL
 make_run "$BLOCKED" DBHOST03 ORCL3 1787832002 BLOCKED
 make_run "$UNKNOWN" DBHOST04 ORCL4 1787832003; printf '{broken\n' >"$APPROVALS/$UNKNOWN/assessment.json"
 make_run "$APPROVED" DBHOST05 ORCL5 1787832004; sign_direct "$APPROVED"
 make_run "$COMPLETE" DBHOST06 ORCL6 1787832005 READY 12_COMPLETE COMPLETE; sign_direct "$COMPLETE"
+mkdir "$APPROVALS/$PRECHECK_ONLY"
+printf '{"run_id":"%s","status":"UNKNOWN"}\n' "$PRECHECK_ONLY" >"$APPROVALS/$PRECHECK_ONLY/assessment.json"
+printf 'UNKNOWN|PRECHECK_TEST|test|evidence\n' >"$APPROVALS/$PRECHECK_ONLY/findings.psv"
 : >"$LOG"
 run_batch --all --dry-run >"$OUT" 2>&1; rc=$?
 ready_section=$(sed '/^SKIPPED:/,$d' "$OUT")
@@ -121,6 +125,8 @@ record 'UNKNOWN wordt nooit geselecteerd' $?
 record 'APPROVED wordt nooit opnieuw gesigned' $?
 [[ "$ready_section" != *"$COMPLETE"* && ! -s "$LOG" ]]
 record 'COMPLETE wordt nooit geselecteerd' $?
+[[ "$ready_section" != *"$PRECHECK_ONLY"* && $(grep -c "$PRECHECK_ONLY" "$OUT") -eq 1 && ! -s "$LOG" ]]
+record 'PRECHECK-directory is niet selecteerbaar door batch signer' $?
 
 setup_case conditional
 CONDITIONAL=DBHOST02-ORCL2-JUL2026-OEM-20260827T121001Z

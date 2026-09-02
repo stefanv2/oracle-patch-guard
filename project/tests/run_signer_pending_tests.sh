@@ -100,6 +100,7 @@ CORRUPT_COMPLETION=DBHOST17-ORCL17-JUL2026-OEM-20260827T120016Z
 BAD_MANIFEST_SIG=DBHOST18-ORCL18-JUL2026-OEM-20260827T120017Z
 SYMLINK_COMPLETION=DBHOST19-ORCL19-JUL2026-OEM-20260827T120018Z
 LIVE_EXPIRED_COMPLETE=DBHOST20-ORCL20-JUL2026-OEM-20260827T120600Z
+PRECHECK_ONLY=DBHOST21-ORCL21-JUL2026-PRECHECK-20260827T120700Z
 TEST_NOW=$(date +%s)
 HISTORIC_EXPIRY=$((TEST_NOW - 3600))
 LIVE_COMPLETION_EPOCH=1787834226
@@ -125,6 +126,10 @@ make_run "$CORRUPT_COMPLETION" DBHOST17 ORCL17 JUL2026 $((HISTORIC_EXPIRY - 600)
 make_run "$BAD_MANIFEST_SIG" DBHOST18 ORCL18 JUL2026 $((HISTORIC_EXPIRY - 600)); approve_run "$BAD_MANIFEST_SIG" "$HISTORIC_EXPIRY"; write_completion "$BAD_MANIFEST_SIG" ORCL18 $((HISTORIC_EXPIRY - 60)); printf '\000' | dd of="$APPROVALS/$BAD_MANIFEST_SIG/patch_manifest.sig" bs=1 count=1 conv=notrunc status=none
 make_run "$SYMLINK_COMPLETION" DBHOST19 ORCL19 JUL2026 $((HISTORIC_EXPIRY - 600)); approve_run "$SYMLINK_COMPLETION" "$HISTORIC_EXPIRY"; printf '{}\n' >"$BASE/outside-completion.json"; ln -s "$BASE/outside-completion.json" "$APPROVALS/$SYMLINK_COMPLETION/completion.json"
 make_run "$LIVE_EXPIRED_COMPLETE" dbhost20.example.com '' JUL2026 $((LIVE_COMPLETION_EPOCH - 600)); approve_run "$LIVE_EXPIRED_COMPLETE" "$LIVE_EXPIRES_EPOCH"; write_completion "$LIVE_EXPIRED_COMPLETE" ORCL20 "$LIVE_COMPLETION_EPOCH"
+mkdir "$APPROVALS/$PRECHECK_ONLY"
+printf '{"run_id":"%s","status":"UNKNOWN"}\n' "$PRECHECK_ONLY" >"$APPROVALS/$PRECHECK_ONLY/assessment.json"
+printf 'UNKNOWN|PRECHECK_TEST|test|evidence\n' >"$APPROVALS/$PRECHECK_ONLY/findings.psv"
+printf 'UNKNOWN|run_id=%s|exit_code=30\n' "$PRECHECK_ONLY" >"$APPROVALS/$PRECHECK_ONLY/precheck_result.psv"
 
 default_out=$(run_list); default_rows=$(printf '%s\n' "$default_out" | awk 'NR>1{print $5"|"$6}')
 [[ $(printf '%s\n' "$default_rows" | wc -l) -eq 4 && "$default_rows" != *APPROVED* && "$default_rows" != *COMPLETE* && "$default_rows" != *UNKNOWN* ]]
@@ -184,6 +189,11 @@ printf '%s\n' "$list_out" | awk -v r="$BAD_MANIFEST_SIG" '$6==r && $5=="UNKNOWN"
 record 'ongeldige manifestsignature met completion is UNKNOWN' 0 $?
 printf '%s\n' "$list_out" | awk -v r="$SYMLINK_COMPLETION" '$6==r && $5=="UNKNOWN"{found=1}END{exit !found}'
 record 'symlink completion is UNKNOWN' 0 $?
+printf '%s\n' "$list_out" | awk -v r="$PRECHECK_ONLY" '$6==r && $5=="UNKNOWN"{found=1}END{exit !found}'
+record 'handmatig onder approval-root geplaatste PRECHECK blijft UNKNOWN' 0 $?
+printf '%s\n' "$default_out" | grep -Fq "$PRECHECK_ONLY"; precheck_pending_rc=$?
+[[ $precheck_pending_rc -ne 0 ]]
+record 'PRECHECK wordt niet als PENDING geselecteerd' 0 $?
 
 printf '%s\n' "$list_out" | awk -v a="$PENDING_A" -v b="$PENDING_B" '$6==a && $1=="DBHOST01"{x=1}$6==b && $1=="DBHOST02"{y=1}END{exit !(x&&y)}'
 record 'multi-target runs blijven afzonderlijk gekoppeld' 0 $?

@@ -207,6 +207,46 @@ setup_case configpaths; unset OPG_TEST_OPG_ROOT OPG_TEST_APPROVAL_ROOT; run_wrap
 setup_case relativeopg; sed -i "s|^OPG_ROOT=.*|OPG_ROOT=relative/oracle-patch-guard|" "$CONFIG"; unset OPG_TEST_OPG_ROOT OPG_TEST_APPROVAL_ROOT; run_wrapper prepare; record 'OEM-wrapper weigert relatieve OPG_ROOT' 20 $?
 setup_case missingapprovalroot; sed -i '/^APPROVAL_ROOT=/d' "$CONFIG"; unset OPG_TEST_OPG_ROOT OPG_TEST_APPROVAL_ROOT; run_wrapper prepare; record 'OEM-wrapper faalt bij ontbrekende APPROVAL_ROOT' 20 $?
 
+# PRECHECK gebruikt discovery en cyclemetadata, maar raakt current_run.json niet.
+setup_case precheckroute; export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090000Z; run_wrapper precheck; rc=$?
+precheck_run=svtest-DB1-JUL2026-PRECHECK-20260824T090000Z
+grep -q "^core|precheck --non-interactive --target-oracle-home ${HOME_DIR} --run-id ${precheck_run} --config ${CONFIG} 39472050 39222882 JUL2026 12.2.0.1.52 p6880880_190000_Linux-x86-64.zip$" "$CASE/routes.log" || rc=99
+[[ ! -e "$CONTEXT_ROOT/current_run.json" ]] || rc=98
+[[ -z "$(find "$OPG_ROOT/approvals" -mindepth 1 -print -quit)" ]] || rc=97
+record 'OEM PRECHECK route maakt geen formele current context' 0 "$rc"
+
+setup_case precheckpreserve; run_wrapper prepare; context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}'); export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090100Z; run_wrapper precheck; rc=$?
+[[ "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" ]] || rc=99
+record 'OEM PRECHECK overschrijft bestaande current run niet' 0 "$rc"
+
+setup_case precheckapprovedapply; run_wrapper prepare; approved_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$approved_run" 03_PLAN_GENERATED PLAN; prepare_approval_run "$approved_run"
+context_before=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')
+approval_before=$(find "$OPG_ROOT/approvals/$approved_run" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)
+export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090150Z; run_wrapper precheck; rc=$?
+[[ "$context_before" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" ]] || rc=99
+[[ "$approval_before" == "$(find "$OPG_ROOT/approvals/$approved_run" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)" ]] || rc=98
+run_wrapper apply; apply_rc=$?
+grep -q "^apply|.*args=${approved_run} ${OPG_ROOT}/approvals/${approved_run}/patch_manifest.json ${OPG_ROOT}/approvals/${approved_run}/approval.json ${CONFIG}$" "$CASE/routes.log" || apply_rc=97
+[[ $rc -eq 0 && $apply_rc -eq 0 ]] || apply_rc=96
+record 'APPROVED -> PRECHECK -> APPLY behoudt formele run en approvals byte-identiek' 0 "$apply_rc"
+
+setup_case precheckunknownisolation; run_wrapper prepare; formal_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$formal_run" 03_PLAN_GENERATED PLAN; prepare_approval_run "$formal_run"
+context_before=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')
+approval_before=$(find "$OPG_ROOT/approvals" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)
+printf '30\n' >"$CASE/core.rc"; export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090151Z; run_wrapper precheck; unknown_rc=$?
+unknown_isolation_rc=0
+[[ $unknown_rc -eq 30 && "$context_before" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" ]] || unknown_isolation_rc=99
+[[ "$approval_before" == "$(find "$OPG_ROOT/approvals" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)" ]] || unknown_isolation_rc=98
+[[ ! -d "$OPG_ROOT/approvals/svtest-DB1-JUL2026-PRECHECK-20260824T090151Z" ]] || unknown_isolation_rc=97
+record 'PRECHECK UNKNOWN wijzigt current context en approval-root niet' 0 "$unknown_isolation_rc"
+
+setup_case precheckrepeat; export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090200Z; run_wrapper precheck; first_rc=$?; export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090201Z; run_wrapper precheck; second_rc=$?
+grep -q 'PRECHECK-20260824T090200Z' "$CASE/routes.log" || second_rc=99
+grep -q 'PRECHECK-20260824T090201Z' "$CASE/routes.log" || second_rc=98
+[[ "$first_rc" == 0 && ! -e "$CONTEXT_ROOT/current_run.json" ]] || second_rc=97
+record 'OEM PRECHECK is herhaalbaar met unieke RUN_ID' 0 "$second_rc"
+unset OPG_TEST_PRECHECK_RUN_STAMP
+
 runtime_path_hits=0
 grep -F '/mnt/patch-share/oracle-patch-guard' "$ROOT/oem-tasks/opg_context_root.sh" "$ROOT/oem-tasks/opg_oem.sh" "$ROOT/oem-tasks/opg_stage_approval.sh" "$ROOT/oem-tasks/opg_media_stage_root.py" "$ROOT/project/oem_approval_check.sh" "$ROOT/signer/opg_list_pending.sh" >/dev/null 2>&1 && runtime_path_hits=1
 record 'actieve runtime bevat geen generieke Oracle Patch Guard-sharefallback' 0 "$runtime_path_hits"

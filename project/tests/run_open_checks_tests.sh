@@ -121,6 +121,12 @@ min_remaining_minutes=30
 EOF
 chmod 0640 "$WINDOW"
 expect_rc 'geldig actief onderhoudsvenster' 0 bash "$ROOT/checks/check_maintenance_window"
+sed -i 's/run_id=REC1/run_id=OLDER-FORMAL-RUN/' "$WINDOW"
+export OPG_WINDOW_BINDING_MODE=precheck
+expect_rc 'PRECHECK accepteert geldige readiness van anders gebonden formeel venster' 0 bash "$ROOT/checks/check_maintenance_window"
+export OPG_WINDOW_BINDING_MODE=formal
+expect_rc 'formele windowvalidatie behoudt strikte RUN_ID-binding' 2 bash "$ROOT/checks/check_maintenance_window"
+sed -i 's/run_id=OLDER-FORMAL-RUN/run_id=REC1/' "$WINDOW"
 export OPG_NOW_EPOCH_OVERRIDE=1785942000
 expect_rc 'verlopen onderhoudsvenster' 2 bash "$ROOT/checks/check_maintenance_window"
 export OPG_NOW_EPOCH_OVERRIDE=1785937500
@@ -128,6 +134,9 @@ expect_rc 'onvoldoende resterende venstertijd' 2 bash "$ROOT/checks/check_mainte
 export OPG_NOW_EPOCH_OVERRIDE=1785931200
 sed -i 's/hostname=pilot.example/hostname=other.example/' "$WINDOW"
 expect_rc 'verkeerde host in venster' 2 bash "$ROOT/checks/check_maintenance_window"
+export OPG_WINDOW_BINDING_MODE=precheck
+expect_rc 'PRECHECK versoepelt inhoudelijk ongeldige window niet' 2 bash "$ROOT/checks/check_maintenance_window"
+export OPG_WINDOW_BINDING_MODE=formal
 sed -i 's/hostname=other.example/hostname=pilot.example/' "$WINDOW"
 chmod 0666 "$WINDOW"
 if [[ $(stat -c '%a' "$WINDOW") == 666 ]]; then expect_rc 'onveilige venstermanifestrechten' 2 bash "$ROOT/checks/check_maintenance_window"
