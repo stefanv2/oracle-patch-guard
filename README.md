@@ -10,6 +10,13 @@ staged media, cryptografische goedkeuring en multi-target-ondersteuning.
        width="900">
 </p>
 
+## Ketenoverzicht
+
+Onderstaand overzicht laat zien hoe Oracle Patch Guard een nieuwe patchrelease
+van voorbereiding tot gecontroleerde uitvoering en bewijsvoering verwerkt.
+
+![Oracle Patch Guard ketenoverzicht](docs/images/oracle_patch_guard_ketenoverzicht.png)
+
 De gecontroleerde workflow is:
 
 ```text
