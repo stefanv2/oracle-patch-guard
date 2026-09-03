@@ -1,5 +1,11 @@
 # Nieuwe patchcycle toevoegen en activeren
 
+<p align="center">
+  <img src="docs/images/oracle-patch-guard-patch-cycle-guide.png"
+       alt="Oracle Patch Guard — Patch Cycle Guide"
+       width="1200">
+</p>
+
 Deze handleiding beschrijft de actuele werkwijze voor het voorbereiden,
 ondertekenen, activeren en gebruiken van een nieuwe Oracle Patch Guard-cycle.
 Het praktijkvoorbeeld is de geteste overgang:
