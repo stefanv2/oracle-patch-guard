@@ -29,22 +29,51 @@ De eerste drie zijn niet in de aangeleverde Pilot05g/OEM14-bronset opgenomen en 
 Plaats de actieve-cyclepointer als regulier, niet-symlink en niet group/world-writable bestand:
 
 ```text
-/mnt/patch-share/oracle-patch-guard/config/active_cycle
+/mnt/datadomain/software/patches/Linux/oracle-patch-guard/config/active_cycle
 ```
+
+Dit is `${OPG_ROOT}/config/active_cycle` en nadrukkelijk niet
+`current/config/active_cycle`. `current` selecteert de immutable softwarerelease;
+`active_cycle` selecteert de operationele patchcycle.
 
 Voorbeeldinhoud:
 
 ```text
-JUL2026
+APR2026
 ```
 
 Plaats de metadata naast de RU/OJVM-directories:
 
 ```text
-/mnt/patch-share/oracle-patches/JUL2026/opg_cycle.conf
+PATCH_ROOT/APR2026/opg_cycle.conf
 ```
 
-Alleen deze keys zijn toegestaan: `PATCH_CYCLE`, `DB_RU_PATCH_ID`, `OJVM_PATCH_ID`, `OPATCH_VERSION`, `OPATCH_ZIP`. Het bestand wordt nooit gesourcet.
+Voor lokale immutable staging zijn exact deze keys vereist en toegestaan:
+
+```text
+PATCH_CYCLE
+DB_RU_PATCH_ID
+OJVM_PATCH_ID
+OPATCH_VERSION
+OPATCH_ZIP
+DB_RU_ZIP
+DB_RU_ZIP_SHA256
+OJVM_ZIP
+OJVM_ZIP_SHA256
+OPATCH_ZIP_SHA256
+ARTIFACT_MANIFEST
+ARTIFACT_MANIFEST_SIG
+```
+
+Het bestand wordt nooit gesourcet. Voor APR2026 zijn de inhoudelijke waarden
+`PATCH_CYCLE=APR2026`, `DB_RU_PATCH_ID=39034528`,
+`OJVM_PATCH_ID=38906621` en `OPATCH_VERSION=12.2.0.1.52`.
+
+De OPatch-versie moet uit `OPatch/version.txt` van de werkelijk gebruikte ZIP
+worden gelezen en exact gelijk zijn in `opg_cycle.conf`,
+`artifact_manifest.json` en de ZIP. Zie
+[PATCH_CYCLE_GUIDE.md](PATCH_CYCLE_GUIDE.md) voor het volledige contract en de
+signerprocedure.
 
 De OPatch-ZIP wordt bewust gevalideerd onder de bestaande `OPATCH_ROOT` uit `/etc/oracle-patch-guard/patchGD_guard.conf`. Voor de bewezen Pilot05g-config is dat:
 
@@ -74,7 +103,8 @@ Nul of meer dan één kandidaat geeft `BLOCKED`. Er wordt nooit op volgorde, dir
 
 ## Run-context
 
-De eerste `prepare`, `create-window` of `assess` maakt atomisch:
+In de normale operationele flow maakt `prepare` atomisch de nieuwe formele
+RUN_ID/context:
 
 ```text
 /var/lib/oracle-patch-guard/current_run.json
@@ -148,7 +178,21 @@ Dit is alleen toegestaan vanuit `12_COMPLETE`, `BLOCKED`, `UNKNOWN` of `MANUAL_I
 
 ## OEM-tasks
 
-Een herhaalbare readinesscontrole kan los van een formele run worden gestart:
+Voor een volledig nieuwe cycle is de praktische startvolgorde:
+
+```bash
+/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh prepare
+/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh stage-media
+/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh precheck
+```
+
+PRECHECK is functioneel een vroege veiligheidscontrole, maar bij
+`LOCAL_MEDIA_MODE=required` moeten eerst gevalideerde staged media aanwezig
+zijn. PRECHECK vóór `stage-media` mag fail-closed blokkeren met
+`MEDIA_STAGE_UNAVAILABLE`.
+
+Een herhaalbare readinesscontrole kan daarna opnieuw los van de formele
+lifecycle worden gestart:
 
 ```bash
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh precheck
@@ -156,13 +200,14 @@ Een herhaalbare readinesscontrole kan los van een formele run worden gestart:
 
 Richt hiervoor in OEM de taak `OPG_PRECHECK` in. PRECHECK gebruikt dezelfde
 assessmentregels als PLAN, maar maakt geen `current_run.json`, formeel manifest
-of approval-artifacts en kan APPLY niet autoriseren.
+of approval-artifacts en kan APPLY niet autoriseren. Een last-minute PRECHECK
+vóór APPLY is toegestaan, maar vervangt de verplichte pre-apply-hercontrole in
+APPLY niet.
 
-Gebruik op iedere geselecteerde host exact dezelfde commands:
+Na de eerste PRECHECK volgt de formele lifecycle. Gebruik op iedere geselecteerde
+host exact dezelfde commands:
 
 ```bash
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh prepare
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh stage-media
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh create-window
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh assess
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh plan
@@ -172,6 +217,9 @@ Gebruik op iedere geselecteerde host exact dezelfde commands:
 Na signing:
 
 ```bash
+# Optioneel: read-only last-minute readinesscheck
+/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh precheck
+
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh apply
 ```
 

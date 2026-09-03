@@ -17,15 +17,25 @@ van voorbereiding tot gecontroleerde uitvoering en bewijsvoering verwerkt.
 
 ![Oracle Patch Guard ketenoverzicht](docs/images/oracle_patch_guard_ketenoverzicht.png)
 
-De gecontroleerde workflow is:
+Het diagram toont de functionele controles. Voor een volledig nieuwe cycle zijn
+eerst een formele targetcontext en gevalideerde lokale media nodig:
 
 ```text
-PRECHECK → PLAN → APPROVE → APPLY
+prepare → stage-media → precheck
 ```
 
-PRECHECK voert dezelfde readinesschecks read-only en herhaalbaar uit, zonder
-formeel manifest, approval staging of wijziging van de actieve runcontext. Een
-latere PLAN voert deze checks altijd opnieuw uit.
+Daarna volgt de formele lifecycle:
+
+```text
+create-window → assess → plan → stage → approve → apply → publish-completion
+```
+
+PRECHECK is functioneel een vroege veiligheidscontrole, maar bij
+`LOCAL_MEDIA_MODE=required` moet de lokale media-stage eerst bestaan. Een
+PRECHECK vóór staging mag fail-closed blokkeren met `MEDIA_STAGE_UNAVAILABLE`.
+PRECHECK kan later opnieuw worden uitgevoerd als last-minute readiness-check
+vóór APPLY. Hij maakt geen formeel manifest, wijzigt de actieve runcontext niet,
+autoriseert APPLY niet en vervangt de pre-apply-hercontrole binnen APPLY niet.
 
 PLAN legt een fail-closed preflight-assessment vast en bindt het exacte target,
 de Oracle Home, patchmedia en recovery-evidence in een immutable manifest.
@@ -33,6 +43,11 @@ APPROVE ondertekent dat manifest en een afzonderlijk approval-token. APPLY
 verkrijgt de Oracle Home-lock, herhaalt veranderlijke controles, verifieert de
 lokale staged media en cryptografische bindingen opnieuw en staat pas daarna
 downtime of patchmutaties toe.
+
+Zie [PATCH_CYCLE_GUIDE.md](PATCH_CYCLE_GUIDE.md) voor de volledige procedure om
+een nieuwe cycle te maken, ondertekenen, activeren en stagen. De handleiding
+bevat het concrete APR2026-voorbeeld voor Oracle 19.30 → 19.31 met DB RU
+`39034528`, OJVM `38906621` en OPatch `12.2.0.1.52`.
 
 ## Belangrijkste eigenschappen
 
@@ -49,9 +64,10 @@ downtime of patchmutaties toe.
 - OEM-integratie via begrensde wrappers en lokale privileged helpers;
 - statusrapportage aan signer-zijde en orchestratie van batchgoedkeuringen.
 
-## Stable baseline 2026-08-31
+## Stable baseline 2026-09-02
 
-De stable baseline voegt de live gevalideerde lifecycle toe rond het bestaande
+De huidige `oracle-patch-guard-stable-20260902` bouwt voort op de live
+gevalideerde stable-20260831 lifecycle rond het bestaande
 PLAN → APPROVE → APPLY-contract:
 
 - exacte datapatch-validatie per container voor `CDB$ROOT` en iedere verwachte
@@ -82,6 +98,8 @@ succesvol afgerond, inclusief completion-publicatie. Zie
 - `oem-tasks/` — target-orchestratie, approval staging en mediahelpers;
 - `signer/` — read-only runstatus en orchestratie van multi-target-goedkeuring;
 - `config/examples/` — generieke voorbeelden voor cycles en sudoers;
+- `PATCH_CYCLE_GUIDE.md` — actuele operationele handleiding voor een nieuwe
+  patchcycle;
 - `tools/` — standalone benchmark voor hashing;
 - `PILOT07_*.md`, `TREE_HASH_V2_SPEC.md` — documentatie over ontwerp, security
   en validatie.
@@ -91,10 +109,11 @@ is gekopieerd van `project/patchGD_guard.conf.example`. De repository bevat
 bewust geen productieconfiguratie, private key, approval-data of
 release-archief.
 
-Publieke voorbeeldpaden gebruiken `/mnt/patch-share`; voorbeeldhosts gebruiken
-het gereserveerde domein `example.com`. Controleer vóór deployment ieder pad,
-iedere owner en group, iedere sudo-regel, recovery-hook en het beleid voor het
-onderhoudsvenster.
+Publieke generieke voorbeelden gebruiken `/mnt/patch-share`; voorbeeldhosts
+gebruiken het gereserveerde domein `example.com`. De cyclehandleiding benoemt
+daarnaast expliciet het huidige operationele `active_cycle`-pad van de bewezen
+omgeving. Controleer vóór deployment ieder pad, iedere owner en group, iedere
+sudo-regel, recovery-hook en het beleid voor het onderhoudsvenster.
 
 ## Validatie
 
@@ -116,7 +135,7 @@ bash tests/run_completion_publication_tests.sh
 sudo bash tests/run_bootstrap_tests.sh
 ```
 
-De huidige stable baseline heeft 351/351 geslaagde regressietests. De
+De huidige stable baseline heeft 383/383 geslaagde regressietests. De
 oorspronkelijke evidence van de publieke Pilot07-release blijft beschikbaar in
 `PILOT07_VALIDATION_REPORT.md` en `PUBLIC_RELEASE_AUDIT.md`; de validatie van
 completion-publicatie is gedocumenteerd in
