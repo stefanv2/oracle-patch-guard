@@ -1,7 +1,7 @@
 # Oracle Patch Guard — Quick Start
 
 <p align="center">
-  <img src="docs/images/oracle-patch-guard-quick-start.png"
+  <img src="docs/images/oracle-patch-guard-quick-start-3-fasen.png"
        alt="Oracle Patch Guard — Quick Start"
        width="1200">
 </p>
