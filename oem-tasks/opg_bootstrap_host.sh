@@ -15,6 +15,7 @@ if [[ ${OPG_BOOTSTRAP_TEST_MODE:-0} == 1 ]]; then
     STAGE_ROOT="$TEST_ROOT/u01/stage/oracle-patch-guard"
     SUDOERS_DST="$TEST_ROOT/etc/sudoers.d/oracle-patch-guard-context"
     CONFIG_DST="$TEST_ROOT/etc/oracle-patch-guard/patchGD_guard.conf"
+    CONTEXT_ROOT="$TEST_ROOT/var/lib/oracle-patch-guard"
     VISUDO_BIN=${OPG_BOOTSTRAP_TEST_VISUDO:-$TEST_ROOT/usr/sbin/visudo}
     PRIVILEGED_GROUP=root
     STAGE_GROUP=root
@@ -28,6 +29,7 @@ else
     STAGE_ROOT=/u01/stage/oracle-patch-guard
     SUDOERS_DST=/etc/sudoers.d/oracle-patch-guard-context
     CONFIG_DST=/etc/oracle-patch-guard/patchGD_guard.conf
+    CONTEXT_ROOT=/var/lib/oracle-patch-guard
     VISUDO_BIN=/usr/sbin/visudo
     PRIVILEGED_GROUP=root
     STAGE_GROUP=oinstall
@@ -358,6 +360,33 @@ stage_root_identity=$(stat -c '%U:%G:%a' "$STAGE_ROOT") \
     || fail "onjuiste owner/mode voor $STAGE_ROOT: $stage_root_identity"
 
 log "STAGE_ROOT_OK|$STAGE_ROOT|owner=root|group=${STAGE_GROUP}|mode=750"
+
+# ---------------------------------------------------------------------------
+# Stage coordination and cleanup evidence
+# ---------------------------------------------------------------------------
+
+for managed_dir in "$STAGE_ROOT/.locks" "$STAGE_ROOT/purging"; do
+    if [[ -e "$managed_dir" || -L "$managed_dir" ]]; then
+        [[ -d "$managed_dir" && ! -L "$managed_dir" ]] || fail "stage-beheerdirectory is onveilig: $managed_dir"
+    fi
+    install -d -o root -g "$STAGE_GROUP" -m 0750 "$managed_dir"
+done
+MEDIA_LOCK="$STAGE_ROOT/.locks/media-stage.lock"
+if [[ -e "$MEDIA_LOCK" || -L "$MEDIA_LOCK" ]]; then
+    [[ -f "$MEDIA_LOCK" && ! -L "$MEDIA_LOCK" && $(stat -c '%h' "$MEDIA_LOCK") == 1 ]] || fail "media-lock is onveilig: $MEDIA_LOCK"
+    chown root:"$STAGE_GROUP" "$MEDIA_LOCK"
+    chmod 0640 "$MEDIA_LOCK"
+else
+    install -o root -g "$STAGE_GROUP" -m 0640 /dev/null "$MEDIA_LOCK"
+fi
+for evidence_dir in "$CONTEXT_ROOT" "$CONTEXT_ROOT/stage-cleanup"; do
+    if [[ -e "$evidence_dir" || -L "$evidence_dir" ]]; then
+        [[ -d "$evidence_dir" && ! -L "$evidence_dir" ]] || fail "cleanup-evidencedirectory is onveilig: $evidence_dir"
+    fi
+    install -d -o root -g "$STAGE_GROUP" -m 0750 "$evidence_dir"
+done
+log "STAGE_LOCK_OK|$MEDIA_LOCK|owner=root|group=${STAGE_GROUP}|mode=640"
+log "STAGE_CLEANUP_EVIDENCE_OK|$CONTEXT_ROOT/stage-cleanup|owner=root|group=${STAGE_GROUP}|mode=750"
 
 # ---------------------------------------------------------------------------
 # Final verification

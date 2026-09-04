@@ -45,7 +45,7 @@ bewijzen dat de geselecteerde lokale patchmedia bestaan en geldig zijn.
 Voor een volledig nieuwe cycle is de praktische voorbereidingsflow dus:
 
 ```text
-prepare → stage-media → precheck
+new-run → prepare → stage-media → precheck
 ```
 
 Een PRECHECK vóór `stage-media` mag en hoort fail-closed te blokkeren met
@@ -187,13 +187,25 @@ de cycledirectory en `PATCH_CYCLE=APR2026` moeten exact overeenkomen.
 Voer voor een volledig nieuwe cycle uit:
 
 ```bash
+opg_oem.sh new-run
 opg_oem.sh prepare
 opg_oem.sh stage-media
 opg_oem.sh precheck
 ```
 
-`prepare` ontdekt de actieve SID en exacte Oracle Home en maakt de formele
-RUN_ID/context in `/var/lib/oracle-patch-guard/current_run.json`.
+`new-run` ontdekt de actieve SID en exacte Oracle Home. Als nog geen context
+bestaat, maakt deze stap de formele RUN_ID/context in
+`/var/lib/oracle-patch-guard/current_run.json`. Een exact passende context
+wordt ongewijzigd hergebruikt. Alleen een terminale context van een andere
+cycle wordt veilig gearchiveerd en vervangen. Zonder expliciete
+`OPG_NEW_RUN_REASON` gebruikt OPG bijvoorbeeld:
+
+```text
+Automatic OEM run rotation: APR2026 -> JUL2026
+```
+
+`prepare` voert vervolgens de hostvoorbereiding uit en hergebruikt exact die
+formele context.
 
 `stage-media`:
 
@@ -219,7 +231,7 @@ een conflicterende, gemuteerde of incomplete stage wordt geweigerd.
 Na een bruikbare PRECHECK volgt de formele lifecycle:
 
 ```text
-create-window → assess → plan → stage → approve → apply → publish-completion
+create-window → assess → plan → stage → approve → approval-check → apply
 ```
 
 Via de OEM-wrapper:
@@ -240,6 +252,9 @@ opg_approve_run.sh <RUN_ID>
 Op het target, binnen het goedgekeurde onderhoudsvenster:
 
 ```bash
+# Verifieer de gepubliceerde approval vóór de geplande uitvoering
+opg_oem.sh approval-check
+
 # Optioneel opnieuw: read-only last-minute readinesscheck
 opg_oem.sh precheck
 
@@ -258,6 +273,7 @@ De volledige voorbeeldketen is:
 cycle maken
 → manifest signen
 → active_cycle=APR2026
+→ new-run
 → prepare
 → stage-media
 → precheck
@@ -266,9 +282,11 @@ cycle maken
 → plan
 → stage
 → approve
+→ approval-check
 → apply
 → validate
-→ publish-completion
+→ automatische completion-publicatie
+→ automatische lokale stage-cleanup
 → COMPLETE
 ```
 
@@ -276,14 +294,17 @@ cycle maken
 DB RU en OJVM per vereiste container, registry/componentstatus, invalid objects,
 PDB-state, database, listener en services. COMPLETE is pas betrouwbaar wanneer
 de technische eindvalidatie en de hashgebonden completion-publicatie voor
-dezelfde RUN_ID zijn geslaagd.
+dezelfde RUN_ID zijn geslaagd. `publish-completion` blijft beschikbaar als
+handmatige recovery/republication-actie wanneer alleen de publicatie na
+`12_COMPLETE` is mislukt.
 
 ### 2.9 Eigenschappen per stap
 
 | Stap | Verandert database? | Formele run | Approval vereist | Doel |
 |---|---:|---|---:|---|
 | Cycle maken/signen/activeren | Nee | Nee | Nee | Exacte patchrelease en vertrouwde artifactidentiteit publiceren. |
-| `prepare` | Nee | Maakt formele RUN_ID/context | Nee | Target, SID, Oracle Home en cycle voor de nieuwe run vastleggen. |
+| `new-run` | Nee | Maakt of selecteert de formele RUN_ID/context | Nee | Een nieuwe cycle veilig starten zonder een niet-terminale context te overschrijven. |
+| `prepare` | Nee | Gebruikt de formele RUN_ID/context | Nee | De host voorbereiden en de eerder geselecteerde targetcontext hergebruiken. |
 | `stage-media` | Nee | Gebruikt formele context | Nee | Ondertekende media veilig lokaal valideren en publiceren. |
 | `precheck` | Nee | Eigen niet-formele PRECHECK-RUN_ID | Nee | Read-only readiness meten zonder APPLY te autoriseren. |
 | `create-window` | Nee | Gebruikt formele run | Nee | Het maintenance-window aan exact target en run binden. |
@@ -305,8 +326,9 @@ geldige cyclenaam en exacte overeenkomst met `PATCH_CYCLE`.
 
 ### `current_run.json`
 
-`prepare` maakt de formele hostcontext met RUN_ID, host, SID, Oracle Home en
-cyclemetadata. Vervolgfases moeten exact dezelfde context hergebruiken.
+`new-run` maakt of selecteert de formele hostcontext met RUN_ID, host, SID,
+Oracle Home en cyclemetadata. `prepare` en alle vervolgfases moeten exact
+dezelfde context hergebruiken.
 PRECHECK gebruikt een afzonderlijke tijdelijke RUN_ID en wijzigt
 `current_run.json` niet.
 
@@ -361,11 +383,12 @@ deze handleiding nadrukkelijk geen gewenste nieuwe policy.
 
 ### Retentie van oude stages
 
-Oude staged cycles blijven onder `/u01/stage/oracle-patch-guard/ready/` staan.
-In de APR2026-test gebruikte de oude JUL2026-stage circa 5,7 GB. Zulke immutable
-stages kunnen uiteindelijk andere capacity- en recoverycontroles beïnvloeden.
-Expliciete, referentiebewuste stage-retention/cleanup is daarom kandidaat voor
-een latere afzonderlijke functionaliteit; handmatige blinde verwijdering is
+In de APR2026-test bleef een oude JUL2026-stage van circa 5,7 GB staan. Dat was
+de aanleiding voor automatische, referentiebewuste cleanup: na bewezen
+`12_COMPLETE` en succesvolle completion-publicatie verwijdert OPG uitsluitend
+de aan die run gebonden lokale execution-stage. Bij twijfel of een andere run
+dezelfde identity nog nodig heeft, blijft de stage fail-closed behouden. Zie
+[Lokale stage-cleanup](STAGE_CLEANUP.md); handmatige blinde verwijdering blijft
 geen veilige oplossing.
 
 ### MiB versus afgeronde `df -h`-weergave

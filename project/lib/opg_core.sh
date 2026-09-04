@@ -435,6 +435,41 @@ opg_release_lock() {
   return 0
 }
 
+opg_acquire_media_lock() {
+  local lock_dir lock_file owner group mode
+  [[ ${LOCAL_MEDIA_MODE:-disabled} == required ]] || return 0
+  [[ -n ${MEDIA_LOCK_FD:-} ]] && return 0
+  if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then
+    return 0
+  fi
+  command -v flock >/dev/null 2>&1 || return "$EXIT_BLOCKED"
+  lock_dir="${LOCAL_STAGE_ROOT}/.locks"
+  lock_file="${lock_dir}/media-stage.lock"
+  [[ -d "$lock_dir" && ! -L "$lock_dir" && -f "$lock_file" && ! -L "$lock_file" ]] || return "$EXIT_BLOCKED"
+  owner=$(stat -c '%U' "$lock_dir" 2>/dev/null) || return "$EXIT_BLOCKED"
+  group=$(stat -c '%G' "$lock_dir" 2>/dev/null) || return "$EXIT_BLOCKED"
+  mode=$(stat -c '%a' "$lock_dir" 2>/dev/null) || return "$EXIT_BLOCKED"
+  [[ "$owner:$group:$mode" == root:oinstall:750 ]] || return "$EXIT_BLOCKED"
+  owner=$(stat -c '%U' "$lock_file" 2>/dev/null) || return "$EXIT_BLOCKED"
+  group=$(stat -c '%G' "$lock_file" 2>/dev/null) || return "$EXIT_BLOCKED"
+  mode=$(stat -c '%a' "$lock_file" 2>/dev/null) || return "$EXIT_BLOCKED"
+  [[ "$owner:$group:$mode" == root:oinstall:640 && $(stat -c '%h' "$lock_file" 2>/dev/null) == 1 ]] || return "$EXIT_BLOCKED"
+  exec {MEDIA_LOCK_FD}<"$lock_file" || return "$EXIT_BLOCKED"
+  if ! flock -sn "$MEDIA_LOCK_FD"; then
+    exec {MEDIA_LOCK_FD}>&-
+    MEDIA_LOCK_FD=
+    return "$EXIT_ALREADY_RUNNING"
+  fi
+}
+
+opg_release_media_lock() {
+  if [[ -n ${MEDIA_LOCK_FD:-} ]]; then
+    flock -u "$MEDIA_LOCK_FD" 2>/dev/null || true
+    exec {MEDIA_LOCK_FD}>&-
+    MEDIA_LOCK_FD=
+  fi
+}
+
 opg_free_mb() {
   local path=$1
   df -Pm -- "$path" 2>/dev/null | awk 'NR==2{print $4}'

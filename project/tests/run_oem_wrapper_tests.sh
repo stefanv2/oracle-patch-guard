@@ -82,11 +82,26 @@ EOF
 }
 
 run_wrapper() { /bin/bash "$WRAPPER" "$1" >"$OUT" 2>&1; }
+run_wrapper_args() { /bin/bash "$WRAPPER" "$@" >"$OUT" 2>&1; }
 
 write_state() {
   local run=$1 state=$2 phase=${3:-TEST}
   mkdir -p "$RUN_ROOT/$run"
   printf '{"state":"%s","phase":"%s"}\n' "$state" "$phase" >"$RUN_ROOT/$run/execution_state.json"
+}
+
+activate_cycle() {
+  local cycle=$1 db_patch=$2 ojvm_patch=$3
+  mkdir -p "$CENTRAL/$cycle/$db_patch" "$CENTRAL/$cycle/$ojvm_patch"
+  cat >"$CENTRAL/$cycle/opg_cycle.conf" <<EOF
+PATCH_CYCLE=$cycle
+DB_RU_PATCH_ID=$db_patch
+OJVM_PATCH_ID=$ojvm_patch
+OPATCH_VERSION=12.2.0.1.52
+OPATCH_ZIP=p6880880_190000_Linux-x86-64.zip
+EOF
+  printf '%s\n' "$cycle" >"$OPG_ROOT/config/active_cycle"
+  chmod 0600 "$CENTRAL/$cycle/opg_cycle.conf" "$OPG_ROOT/config/active_cycle"
 }
 
 prepare_approval_run() {
@@ -162,6 +177,11 @@ setup_case planroute; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current
 setup_case stageroute; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; run_wrapper stage; rc=$?; grep -q "^stage|${run}$" "$CASE/routes.log" || rc=99; record 'stage routing' 0 "$rc"
 setup_case applyroute; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; prepare_approval_run "$run"; run_wrapper apply; rc=$?; grep -q "^apply|sid=DB1|home=${HOME_DIR}|args=${run} ${OPG_ROOT}/approvals/${run}/patch_manifest.json ${OPG_ROOT}/approvals/${run}/approval.json ${CONFIG}$" "$CASE/routes.log" || rc=99; [[ -f "$OPG_ROOT/approvals/$run/completion.json" && $(json_get "$OPG_ROOT/approvals/$run/completion.json" run_id) == "$run" ]] || rc=98; grep -q "OPG_COMPLETION_PUBLISH|run_id=${run}|status=SUCCESS" "$OUT" || rc=97; record 'succesvolle apply publiceert rungebonden completion' 0 "$rc"
 
+setup_case applycleanup; enable_pilot07_media; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; prepare_approval_run "$run"; run_wrapper apply; rc=$?; grep -q "media-stage|purge-run ${run}" "$CASE/routes.log" || rc=99; grep -q 'completion=PUBLISHED|cleanup=PURGED' "$OUT" || rc=98; record 'succesvolle completion start automatisch gedeelde stage-cleanup' 0 "$rc"
+run_wrapper_args cleanup-stage --run-id "$run"; rc=$?; grep -q "media-stage|purge-run ${run}" "$CASE/routes.log" || rc=99; record 'handmatige cleanup-stage gebruikt dezelfde begrensde purge-engine' 0 "$rc"
+
+setup_case cleanupfailurecomplete; enable_pilot07_media; write_mock "$MEDIA_HELPER" "printf 'OPG_MEDIA_CLEANUP|run_id=%s|status=FAILED_RETAINED\\n' \"\$2\"; exit 30"; chmod 0755 "$MEDIA_HELPER"; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; prepare_approval_run "$run"; run_wrapper apply; rc=$?; [[ $(json_get "$RUN_ROOT/$run/execution_state.json" state) == 12_COMPLETE ]] || rc=99; grep -q 'status=COMPLETE|phase=COMPLETE|exit_code=0' "$OUT" || rc=98; grep -q 'cleanup=FAILED_RETAINED' "$OUT" || rc=97; record 'cleanup-fout draait COMPLETE niet terug' 0 "$rc"
+
 setup_case applypublishfail; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; prepare_approval_run "$run"; touch "$CASE/mock-apply-wrong-host"; run_wrapper apply; rc=$?; [[ $(json_get "$RUN_ROOT/$run/execution_state.json" state) == 12_COMPLETE && ! -e "$OPG_ROOT/approvals/$run/completion.json" ]] || rc=99; grep -q "OPG_COMPLETION_PUBLISH|run_id=${run}|status=FAILED" "$OUT" || rc=98; grep -q 'OPG_OEM_RESULT|status=UNKNOWN|phase=PUBLISH_COMPLETION|exit_code=30' "$OUT" || rc=97; record 'publicatiefout is zichtbaar zonder COMPLETE-state terug te draaien' 30 "$rc"
 sed -i 's/wrong[.]example/svtest.example/' "$RUN_ROOT/$run/execution_state.json"; run_wrapper publish-completion; rc=$?; [[ -f "$OPG_ROOT/approvals/$run/completion.json" ]] || rc=99; grep -q "OPG_COMPLETION_PUBLISH|run_id=${run}|status=SUCCESS" "$OUT" || rc=98; record 'publish-completion retry finaliseert bestaande COMPLETE-run' 0 "$rc"
 
@@ -175,11 +195,41 @@ setup_case cyclesymlink; mv "$CENTRAL/JUL2026/opg_cycle.conf" "$CENTRAL/JUL2026/
 
 setup_case approvalcheck; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; run_wrapper approval-check; rc=$?; grep -q "^approval-check|${run} DB1 ${HOME_DIR}$" "$CASE/routes.log" || rc=99; record 'optionele approval-check routing' 0 "$rc"
 
-setup_case newrun; run_wrapper prepare; old_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$old_run" 12_COMPLETE COMPLETE
-export OPG_NEW_RUN_REASON='Nieuwe OEM wave na COMPLETE' OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z
-run_wrapper new-run; rc=$?; new_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); [[ "$new_run" != "$old_run" ]] || rc=99; compgen -G "$CONTEXT_ROOT/archive/${old_run}.*.json" >/dev/null || rc=98; grep -q "run_id=${old_run}|state=12_COMPLETE|reason=Nieuwe OEM wave na COMPLETE" "$CONTEXT_ROOT/context_history.log" || rc=97
-record 'new-run vereist reden en archiveert terminale context' 0 "$rc"
+setup_case newruninitial; unset OPG_NEW_RUN_REASON; run_wrapper new-run; rc=$?
+initial_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); [[ "$initial_run" == svtest-DB1-JUL2026-OEM-20260824T103000Z ]] || rc=99
+grep -q "OPG_NEW_RUN_RESULT|status=CREATED|run_id=${initial_run}|cycle=JUL2026|reason=Initial OEM run context for JUL2026" "$OUT" || rc=98
+record 'new-run maakt zonder bestaande context een initiële formele context' 0 "$rc"
+
+setup_case newrundangling; mkdir -p "$CONTEXT_ROOT"; ln -s missing-context.json "$CONTEXT_ROOT/current_run.json"; run_wrapper new-run; rc=$?
+[[ -L "$CONTEXT_ROOT/current_run.json" ]] || rc=99
+record 'new-run behandelt een dangling current-contextsymlink niet als afwezige context' 20 "$rc"
+
+setup_case newrunauto; activate_cycle APR2026 39034528 38906621; unset OPG_NEW_RUN_REASON; run_wrapper new-run; old_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$old_run" 12_COMPLETE COMPLETE
+cp "$CONTEXT_ROOT/current_run.json" "$CASE/old-context.json"; activate_cycle JUL2026 39472050 39222882
+export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z
+run_wrapper new-run; rc=$?; new_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); archive_file=$(find "$CONTEXT_ROOT/archive" -maxdepth 1 -type f -name "${old_run}.*.json" -print -quit)
+[[ "$new_run" != "$old_run" && -n "$archive_file" ]] || rc=99; cmp -s "$CASE/old-context.json" "$archive_file" || rc=98
+grep -q "run_id=${old_run}|state=12_COMPLETE|reason=Automatic OEM run rotation: APR2026 -> JUL2026" "$CONTEXT_ROOT/context_history.log" || rc=97
+grep -q "OPG_NEW_RUN_RESULT|status=ROTATED|run_id=${new_run}|cycle=JUL2026|reason=Automatic OEM run rotation: APR2026 -> JUL2026" "$OUT" || rc=96
+record 'APR2026 COMPLETE roteert met automatische auditreden naar JUL2026' 0 "$rc"
+
+setup_case newrunoverride; activate_cycle APR2026 39034528 38906621; run_wrapper new-run; old_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$old_run" 12_COMPLETE COMPLETE; activate_cycle JUL2026 39472050 39222882
+export OPG_NEW_RUN_REASON='Goedgekeurde DBA rotatie naar JUL2026' OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z
+run_wrapper new-run; rc=$?; grep -q "run_id=${old_run}|state=12_COMPLETE|reason=Goedgekeurde DBA rotatie naar JUL2026" "$CONTEXT_ROOT/context_history.log" || rc=99
+record 'expliciete OPG_NEW_RUN_REASON blijft exacte override' 0 "$rc"
 unset OPG_NEW_RUN_REASON
+
+setup_case newrunreuse; run_wrapper new-run; reused_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')
+export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z; run_wrapper new-run; rc=$?
+[[ "$reused_run" == "$(json_get "$CONTEXT_ROOT/current_run.json" run_id)" && "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" ]] || rc=99
+[[ ! -e "$CONTEXT_ROOT/archive" && ! -e "$CONTEXT_ROOT/context_history.log" ]] || rc=98
+grep -q "OPG_NEW_RUN_RESULT|status=REUSED|run_id=${reused_run}|cycle=JUL2026" "$OUT" || rc=97
+record 'new-run hergebruikt dezelfde target/cycle-context zonder rotatie' 0 "$rc"
+
+setup_case newrunnonterminal; activate_cycle APR2026 39034528 38906621; run_wrapper new-run; blocked_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$blocked_run" 02_ASSESS_OK ASSESS; context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}'); activate_cycle JUL2026 39472050 39222882
+export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z; run_wrapper new-run; rc=$?
+[[ "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" && ! -e "$CONTEXT_ROOT/archive" ]] || rc=99
+record 'new-run blokkeert conflicterende niet-terminale vorige run' 20 "$rc"
 
 setup_case helperargs; run_wrapper prepare >/dev/null; "$CASE/mock-sudo" -n "$CONTEXT_HELPER" publish /tmp/evil >"$OUT" 2>&1; record 'root-helper weigert arbitraire padargumenten' 70 $?
 

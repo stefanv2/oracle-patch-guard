@@ -59,6 +59,10 @@ setup_case() {
   mkdir -p "$build/39472050/etc/config" "$build/39222882/files" "$build/OPatch" "$CASE/central/JUL2026" "$CASE/central/opatch" "$CASE/central/oracle-patch-guard/config" "$(local_root)"
   chmod 0755 "$CASE/u01" "$CASE/u01/stage"
   chmod 0750 "$(local_root)"
+  mkdir -p "$(local_root)/.locks" "$(local_root)/purging" "$CASE/context/stage-cleanup" "$CASE/runs" "$CASE/approvals"
+  : >"$(local_root)/.locks/media-stage.lock"
+  chmod 0750 "$(local_root)/.locks" "$(local_root)/purging" "$CASE/context" "$CASE/context/stage-cleanup" "$CASE/runs" "$CASE/approvals"
+  chmod 0640 "$(local_root)/.locks/media-stage.lock"
   printf 'db payload\n' >"$build/39472050/etc/config/db.txt"
   printf '#!/usr/bin/env bash\nexit 0\n' >"$build/39472050/etc/config/run.sh"; chmod 0755 "$build/39472050/etc/config/run.sh"
   printf 'ojvm payload\n' >"$build/39222882/files/ojvm.txt"
@@ -81,6 +85,32 @@ PY
 
 stage() { "$HELPER" stage-active-cycle >"$CASE/stage.out" 2>"$CASE/stage.err"; }
 verify() { "$HELPER" verify-active-stage JUL2026 >"$CASE/verify.out" 2>"$CASE/verify.err"; }
+purge() { "$HELPER" purge-run "$1" >"$CASE/purge.out" 2>"$CASE/purge.err"; }
+
+make_completed_run() {
+  local run_id=$1 state=${2:-12_COMPLETE} publish=${3:-yes} identity
+  identity=$(manifest_hash)
+  mkdir -p "$CASE/runs/$run_id" "$CASE/approvals/$run_id"
+  chmod 0750 "$CASE/runs/$run_id" "$CASE/approvals/$run_id"
+  python3 - "$CASE" "$run_id" "$state" "$publish" "$identity" <<'PY'
+import hashlib,json,pathlib,sys
+root=pathlib.Path(sys.argv[1]); run=sys.argv[2]; state=sys.argv[3]; publish=sys.argv[4]=='yes'; identity=sys.argv[5]
+pubhash=hashlib.sha256((root/'public.pem').read_bytes()).hexdigest()
+manifest={'run_id':run,'hostname':'db.example.test','target_oracle_home':'/u01/app/oracle/product/19c/dbhome_1','month':'JUL2026','media_mode':'LOCAL_IMMUTABLE_V2','local_stage_root':str(root/'u01/stage/oracle-patch-guard'),'local_media_identity':identity,'artifact_manifest_sha256':identity,'approval_public_key_sha256':pubhash}
+mraw=(json.dumps(manifest,indent=2,sort_keys=True)+'\n').encode(); mhash=hashlib.sha256(mraw).hexdigest()
+approval={'approved':True,'manifest_sha256':mhash,'hostname':manifest['hostname'],'target_oracle_home':manifest['target_oracle_home'],'expires_epoch':2000000000,'manifest_signature_file':'patch_manifest.sig','approval_signature_file':'approval.sig'}
+araw=(json.dumps(approval,indent=2,sort_keys=True)+'\n').encode(); ahash=hashlib.sha256(araw).hexdigest()
+state_doc={'run_id':run,'hostname':manifest['hostname'],'target_oracle_home':manifest['target_oracle_home'],'state':state,'phase':'COMPLETE' if state=='12_COMPLETE' else 'APPLY','exit_code':0 if state=='12_COMPLETE' else 40,'timestamp':'2030-01-01T00:00:00Z','sid':'TESTDB'}
+for path,data in ((root/'runs'/run/'patch_manifest.json',mraw),(root/'approvals'/run/'patch_manifest.json',mraw),(root/'approvals'/run/'approval.json',araw),(root/'runs'/run/'execution_state.json',(json.dumps(state_doc,indent=2,sort_keys=True)+'\n').encode()),(root/'approvals'/run/'findings.psv',b'READY|TEST|ok|evidence\n')): path.write_bytes(data)
+if publish:
+    completion={'approval_sha256':ahash,'completed_at':state_doc['timestamp'],'completion_epoch':1893456000,'exit_code':0,'hostname':manifest['hostname'],'manifest_sha256':mhash,'patch_cycle':'JUL2026','phase':'COMPLETE','run_id':run,'schema_version':1,'sid':'TESTDB','state':'12_COMPLETE','target_oracle_home':manifest['target_oracle_home']}
+    (root/'approvals'/run/'completion.json').write_text(json.dumps(completion,indent=2,sort_keys=True)+'\n')
+PY
+  openssl dgst -sha256 -sign "$CASE/private.pem" -out "$CASE/approvals/$run_id/patch_manifest.sig" "$CASE/approvals/$run_id/patch_manifest.json"
+  openssl dgst -sha256 -sign "$CASE/private.pem" -out "$CASE/approvals/$run_id/approval.sig" "$CASE/approvals/$run_id/approval.json"
+  chmod 0440 "$CASE/approvals/$run_id"/*
+  chmod 0600 "$CASE/runs/$run_id"/*
+}
 v2_hash() { python3 - "$HELPER" "$1" <<'PY'
 import importlib.machinery,sys
 m=importlib.machinery.SourceFileLoader('opg_vector',sys.argv[1].replace('.sh','.py')).load_module()
@@ -118,6 +148,10 @@ m.Path.lstat = lstat_with_fake_identity
 m.validate_local_parents(local)
 PY
 }
+
+python3 "$ROOT/project/tests/check_python36_compat.py" \
+  "$ROOT/oem-tasks/opg_media_stage_root.py" "$ROOT/oem-tasks/opg_build_artifact_manifest.py"
+record 'target-side Python-runtime gebruikt uitsluitend Python 3.6-syntax en ondersteunde APIs' 0 $?
 
 setup_case valid; stage; record 'RU/OJVM met alleen patch-ID-directory publiceren READY' 0 $?; verify; record 'gepubliceerde stage verifieert READY' 0 $?
 identity=$(manifest_hash); [[ $(cat "$(local_root)/ready/JUL2026/active_stage") == "$identity" ]]; record 'stage-identiteit is signed-manifest SHA256' 0 $?
@@ -286,6 +320,17 @@ p=sys.argv[1]; d=json.load(open(p)); d['unexpected']='x'; open(p,'w').write(json
 PY
 chmod u+w "$CASE/central/JUL2026/artifact_manifest.sig"
 openssl dgst -sha256 -sign "$CASE/private.pem" -out "$CASE/central/JUL2026/artifact_manifest.sig" "$CASE/central/JUL2026/artifact_manifest.json"; stage; record 'onbekend signed-manifestveld wordt geblokkeerd' 20 $?
+
+setup_case purgeok; stage >/dev/null; make_completed_run RUN-COMPLETE; identity=$(manifest_hash); mkdir -p "$CASE/oracle-home/.patch_storage"; printf keep >"$CASE/oracle-home/.patch_storage/evidence"; purge RUN-COMPLETE; rc=$?; "$HELPER" verify-purged-run RUN-COMPLETE >/dev/null 2>&1; verify_rc=$?; [[ $rc -eq 0 && $verify_rc -eq 0 && ! -e "$(local_root)/ready/JUL2026/$identity" && ! -e "$(local_root)/ready/JUL2026/active_stage" && -f "$CASE/context/stage-cleanup/RUN-COMPLETE.json" && -f "$CASE/runs/RUN-COMPLETE/stage_cleanup.json" && -f "$CASE/oracle-home/.patch_storage/evidence" && -f "$CASE/approvals/RUN-COMPLETE/completion.json" && -f "$CASE/central/JUL2026/artifact_manifest.json" ]]; record 'COMPLETE plus publication purget alleen lokale stage en bewaart audit/evidence' 0 $?
+setup_case nopublish; stage >/dev/null; make_completed_run RUN-NOPUBLISH 12_COMPLETE no; purge RUN-NOPUBLISH; rc=$?; [[ $rc -eq 20 && -d "$(local_root)/ready/JUL2026/$(manifest_hash)" ]]; record 'COMPLETE zonder completion-publication blijft behouden' 0 $?
+setup_case referenced; stage >/dev/null; make_completed_run RUN-OWNER; make_completed_run RUN-OTHER PARTIAL no; purge RUN-OWNER; rc=$?; [[ $rc -eq 20 && -d "$(local_root)/ready/JUL2026/$(manifest_hash)" ]]; record 'andere niet-vrijgegeven run met dezelfde identity blokkeert purge' 0 $?
+setup_case pointerother; stage >/dev/null; make_completed_run RUN-POINTER; pointer="$(local_root)/ready/JUL2026/active_stage"; chmod 0640 "$pointer"; printf '%064d\n' 0 >"$pointer"; chmod 0440 "$pointer"; purge RUN-POINTER; rc=$?; [[ $rc -eq 0 && $(cat "$pointer") == "$(printf '%064d' 0)" ]]; record 'active_stage van andere identity blijft onaangeroerd' 0 $?
+setup_case interruptedpurge; stage >/dev/null; make_completed_run RUN-INTERRUPT; export OPG_MEDIA_TEST_INTERRUPT_AFTER=RENAME; purge RUN-INTERRUPT; first=$?; unset OPG_MEDIA_TEST_INTERRUPT_AFTER; purge RUN-INTERRUPT; second=$?; [[ $first -eq 30 && $second -eq 0 ]]; record 'onderbroken purge kan veilig en idempotent hervatten' 0 $?
+purge RUN-INTERRUPT; record 'reeds gepurgde run is idempotent succesvol' 0 $?
+setup_case live36retry; stage >/dev/null; make_completed_run RUN-PY36-RETRY; export OPG_MEDIA_TEST_INTERRUPT_AFTER=AUDIT; purge RUN-PY36-RETRY; first=$?; unset OPG_MEDIA_TEST_INTERRUPT_AFTER; intent="$CASE/context/stage-cleanup/.RUN-PY36-RETRY.intent.json"; [[ $first -eq 30 && -f "$CASE/context/stage-cleanup/RUN-PY36-RETRY.json" && -f "$intent" ]]; prepared=$?; purge RUN-PY36-RETRY; second=$?; [[ $prepared -eq 0 && $second -eq 0 && ! -e "$intent" ]] && grep -q 'status=ALREADY_PURGED' "$CASE/purge.out"; record 'Python 3.6 failure na audit hervat veilig en ruimt achtergebleven intent op' 0 $?
+setup_case cleanupfailure; stage >/dev/null; make_completed_run RUN-FAIL; stage_dir="$(local_root)/ready/JUL2026/$(manifest_hash)"; ln -s /tmp "$stage_dir/media/bad-link"; purge RUN-FAIL; rc=$?; grep -q '"state": "12_COMPLETE"' "$CASE/runs/RUN-FAIL/execution_state.json"; state_rc=$?; [[ $rc -eq 20 && $state_rc -eq 0 && -d "$stage_dir" ]]; record 'cleanup-fout wijzigt COMPLETE niet en behoudt stage' 0 $?
+setup_case nonterminal; stage >/dev/null; make_completed_run RUN-PARTIAL PARTIAL no; purge RUN-PARTIAL; rc=$?; [[ $rc -eq 20 && -d "$(local_root)/ready/JUL2026/$(manifest_hash)" ]]; record 'niet-terminale run purget nooit' 0 $?
+setup_case medialock; stage >/dev/null; make_completed_run RUN-LOCKED; exec 9<"$(local_root)/.locks/media-stage.lock"; flock -s 9; purge RUN-LOCKED; locked_rc=$?; flock -u 9; exec 9>&-; purge RUN-LOCKED; retry_rc=$?; [[ $locked_rc -eq 20 && $retry_rc -eq 0 ]]; record 'gedeelde APPLY/resume-medialock blokkeert purge tot media is vrijgegeven' 0 $?
 
 launch="$BASE.launcher"; mkdir -p "$launch"; cp "$SOURCE_HELPER" "$launch/opg_media_stage_root.sh"; cp "$SOURCE_HELPER_ENGINE" "$launch/opg_media_stage_root.py"; chmod 0755 "$launch" "$launch/opg_media_stage_root.sh"; chmod 0775 "$launch/opg_media_stage_root.py"
 OPG_MEDIA_TEST_MODE=1 OPG_MEDIA_TEST_ROOT="$CASE" "$launch/opg_media_stage_root.sh" verify-active-stage JUL2026 >/dev/null 2>&1; record 'writable lokale media-engine wordt geweigerd' 30 $?

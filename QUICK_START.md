@@ -16,13 +16,13 @@ Oracle Patch Guard (OPG) beheert een nieuwe patchcycle in twee opeenvolgende
 delen. Eerst worden targetcontext en lokale media voorbereid:
 
 ```text
-prepare → stage-media → precheck
+new-run → prepare → stage-media → precheck
 ```
 
 Daarna volgt de formele lifecycle:
 
 ```text
-create-window → assess → plan → stage → approve → apply → publish-completion
+create-window → assess → plan → stage → approve → approval-check → apply
 ```
 
 PRECHECK is een herhaalbare, read-only readinesscontrole. Bij
@@ -37,8 +37,10 @@ daarna pas de formele patchintentie vast.
 PLAN legt assessment, target, Oracle Home en staged media vast in een immutable
 manifest. APPROVE bindt een cryptografische goedkeuring aan exact dat manifest.
 APPLY verifieert de approval en veranderlijke pre-apply-condities opnieuw
-voordat downtime of patchmutaties worden toegestaan. OPG werkt fail-closed en
-publiceert na een volledig geslaagde run afzonderlijke completion evidence.
+voordat downtime of patchmutaties worden toegestaan. OPG werkt fail-closed.
+Na een geslaagde APPLY volgen completion-publicatie en lokale stage-cleanup
+automatisch. `publish-completion` is uitsluitend bedoeld voor herstel van een
+eerder mislukte publication, zonder APPLY opnieuw uit te voeren.
 
 ## 2. Voorwaarden
 
@@ -95,10 +97,14 @@ operationele pointer op `APR2026`:
 Gebruik niet `current/config/active_cycle`. Start vervolgens op het target:
 
 ```text
-prepare → stage-media → precheck
+new-run → prepare → stage-media → precheck
 ```
 
-`prepare` maakt de formele RUN_ID/context. `stage-media` verifieert signature,
+`new-run` maakt de initiële formele context, hergebruikt een exact passende
+context of roteert een terminale context van de vorige cycle. Zonder
+`OPG_NEW_RUN_REASON` wordt daarvoor automatisch een auditreden gemaakt.
+`prepare` voert daarna de hostvoorbereiding uit en gebruikt dezelfde context.
+`stage-media` verifieert signature,
 ZIP SHA256, OPatch-versie en lokale V2 tree hashes en publiceert de immutable
 stage onder `/u01/stage/oracle-patch-guard/ready/<cycle>/<identity>/`.
 
@@ -199,7 +205,10 @@ OPG_COMPLETION_PUBLISH|...|status=SUCCESS
 
 Behandel de centrale status pas als betrouwbaar COMPLETE wanneer de
 eindvalidatie is geslaagd en de hash-bound `completion.json` succesvol voor
-dezelfde RUN_ID is gepubliceerd.
+dezelfde RUN_ID is gepubliceerd. Daarna verwijdert OPG automatisch uitsluitend
+de gebonden lokale execution-stage. Een cleanup-fout draait COMPLETE niet terug
+en blijft zichtbaar als `cleanup=FAILED_RETAINED`; zie
+[Lokale stage-cleanup](STAGE_CLEANUP.md).
 
 ## 10. Als iets stopt
 
@@ -210,7 +219,7 @@ dezelfde RUN_ID is gepubliceerd.
 | `UNKNOWN` | Veiligheid kon niet betrouwbaar worden vastgesteld | Niet patchen; onderzoek ontbrekende of inconsistente evidence. |
 | `PARTIAL` | De muterende flow is niet volledig afgerond | Bewaar state en logs; laat een bevoegde DBA de gedocumenteerde resume/recoveryroute beoordelen. |
 | `MANUAL_INTERVENTION_REQUIRED` | Automatisch veilig vervolg is niet bewezen | Geen blinde retry; voer inhoudelijke state-, inventory- en recoveryanalyse uit. |
-| `COMPLETE` | Eindvalidatie en completion-publicatie zijn bewezen | Bewaar run- en approval-evidence volgens het lokale auditbeleid. |
+| `COMPLETE` | Eindvalidatie en completion-publicatie zijn bewezen | Controleer de cleanup-status; run-, approval- en completion-evidence blijven bewaard. |
 
 Gebruik voor diagnose de runlogs, `execution_state.json`, assessment- en
 validatie-evidence. Een nieuwe RUN_ID is geen herstelmethode voor een actieve of

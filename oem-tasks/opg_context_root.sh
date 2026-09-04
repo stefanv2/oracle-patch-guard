@@ -182,7 +182,8 @@ publish_context() {
 
 rotate_context() {
   local reason=$1 old_run new_run state_file state stamp destination
-  [[ -n "$reason" && ${#reason} -le 160 && "$reason" =~ ^[A-Za-z0-9][A-Za-z0-9_.:,/@+-]*(\ [A-Za-z0-9_.:,/@+-]+)*$ ]] || die "$EXIT_USAGE" 'Ongeldige new-run reden.'
+  local reason_pattern='^[A-Za-z0-9][A-Za-z0-9_.:,/@+>-]*( [A-Za-z0-9_.:,/@+>-]+)*$'
+  [[ -n "$reason" && ${#reason} -le 160 && "$reason" =~ $reason_pattern ]] || die "$EXIT_USAGE" 'Ongeldige new-run reden.'
   ensure_context_root
   lock_context
   validate_existing_context

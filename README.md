@@ -21,18 +21,21 @@ Het diagram toont de functionele controles. Voor een volledig nieuwe cycle zijn
 eerst een formele targetcontext en gevalideerde lokale media nodig:
 
 ```text
-prepare → stage-media → precheck
+new-run → prepare → stage-media → precheck
 ```
 
 Daarna volgt de formele lifecycle:
 
 ```text
-create-window → assess → plan → stage → approve → apply → publish-completion
+create-window → assess → plan → stage → approve → approval-check → apply
 ```
 
 PRECHECK is functioneel een vroege veiligheidscontrole, maar bij
 `LOCAL_MEDIA_MODE=required` moet de lokale media-stage eerst bestaan. Een
 PRECHECK vóór staging mag fail-closed blokkeren met `MEDIA_STAGE_UNAVAILABLE`.
+`new-run` is de idempotente eerste formele OEM-stap: hij maakt de initiële
+context, hergebruikt een exact gelijke context of roteert uitsluitend een
+conflicterende terminale context met een auditreden.
 PRECHECK kan later opnieuw worden uitgevoerd als last-minute readiness-check
 vóór APPLY. Hij maakt geen formeel manifest, wijzigt de actieve runcontext niet,
 autoriseert APPLY niet en vervangt de pre-apply-hercontrole binnen APPLY niet.
@@ -43,6 +46,9 @@ APPROVE ondertekent dat manifest en een afzonderlijk approval-token. APPLY
 verkrijgt de Oracle Home-lock, herhaalt veranderlijke controles, verifieert de
 lokale staged media en cryptografische bindingen opnieuw en staat pas daarna
 downtime of patchmutaties toe.
+Na een geslaagde APPLY publiceert de wrapper automatisch de completion-evidence
+en verwijdert daarna uitsluitend de vrijgegeven lokale execution-stage.
+`publish-completion` is alleen een handmatige recovery/republication-actie.
 
 Zie [PATCH_CYCLE_GUIDE.md](PATCH_CYCLE_GUIDE.md) voor de volledige procedure om
 een nieuwe cycle te maken, ondertekenen, activeren en stagen. De handleiding
@@ -117,8 +123,9 @@ sudo-regel, recovery-hook en het beleid voor het onderhoudsvenster.
 
 ## Validatie
 
-Voer dit uit op Linux, waarbij Bash, Python 3, OpenSSL en ShellCheck beschikbaar
-zijn:
+Voer dit uit op Linux, waarbij Bash, Python 3.6.8 of nieuwer, OpenSSL en
+ShellCheck beschikbaar zijn. De target-side Python-runtime wordt in de
+Pilot07-suite expliciet tegen de Python 3.6-syntax- en API-grens gecontroleerd:
 
 ```bash
 cd project
@@ -135,12 +142,14 @@ bash tests/run_completion_publication_tests.sh
 sudo bash tests/run_bootstrap_tests.sh
 ```
 
-De huidige stable baseline heeft 383/383 geslaagde regressietests. De
+De huidige kandidaat heeft 405/405 geslaagde regressietests. De
 oorspronkelijke evidence van de publieke Pilot07-release blijft beschikbaar in
 `PILOT07_VALIDATION_REPORT.md` en `PUBLIC_RELEASE_AUDIT.md`; de validatie van
 completion-publicatie is gedocumenteerd in
 `COMPLETION_PUBLICATION_VALIDATION_REPORT.md` en de validatie van
 configgedreven deploymentpaden in `DEPLOYMENT_PATH_VALIDATION_REPORT.md`.
+De automatische verwijdering van uitsluitend lokale execution-media na een
+bewezen completion is beschreven in [Lokale stage-cleanup](STAGE_CLEANUP.md).
 
 ## Releasediscipline
 

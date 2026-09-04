@@ -12,7 +12,12 @@ export PATH=$SAFE_PATH
 
 SCRIPT_NAME=${0##*/}
 COMMAND=${1:-}
-[[ $# -eq 1 ]] || COMMAND=
+CLEANUP_RUN_ID=
+if [[ "$COMMAND" == cleanup-stage && $# -eq 3 && ${2:-} == --run-id ]]; then
+  CLEANUP_RUN_ID=$3
+elif [[ $# -ne 1 ]]; then
+  COMMAND=
+fi
 
 fail() {
   local code=$1 phase=$2 message=$3 status=BLOCKED
@@ -23,12 +28,12 @@ fail() {
 }
 
 usage() {
-  printf 'Gebruik: %s {precheck|prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run}\n' "$SCRIPT_NAME" >&2
+  printf 'Gebruik: %s {precheck|prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run|cleanup-stage --run-id RUN_ID}\n' "$SCRIPT_NAME" >&2
   exit "$EXIT_USAGE"
 }
 
 case "$COMMAND" in
-  precheck|prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run) ;;
+  precheck|prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run|cleanup-stage) ;;
   *) usage ;;
 esac
 
@@ -453,6 +458,36 @@ publish_completion_evidence() {
   return 0
 }
 
+cleanup_stage_media() {
+  local run_id=$1 mode=${2:-manual} rc=0 output status
+  [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] || fail "$EXIT_USAGE" CLEANUP_STAGE 'Ongeldige cleanup RUN_ID.'
+  load_local_paths
+  if [[ "$LOCAL_MEDIA_MODE" != required ]]; then
+    printf 'OPG_STAGE_CLEANUP|run_id=%s|status=NOT_REQUIRED|mode=%s\n' "$run_id" "$mode"
+    return 0
+  fi
+  require_media_stage_helper
+  output=$("$SUDO_BIN" -n "$MEDIA_STAGE_HELPER" purge-run "$run_id") || rc=$?
+  printf '%s\n' "$output"
+  status=$(printf '%s\n' "$output" | awk -F'|' '/^OPG_MEDIA_CLEANUP\|/{for(i=1;i<=NF;i++)if($i~/^status=/){sub(/^status=/,"",$i);print $i}}' | tail -1)
+  if (( rc == 0 )); then
+    printf 'OPG_STAGE_CLEANUP|run_id=%s|status=%s|mode=%s\n' "$run_id" "${status:-PURGED}" "$mode"
+    return 0
+  fi
+  printf 'OPG_STAGE_CLEANUP|run_id=%s|status=%s|mode=%s|helper_exit=%s\n' "$run_id" "${status:-FAILED_RETAINED}" "$mode" "$rc" >&2
+  return "$rc"
+}
+
+automatic_stage_cleanup() {
+  local rc=0
+  cleanup_stage_media "$RUN_ID" automatic || rc=$?
+  if (( rc != 0 )); then
+    printf 'OPG_OEM_RESULT|status=COMPLETE|phase=COMPLETE|exit_code=0|run_id=%s|completion=PUBLISHED|cleanup=FAILED_RETAINED\n' "$RUN_ID"
+    return 0
+  fi
+  printf 'OPG_OEM_RESULT|status=COMPLETE|phase=COMPLETE|exit_code=0|run_id=%s|completion=PUBLISHED|cleanup=PURGED\n' "$RUN_ID"
+}
+
 clean_oracle_env() {
   /usr/bin/env -i HOME="${HOME:-/tmp}" USER="${USER:-unknown}" LOGNAME="${LOGNAME:-${USER:-unknown}}" LANG=C \
     ORACLE_HOME="$ORACLE_HOME" ORACLE_SID="$ORACLE_SID" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$SAFE_PATH" \
@@ -472,21 +507,49 @@ run_precheck() {
     --run-id "$precheck_run_id" --config "$CONFIG_FILE" "$DB_RU_PATCH_ID" "$OJVM_PATCH_ID" "$PATCH_CYCLE" "$OPATCH_VERSION" "$OPATCH_ZIP"
 }
 
+valid_new_run_reason() {
+  local value=$1 pattern='^[A-Za-z0-9][A-Za-z0-9_.:,/@+>-]*( [A-Za-z0-9_.:,/@+>-]+)*$'
+  [[ -n "$value" && ${#value} -le 160 && "$value" =~ $pattern ]]
+}
+
 archive_context_for_new_run() {
-  local reason=${OPG_NEW_RUN_REASON:-} state old_run
-  [[ -n "$reason" && ${#reason} -le 160 && "$reason" =~ ^[A-Za-z0-9][A-Za-z0-9_.:,/@+-]*(\ [A-Za-z0-9_.:,/@+-]+)*$ ]] || fail "$EXIT_USAGE" CONTEXT 'new-run vereist een veilige OPG_NEW_RUN_REASON (maximaal 160 tekens).'
+  local reason=${OPG_NEW_RUN_REASON:-} state old_run old_cycle
   load_local_paths
+  discover_all
+  if [[ ! -e "$CONTEXT_FILE" && ! -L "$CONTEXT_FILE" ]]; then
+    [[ -n "$reason" ]] || reason="Initial OEM run context for ${PATCH_CYCLE}"
+    valid_new_run_reason "$reason" || fail "$EXIT_USAGE" CONTEXT 'new-run reden is onveilig (maximaal 160 tekens).'
+    create_context
+    printf 'OPG_NEW_RUN_RESULT|status=CREATED|run_id=%s|cycle=%s|reason=%s\n' "$RUN_ID" "$PATCH_CYCLE" "$reason"
+    return 0
+  fi
   read_context_file
   old_run=$RUN_ID
+  old_cycle=$CTX_CYCLE
+  if [[ "$CTX_SHORT_HOST" == "$SHORT_HOST" && "$CTX_FQDN" == "$FQDN" &&
+        "$CTX_SID" == "$ORACLE_SID" && "$CTX_HOME" == "$ORACLE_HOME" &&
+        "$CTX_CYCLE" == "$PATCH_CYCLE" && "$CTX_DB" == "$DB_RU_PATCH_ID" &&
+        "$CTX_OJVM" == "$OJVM_PATCH_ID" && "$CTX_OPATCH_VERSION" == "$OPATCH_VERSION" &&
+        "$CTX_OPATCH_ZIP" == "$OPATCH_ZIP" && "$CTX_CONFIG" == "$CONFIG_FILE" ]]; then
+    [[ -n "$reason" ]] || reason="Existing OEM run context for ${PATCH_CYCLE} reused"
+    valid_new_run_reason "$reason" || fail "$EXIT_USAGE" CONTEXT 'new-run reden is onveilig (maximaal 160 tekens).'
+    printf 'OPG_NEW_RUN_RESULT|status=REUSED|run_id=%s|cycle=%s|reason=%s\n' "$RUN_ID" "$PATCH_CYCLE" "$reason"
+    return 0
+  fi
+  if [[ "$CTX_CYCLE" == "$PATCH_CYCLE" ]]; then
+    fail "$EXIT_BLOCKED" CONTEXT 'Bestaande context gebruikt dezelfde cycle maar wijkt af in target- of patchmetadata; rotatie is geweigerd.'
+  fi
   state=$(run_state) || fail "$EXIT_UNKNOWN" CONTEXT 'Run-state kon niet worden gelezen.'
   case "$state" in 12_COMPLETE|BLOCKED|UNKNOWN|MANUAL_INTERVENTION_REQUIRED) ;; *) fail "$EXIT_BLOCKED" CONTEXT "Context kan niet worden vernieuwd vanuit niet-terminale state ${state}." ;; esac
-  discover_all
+  [[ -n "$reason" ]] || reason="Automatic OEM run rotation: ${old_cycle} -> ${PATCH_CYCLE}"
+  valid_new_run_reason "$reason" || fail "$EXIT_USAGE" CONTEXT 'new-run reden is onveilig (maximaal 160 tekens).'
   derive_new_context
   [[ "$RUN_ID" != "$old_run" ]] || fail "$EXIT_BLOCKED" CONTEXT 'Nieuwe RUN_ID is gelijk aan de terminale oude RUN_ID.'
   require_context_helper
   if ! emit_context_json | sudo_context_helper rotate "$reason"; then fail "$EXIT_UNKNOWN" CONTEXT 'Terminale context kon niet via de begrensde sudo-helper worden geroteerd.'; fi
   read_context_file
   printf 'OPG_CONTEXT_CREATED|run_id=%s|sid=%s|home=%s|cycle=%s\n' "$RUN_ID" "$ORACLE_SID" "$ORACLE_HOME" "$PATCH_CYCLE"
+  printf 'OPG_NEW_RUN_RESULT|status=ROTATED|run_id=%s|cycle=%s|reason=%s\n' "$RUN_ID" "$PATCH_CYCLE" "$reason"
 }
 
 case "$COMMAND" in
@@ -531,11 +594,13 @@ case "$COMMAND" in
     rc=0
     clean_oracle_env /bin/bash "$APPLY_SCRIPT" "$RUN_ID" "${APPROVAL_ROOT}/${RUN_ID}/patch_manifest.json" "${APPROVAL_ROOT}/${RUN_ID}/approval.json" "$CONFIG_FILE" || rc=$?
     (( rc == 0 )) || exit "$rc"
-    publish_completion_evidence
+    publish_completion_evidence || exit $?
+    automatic_stage_cleanup
     ;;
   publish-completion)
     load_or_create_context false; require_state 12_COMPLETE
-    publish_completion_evidence
+    publish_completion_evidence || exit $?
+    automatic_stage_cleanup
     ;;
   approval-check)
     load_or_create_context false; require_state 03_PLAN_GENERATED; require_script "$APPROVAL_CHECK_SCRIPT" approval-check
@@ -547,5 +612,8 @@ case "$COMMAND" in
     ;;
   new-run)
     archive_context_for_new_run
+    ;;
+  cleanup-stage)
+    cleanup_stage_media "$CLEANUP_RUN_ID" manual
     ;;
 esac

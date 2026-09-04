@@ -103,8 +103,8 @@ Nul of meer dan één kandidaat geeft `BLOCKED`. Er wordt nooit op volgorde, dir
 
 ## Run-context
 
-In de normale operationele flow maakt `prepare` atomisch de nieuwe formele
-RUN_ID/context:
+In de normale operationele flow maakt `new-run` atomisch de nieuwe formele
+RUN_ID/context of hergebruikt deze stap een exact passende bestaande context:
 
 ```text
 /var/lib/oracle-patch-guard/current_run.json
@@ -167,20 +167,44 @@ een afwijkend bestaand artifact wordt fail-closed geweigerd.
 
 Vervolgfases herhalen cycle- en targetdiscovery en eisen een exacte match met deze context. Ze maken geen nieuwe RUN_ID.
 
-Een terminale oude run wordt niet stil hergebruikt. Start een nieuwe wave expliciet met een reden:
+`new-run` is de standaard eerste formele OEM-stap van iedere patchcycle. Een
+exact passende bestaande target/cycle-context wordt ongewijzigd hergebruikt.
+Een conflicterende niet-terminale context wordt fail-closed geblokkeerd. Een
+terminale context van een andere cycle wordt veilig gearchiveerd en vervangen.
+
+Een reden mag expliciet worden meegegeven:
 
 ```bash
 OPG_NEW_RUN_REASON='Nieuwe OCT2026 wave na afgeronde JUL2026 run' \
   /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh new-run
 ```
 
-Dit is alleen toegestaan vanuit `12_COMPLETE`, `BLOCKED`, `UNKNOWN` of `MANUAL_INTERVENTION_REQUIRED`. De oude context wordt onder `archive/` bewaard en de reden wordt aan `context_history.log` toegevoegd. Een PARTIAL/in-progress run wordt niet vervangen.
+Zonder `OPG_NEW_RUN_REASON` maakt OPG zelf een auditreden, bijvoorbeeld:
+
+```text
+Automatic OEM run rotation: APR2026 -> JUL2026
+```
+
+Als nog geen context bestaat, wordt de reden:
+
+```text
+Initial OEM run context for JUL2026
+```
+
+Rotatie is alleen toegestaan vanuit `12_COMPLETE`, `BLOCKED`, `UNKNOWN` of
+`MANUAL_INTERVENTION_REQUIRED`. De oude context wordt onder `archive/` bewaard
+en de reden wordt aan `context_history.log` toegevoegd. Een PARTIAL/in-progress
+run wordt niet vervangen en `current_run.json` wordt nooit blind verwijderd.
 
 ## OEM-tasks
 
 Voor een volledig nieuwe cycle is de praktische startvolgorde:
 
 ```bash
+# Eenmalig op een fresh host via de daarvoor ingerichte privileged OEM-taak:
+/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_bootstrap_host.sh
+
+/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh new-run
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh prepare
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh stage-media
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh precheck
@@ -217,11 +241,19 @@ host exact dezelfde commands:
 Na signing:
 
 ```bash
+# Controleer de gepubliceerde approval afzonderlijk
+/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh approval-check
+
 # Optioneel: read-only last-minute readinesscheck
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh precheck
 
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh apply
 ```
+
+In de normale happy path voert een succesvolle `apply` automatisch
+completion-publicatie en daarna lokale stage-cleanup uit. De losse actie
+`publish-completion` is alleen bedoeld voor recovery/republication wanneer
+de patch al `12_COMPLETE` is maar de publicatie niet slaagde.
 
 Wanneer Oracle-patching al succesvol `12_COMPLETE` bereikte maar de share-
 publicatie faalde, blijft de patchstate intact en retourneert de wrapper
@@ -231,6 +263,18 @@ publicatieoorzaak en herhaal daarna zonder APPLY opnieuw uit te voeren:
 ```bash
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh publish-completion
 ```
+
+Na succesvolle completion-publicatie start de wrapper automatisch de
+begrensde lokale stage-cleanup. Een cleanup-fout draait `COMPLETE` niet terug,
+maar wordt zichtbaar als `cleanup=FAILED_RETAINED`. De DBA kan dezelfde
+gedeelde cleanup-engine idempotent opnieuw aanroepen:
+
+```bash
+/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh cleanup-stage --run-id <RUN_ID>
+```
+
+Zie [Lokale stage-cleanup](STAGE_CLEANUP.md) voor de statussen, behouden
+evidence en exacte verwijdergrens.
 
 Optionele diagnose, niet automatisch onderdeel van APPLY:
 
@@ -262,9 +306,9 @@ Dit is batching van afzonderlijke manifestgebonden approvals, geen automatische 
 ## Migratie en rollback
 
 1. Plaats en valideer centrale `active_cycle` en `opg_cycle.conf`.
-2. Laat `opg_oem.sh` op de centrale share staan, installeer `opg_context_root.sh` lokaal als `/usr/local/sbin/opg_context_root.sh` met `root:root 0755` en activeer uitsluitend de meegeleverde command-specifieke sudoersregel; verander de bestaande task scripts en core niet.
-3. Installeer ook `opg_media_stage_root.sh` lokaal als `root:root 0755`, valideer de begrensde sudoersregel en test `prepare`, `stage-media`, `show-context`, `create-window`, `assess`, `plan` en `stage` op één non-productietarget.
+2. Voer op een fresh host de gecontroleerde `opg_bootstrap_host.sh` uit.
+3. Start de OEM-keten met `new-run`, gevolgd door `prepare`, `stage-media`, `create-window`, `assess`, `plan` en `stage`; test ook `show-context` op één non-productietarget.
 4. Vergelijk RUN_ID, argumenten en core-resultaten met de lange commandroute.
 5. Activeer daarna dezelfde korte commands voor de geselecteerde wave.
 
-Rollback is alleen orchestrationrollback: laat `opg_oem.sh` buiten gebruik en zet de bestaande lange OEM-commands terug. Verwijder of wijzig geen Patch Guard run-state. Bewaar `current_run.json` als auditbewijs; archiveer hem alleen via `new-run` met reden. De core, approvals en manifests hoeven voor wrapperrollback niet te worden aangepast.
+Rollback is alleen orchestrationrollback: laat `opg_oem.sh` buiten gebruik en zet de bestaande lange OEM-commands terug. Verwijder of wijzig geen Patch Guard run-state. Bewaar `current_run.json` als auditbewijs; archiveer hem alleen via `new-run`, met een expliciete of automatisch gegenereerde reden. De core, approvals en manifests hoeven voor wrapperrollback niet te worden aangepast.

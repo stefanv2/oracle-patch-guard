@@ -3,6 +3,7 @@
 
 import hashlib
 import errno
+import fcntl
 import json
 import os
 import re
@@ -14,6 +15,8 @@ import sys
 import tempfile
 import time
 import zipfile
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 EXIT_BLOCKED = 20
@@ -23,6 +26,9 @@ SAFE_PATCH = re.compile(r"^[0-9]{6,12}$")
 SAFE_ZIP = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}\.zip$")
 SAFE_HASH = re.compile(r"^[0-9a-f]{64}$")
 SAFE_VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+){3,5}$")
+SAFE_RUN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+SAFE_SID = re.compile(r"^[A-Za-z0-9_#$]+$")
+SAFE_ISO = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 FORMAT = "OPG_TREE_HASH_V2"
 TRUSTED_STAGE_ANCHOR = Path("/u01/stage")
 
@@ -30,6 +36,35 @@ TRUSTED_STAGE_ANCHOR = Path("/u01/stage")
 def die(code, message):
     print(f"OPG_MEDIA_ERROR|exit_code={code}|message={message}", file=sys.stderr)
     raise SystemExit(code)
+
+
+def strict_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def read_json_file(path, maximum=16 * 1024 * 1024):
+    raw = read_stable_bytes(path, maximum)
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=strict_object)
+    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        die(EXIT_BLOCKED, f"ongeldige JSON in {path}: {exc}")
+    if not isinstance(value, dict):
+        die(EXIT_BLOCKED, f"JSON-root is geen object: {path}")
+    return value, raw
+
+
+def iso_epoch(value):
+    if not isinstance(value, str) or not SAFE_ISO.fullmatch(value):
+        return None
+    try:
+        return int(datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
+    except ValueError:
+        return None
 
 
 def sha256_file(path):
@@ -479,6 +514,57 @@ def roots():
             grp.getgrnam("oinstall").gr_gid)
 
 
+def lifecycle_roots():
+    if os.environ.get("OPG_MEDIA_TEST_MODE") == "1":
+        base = Path(os.environ["OPG_MEDIA_TEST_ROOT"])
+        return base / "runs", base / "approvals", base / "context"
+    config_path = Path("/etc/oracle-patch-guard/patchGD_guard.conf")
+    wanted = {"RUN_ROOT", "APPROVAL_ROOT"}
+    values = {}
+    for number, raw in enumerate(config_path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key not in wanted:
+            continue
+        if (key in values or not value.startswith("/") or
+                not re.fullmatch(r"/[A-Za-z0-9_./-]+", value) or
+                ".." in Path(value).parts or "." in Path(value).parts or "//" in value):
+            die(EXIT_BLOCKED, f"ongeldige/dubbele lifecycle-padconfig op regel {number}: {key}")
+        values[key] = value
+    if wanted - values.keys():
+        die(EXIT_BLOCKED, "RUN_ROOT/APPROVAL_ROOT ontbreekt in runtimeconfig")
+    return Path(values["RUN_ROOT"]), Path(values["APPROVAL_ROOT"]), Path("/var/lib/oracle-patch-guard")
+
+
+@contextmanager
+def media_lock(local, gid, exclusive, wait=False):
+    validate_local_parents(local)
+    lock_dir = local / ".locks"
+    lock_file = lock_dir / "media-stage.lock"
+    owner = os.getuid() if os.environ.get("OPG_MEDIA_TEST_MODE") == "1" else 0
+    _, oracle_uid, oracle_groups = stage_security_ids(gid)
+    for path, mode in ((lock_dir, 0o750), (lock_file, 0o640)):
+        info = path.lstat()
+        expected_type = stat.S_ISDIR if path == lock_dir else stat.S_ISREG
+        if (not expected_type(info.st_mode) or path.is_symlink() or info.st_uid != owner or
+                info.st_gid != gid or stat.S_IMODE(info.st_mode) != mode or
+                (path == lock_file and info.st_nlink != 1)):
+            die(EXIT_BLOCKED, f"media-lockpad is onveilig: {path}")
+        validate_stage_acl(path, oracle_uid, oracle_groups)
+    fd = os.open(lock_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        try:
+            operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            fcntl.flock(fd, operation if wait else operation | fcntl.LOCK_NB)
+        except BlockingIOError:
+            die(EXIT_BLOCKED, "lokale media is in gebruik door stage/apply/resume/cleanup")
+        yield
+    finally:
+        os.close(fd)
+
+
 REQUIRED = {"PATCH_CYCLE", "DB_RU_PATCH_ID", "OJVM_PATCH_ID", "OPATCH_VERSION",
             "DB_RU_ZIP", "DB_RU_ZIP_SHA256", "OJVM_ZIP", "OJVM_ZIP_SHA256",
             "OPATCH_ZIP", "OPATCH_ZIP_SHA256", "ARTIFACT_MANIFEST", "ARTIFACT_MANIFEST_SIG"}
@@ -572,9 +658,15 @@ def verify_published(cycle, local, expected_identity=None, gid=None):
     print(verify_identity(cycle, local, identity, gid, pointer))
 
 
-def stage_active_cycle():
+def stage_active_cycle_locked():
     if os.geteuid() != 0 and os.environ.get("OPG_MEDIA_TEST_MODE") != "1":
         die(EXIT_UNKNOWN, "stage-active-cycle vereist root via sudo")
+    _, _, local, _, gid = roots()
+    with media_lock(local, gid, True, wait=True):
+        stage_active_cycle()
+
+
+def stage_active_cycle():
     central, local, public_key, gid, cycle, cycle_dir, conf, manifest_bytes, signature_bytes, identity, artifacts = load_inputs()
     ready_cycle = local / "ready" / cycle
     final = ready_cycle / identity
@@ -692,15 +784,325 @@ def stage_active_cycle():
         raise
 
 
+def cleanup_stop(run_id, code, status, message):
+    print(f"OPG_MEDIA_CLEANUP|run_id={run_id}|status={status}|message={message}")
+    raise SystemExit(code)
+
+
+def safe_lifecycle_file(path, expected_owner=None, maximum=16 * 1024 * 1024):
+    for parent in (path.parent, path.parent.parent):
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or parent.is_symlink() or stat.S_IMODE(info.st_mode) & 0o022:
+            die(EXIT_BLOCKED, f"onveilige lifecycle-directory: {parent}")
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or path.is_symlink() or info.st_nlink != 1 or
+            stat.S_IMODE(info.st_mode) & 0o022 or
+            (expected_owner is not None and info.st_uid != expected_owner)):
+        die(EXIT_BLOCKED, f"onveilig lifecycle-artifact: {path}")
+    return read_stable_bytes(path, maximum)
+
+
+def lifecycle_json(path, expected_owner=None):
+    raw = safe_lifecycle_file(path, expected_owner)
+    try:
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=strict_object)
+    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        die(EXIT_BLOCKED, f"ongeldige lifecycle-JSON: {path}: {exc}")
+    if not isinstance(data, dict):
+        die(EXIT_BLOCKED, f"lifecycle-JSON is geen object: {path}")
+    return data, raw
+
+
+def validate_completion_for_run(run_id):
+    run_root, approval_root, _ = lifecycle_roots()
+    run_dir = run_root / run_id
+    approval_dir = approval_root / run_id
+    expected_root = os.getuid() if os.environ.get("OPG_MEDIA_TEST_MODE") == "1" else 0
+    state, _ = lifecycle_json(run_dir / "execution_state.json")
+    local_manifest, local_manifest_raw = lifecycle_json(run_dir / "patch_manifest.json")
+    manifest, manifest_raw = lifecycle_json(approval_dir / "patch_manifest.json", expected_root)
+    approval, approval_raw = lifecycle_json(approval_dir / "approval.json", expected_root)
+    completion, _ = lifecycle_json(approval_dir / "completion.json", expected_root)
+    manifest_sig = safe_lifecycle_file(approval_dir / "patch_manifest.sig", expected_root, 1024 * 1024)
+    approval_sig = safe_lifecycle_file(approval_dir / "approval.sig", expected_root, 1024 * 1024)
+    findings_raw = safe_lifecycle_file(approval_dir / "findings.psv", expected_root)
+    _, _, local, public_key, _ = roots()
+    validate_public_key(public_key)
+    verify_signature_bytes(public_key, manifest_sig, manifest_raw)
+    verify_signature_bytes(public_key, approval_sig, approval_raw)
+    public_hash, _ = sha256_file(public_key)
+    manifest_hash = hashlib.sha256(manifest_raw).hexdigest()
+    approval_hash = hashlib.sha256(approval_raw).hexdigest()
+    if local_manifest_raw != manifest_raw:
+        die(EXIT_BLOCKED, "lokaal en gepubliceerd runmanifest verschillen")
+    cycle = manifest.get("month")
+    identity = manifest.get("local_media_identity")
+    hostname = manifest.get("hostname")
+    home = manifest.get("target_oracle_home")
+    completed_at = state.get("timestamp")
+    completed_epoch = iso_epoch(completed_at)
+    expires_epoch = approval.get("expires_epoch")
+    if (manifest.get("run_id") != run_id or not SAFE_CYCLE.fullmatch(str(cycle)) or
+            not SAFE_HASH.fullmatch(str(identity)) or identity != manifest.get("artifact_manifest_sha256") or
+            manifest.get("media_mode") != "LOCAL_IMMUTABLE_V2" or
+            manifest.get("local_stage_root") != str(local) or not hostname or not home):
+        die(EXIT_BLOCKED, "runmanifest bevat geen eenduidige lokale stagebinding")
+    if manifest.get("approval_public_key_sha256") != public_hash:
+        die(EXIT_BLOCKED, "approval trust-anchor wijkt af van runmanifest")
+    if (state.get("run_id") != run_id or state.get("hostname") != hostname or
+            state.get("target_oracle_home") != home or state.get("state") != "12_COMPLETE" or
+            state.get("phase") != "COMPLETE" or state.get("exit_code") != 0 or completed_epoch is None):
+        die(EXIT_BLOCKED, "execution-state is niet coherent 12_COMPLETE")
+    if (approval.get("approved") is not True or approval.get("manifest_sha256") != manifest_hash or
+            approval.get("hostname") != hostname or approval.get("target_oracle_home") != home or
+            not isinstance(expires_epoch, int) or isinstance(expires_epoch, bool) or
+            completed_epoch > expires_epoch or
+            os.path.basename(str(approval.get("manifest_signature_file", ""))) != "patch_manifest.sig" or
+            os.path.basename(str(approval.get("approval_signature_file", ""))) != "approval.sig"):
+        die(EXIT_BLOCKED, "approvalbinding of geldigheidsperiode is ongeldig")
+    try:
+        findings = findings_raw.decode("utf-8").splitlines()
+    except UnicodeError:
+        die(EXIT_BLOCKED, "findings.psv is geen UTF-8")
+    for line in findings:
+        if not line:
+            continue
+        fields = line.split("|")
+        if len(fields) < 2 or fields[0] not in ("READY", "CONDITIONAL", "BLOCKED", "UNKNOWN"):
+            die(EXIT_BLOCKED, "findings.psv is ongeldig")
+        if fields[0] in ("BLOCKED", "UNKNOWN"):
+            die(EXIT_BLOCKED, "runfindings zijn niet approvable")
+        if fields[0] == "CONDITIONAL" and approval.get("accept_" + fields[1]) != fields[1]:
+            die(EXIT_BLOCKED, "conditional is niet aantoonbaar geaccepteerd")
+    expected_completion = {
+        "approval_sha256": approval_hash, "completed_at": completed_at,
+        "completion_epoch": completed_epoch, "exit_code": 0, "hostname": hostname,
+        "manifest_sha256": manifest_hash, "patch_cycle": cycle, "phase": "COMPLETE",
+        "run_id": run_id, "schema_version": 1,
+        "sid": completion.get("sid"), "state": "12_COMPLETE", "target_oracle_home": home,
+    }
+    if completion != expected_completion or not SAFE_SID.fullmatch(str(completion.get("sid", ""))):
+        die(EXIT_BLOCKED, "completion.json is niet exact aan state/approval/manifest gebonden")
+    return {"cycle": cycle, "identity": identity, "stage": local / "ready" / cycle / identity,
+            "manifest_sha256": manifest_hash, "approval_sha256": approval_hash,
+            "completion_epoch": completed_epoch, "completion_sha256": hashlib.sha256(
+                safe_lifecycle_file(approval_dir / "completion.json", expected_root)).hexdigest()}
+
+
+def write_audit(path, payload, gid, manage_parent=True):
+    owner = os.getuid() if os.environ.get("OPG_MEDIA_TEST_MODE") == "1" else 0
+    if manage_parent:
+        path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+        os.chown(path.parent, owner, gid); os.chmod(path.parent, 0o750)
+    elif path.parent.is_symlink() or not path.parent.is_dir():
+        die(EXIT_BLOCKED, f"run-evidencedirectory is onveilig: {path.parent}")
+    temp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(temp, flags, 0o440)
+    try:
+        data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        os.write(fd, data); os.fsync(fd); os.fchown(fd, owner, gid); os.fchmod(fd, 0o440)
+    finally:
+        os.close(fd)
+    os.replace(temp, path)
+
+
+def unlink_if_present(path):
+    """Path.unlink(missing_ok=True), compatible with target Python 3.6."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def measured_safe_purge(path):
+    total = 0
+    for base, dirs, files in os.walk(path, topdown=True, followlinks=False):
+        base_path = Path(base)
+        if base_path.is_symlink() or not base_path.is_dir():
+            die(EXIT_BLOCKED, f"onveilig object in purge-tree: {base_path}")
+        for name in dirs + files:
+            item = base_path / name
+            info = item.lstat()
+            if item.is_symlink() or (not stat.S_ISDIR(info.st_mode) and
+                                     (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1)):
+                die(EXIT_BLOCKED, f"symlink/hardlink/speciaal object in purge-tree: {item}")
+            total += info.st_blocks * 512
+    for base, dirs, files in os.walk(path, topdown=False, followlinks=False):
+        for name in files:
+            (Path(base) / name).unlink()
+        for name in dirs:
+            (Path(base) / name).rmdir()
+    path.rmdir()
+    return total
+
+
+def safe_tree_bytes(path):
+    total = path.lstat().st_blocks * 512
+    for base, dirs, files in os.walk(path, topdown=True, followlinks=False):
+        base_path = Path(base)
+        if base_path.is_symlink() or not base_path.is_dir():
+            die(EXIT_BLOCKED, f"onveilig object in purge-tree: {base_path}")
+        for name in dirs + files:
+            item = base_path / name
+            info = item.lstat()
+            if item.is_symlink() or (not stat.S_ISDIR(info.st_mode) and
+                                     (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1)):
+                die(EXIT_BLOCKED, f"symlink/hardlink/speciaal object in purge-tree: {item}")
+            total += info.st_blocks * 512
+    return total
+
+
+def other_run_needs_identity(subject_run, identity):
+    run_root, _, context_root = lifecycle_roots()
+    for candidate in run_root.iterdir():
+        if candidate.name == subject_run or not SAFE_RUN.fullmatch(candidate.name):
+            continue
+        manifest_path = candidate / "patch_manifest.json"
+        if not manifest_path.exists():
+            continue
+        manifest, _ = lifecycle_json(manifest_path)
+        if manifest.get("local_media_identity") != identity:
+            continue
+        try:
+            validate_completion_for_run(candidate.name)
+        except (SystemExit, OSError):
+            return candidate.name
+    context_file = context_root / "current_run.json"
+    if context_file.exists():
+        context, _ = lifecycle_json(context_file)
+        current_run = context.get("run_id")
+        if current_run != subject_run and SAFE_RUN.fullmatch(str(current_run)):
+            current_manifest = run_root / current_run / "patch_manifest.json"
+            if not current_manifest.exists() and context.get("patch_cycle"):
+                return str(current_run)
+    return None
+
+
+def purge_run(run_id):
+    if os.geteuid() != 0 and os.environ.get("OPG_MEDIA_TEST_MODE") != "1":
+        die(EXIT_UNKNOWN, "purge-run vereist root via sudo")
+    if not SAFE_RUN.fullmatch(run_id):
+        die(70, "ongeldige cleanup RUN_ID")
+    _, _, local, _, gid = roots()
+    run_root, _, context_root = lifecycle_roots()
+    audit = context_root / "stage-cleanup" / f"{run_id}.json"
+    intent = context_root / "stage-cleanup" / f".{run_id}.intent.json"
+    with media_lock(local, gid, True):
+        if audit.exists():
+            record, _ = lifecycle_json(audit, os.getuid() if os.environ.get("OPG_MEDIA_TEST_MODE") == "1" else 0)
+            binding = validate_completion_for_run(run_id)
+            if (record.get("run_id") == run_id and record.get("cleanup_status") == "PURGED" and
+                    record.get("stage_identity") == binding["identity"] and
+                    record.get("completion_sha256") == binding["completion_sha256"] and
+                    not binding["stage"].exists()):
+                if intent.exists():
+                    intent_record, _ = lifecycle_json(
+                        intent, os.getuid() if os.environ.get("OPG_MEDIA_TEST_MODE") == "1" else 0)
+                    if (intent_record.get("run_id") != run_id or
+                            intent_record.get("stage_identity") != binding["identity"] or
+                            intent_record.get("cleanup_status") != "PURGE_INTENT"):
+                        cleanup_stop(run_id, EXIT_UNKNOWN, "FAILED_RETAINED", "achtergebleven cleanup-intent is niet betrouwbaar")
+                    unlink_if_present(intent)
+                print(f"OPG_MEDIA_CLEANUP|run_id={run_id}|status=ALREADY_PURGED|bytes_reclaimed={record.get('bytes_reclaimed', 0)}")
+                return
+            cleanup_stop(run_id, EXIT_UNKNOWN, "FAILED_RETAINED", "bestaand cleanup-record is niet betrouwbaar")
+        try:
+            binding = validate_completion_for_run(run_id)
+        except (SystemExit, OSError) as exc:
+            code = exc.code if isinstance(exc, SystemExit) else EXIT_BLOCKED
+            cleanup_stop(run_id, EXIT_BLOCKED if code == EXIT_BLOCKED else EXIT_UNKNOWN,
+                         "BLOCKED_NOT_RELEASED", "COMPLETE/publication kon niet volledig worden bewezen")
+        other = other_run_needs_identity(run_id, binding["identity"])
+        if other:
+            cleanup_stop(run_id, EXIT_BLOCKED, "BLOCKED_REFERENCED", f"stage is nog gebonden aan run {other}")
+        stage = binding["stage"]
+        purging = local / "purging" / binding["cycle"]
+        quarantine = purging / f"{binding['identity']}.{run_id}"
+        intent_record = None
+        if intent.exists():
+            intent_record, _ = lifecycle_json(intent, os.getuid() if os.environ.get("OPG_MEDIA_TEST_MODE") == "1" else 0)
+            if (intent_record.get("run_id") != run_id or intent_record.get("stage_identity") != binding["identity"] or
+                    intent_record.get("cleanup_status") != "PURGE_INTENT"):
+                cleanup_stop(run_id, EXIT_UNKNOWN, "FAILED_RETAINED", "cleanup-intent is niet betrouwbaar")
+        elif stage.exists():
+            verify_identity(binding["cycle"], local, binding["identity"], gid)
+            intent_record = {"schema_version": 1, "run_id": run_id, "cycle": binding["cycle"],
+                             "stage_identity": binding["identity"], "original_stage_path": str(stage),
+                             "quarantine_path": str(quarantine), "cleanup_status": "PURGE_INTENT",
+                             "bytes_reclaimed": safe_tree_bytes(stage),
+                             "completion_sha256": binding["completion_sha256"],
+                             "manifest_sha256": binding["manifest_sha256"]}
+            write_audit(intent, intent_record, gid)
+        elif not quarantine.exists():
+            cleanup_stop(run_id, EXIT_UNKNOWN, "FAILED_RETAINED", "stage ontbreekt zonder geldig purge-record of intent")
+        if os.environ.get("OPG_MEDIA_TEST_INTERRUPT_AFTER") == "INTENT":
+            cleanup_stop(run_id, EXIT_UNKNOWN, "FAILED_RETAINED", "gesimuleerde onderbreking na intent")
+        pointer = local / "ready" / binding["cycle"] / "active_stage"
+        if pointer.exists():
+            pointer_identity = read_single_line(pointer)
+            if not SAFE_HASH.fullmatch(pointer_identity):
+                cleanup_stop(run_id, EXIT_UNKNOWN, "FAILED_RETAINED", "active_stage is niet betrouwbaar")
+            if pointer_identity == binding["identity"]:
+                pointer.unlink()
+        purging.mkdir(mode=0o750, parents=True, exist_ok=True)
+        secure_directory(local / "purging", gid); secure_directory(purging, gid)
+        if stage.exists() and not quarantine.exists():
+            os.rename(stage, quarantine)
+        elif stage.exists() and quarantine.exists():
+            cleanup_stop(run_id, EXIT_UNKNOWN, "FAILED_RETAINED", "stage en purge-quarantaine bestaan beide")
+        if os.environ.get("OPG_MEDIA_TEST_INTERRUPT_AFTER") == "RENAME":
+            cleanup_stop(run_id, EXIT_UNKNOWN, "FAILED_RETAINED", "gesimuleerde onderbreking na rename")
+        try:
+            reclaimed = measured_safe_purge(quarantine) if quarantine.exists() else int(intent_record["bytes_reclaimed"])
+        except BaseException:
+            cleanup_stop(run_id, EXIT_UNKNOWN, "FAILED_RETAINED", "purge onderbroken; quarantaine behouden")
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        record = {"schema_version": 1, "run_id": run_id, "cycle": binding["cycle"],
+                  "stage_identity": binding["identity"], "original_stage_path": str(stage),
+                  "central_source_path": str(roots()[0] / binding["cycle"]), "purged_at": now,
+                  "bytes_reclaimed": reclaimed, "cleanup_status": "PURGED",
+                  "completion_sha256": binding["completion_sha256"],
+                  "manifest_sha256": binding["manifest_sha256"]}
+        write_audit(audit, record, gid)
+        try:
+            write_audit(run_root / run_id / "stage_cleanup.json", record, gid, manage_parent=False)
+        except OSError:
+            pass
+        if os.environ.get("OPG_MEDIA_TEST_INTERRUPT_AFTER") == "AUDIT":
+            cleanup_stop(run_id, EXIT_UNKNOWN, "FAILED_RETAINED", "gesimuleerde onderbreking na auditpublicatie")
+        unlink_if_present(intent)
+        print(f"OPG_MEDIA_CLEANUP|run_id={run_id}|status=PURGED|bytes_reclaimed={reclaimed}")
+
+
+def verify_purged_run(run_id):
+    if not SAFE_RUN.fullmatch(run_id):
+        die(70, "ongeldige RUN_ID")
+    _, _, context_root = lifecycle_roots()
+    expected_owner = os.getuid() if os.environ.get("OPG_MEDIA_TEST_MODE") == "1" else 0
+    record, _ = lifecycle_json(context_root / "stage-cleanup" / f"{run_id}.json", expected_owner)
+    binding = validate_completion_for_run(run_id)
+    if (record.get("run_id") != run_id or record.get("cleanup_status") != "PURGED" or
+            record.get("stage_identity") != binding["identity"] or
+            record.get("completion_sha256") != binding["completion_sha256"] or binding["stage"].exists()):
+        die(EXIT_BLOCKED, "purge-record/binding is ongeldig")
+    print(f"PURGED|{run_id}|{binding['cycle']}|{binding['identity']}")
+
+
 def main():
     if len(sys.argv) not in (2, 3):
-        die(70, "gebruik: opg_media_stage_root.sh {stage-active-cycle|verify-active-stage CYCLE}")
+        die(70, "gebruik: opg_media_stage_root.sh {stage-active-cycle|verify-active-stage CYCLE|purge-run RUN_ID|verify-purged-run RUN_ID}")
     action = sys.argv[1]
     if action == "stage-active-cycle" and len(sys.argv) == 2:
-        stage_active_cycle()
+        stage_active_cycle_locked()
     elif action == "verify-active-stage" and len(sys.argv) == 3 and SAFE_CYCLE.fullmatch(sys.argv[2]):
         _, _, local, _, _ = roots()
-        verify_published(sys.argv[2], local)
+        with media_lock(local, roots()[4], False):
+            verify_published(sys.argv[2], local)
+    elif action == "purge-run" and len(sys.argv) == 3:
+        purge_run(sys.argv[2])
+    elif action == "verify-purged-run" and len(sys.argv) == 3:
+        verify_purged_run(sys.argv[2])
     else:
         die(70, "onbekende of onveilige actie/argumenten")
 

@@ -222,6 +222,7 @@ fi
 initialize_local_media() {
   local output status cycle identity patch_root opatch_root artifact_hash key_hash format db_hash ojvm_hash zip_hash extra
   [[ "$LOCAL_MEDIA_MODE" == required ]] || return 0
+  opg_acquire_media_lock || return $?
   [[ ${MONTH:-} =~ ^[A-Z][A-Z0-9_-]{2,31}$ ]] || return 1
   validate_media_helper_trust || return 1
   output=$("$MEDIA_STAGE_HELPER" verify-active-stage "$MONTH" 2>>"${RUN_DIR:-/tmp}/media_stage_verify.err") || return 1
@@ -2427,7 +2428,8 @@ Oracle Home: ${TARGET_ORACLE_HOME}
 DB-RU: ${DB_PATCH}
 OJVM: ${OJVM_PATCH}
 Databases: $(opg_manifest_sids | paste -sd, -)
-Cleanup, OS-update en reboot zijn niet uitgevoerd.
+Lokale stage-cleanup volgt pas na succesvolle completion-publicatie.
+OS-update en reboot zijn niet uitgevoerd.
 EOF
   opg_write_state 12_COMPLETE COMPLETE
 }
@@ -2520,6 +2522,11 @@ perform_apply() {
 perform_resume() {
   local rc inventory OPG_READ_ONLY_PHASE=true
   load_run_context || { opg_result_line "$EXIT_BLOCKED" BLOCKED RESUME; return "$EXIT_BLOCKED"; }
+  if [[ "$CURRENT_STATE:$CURRENT_PHASE" == 12_COMPLETE:COMPLETE && "$LOCAL_MEDIA_MODE" == required ]] &&
+     validate_media_helper_trust && "$MEDIA_STAGE_HELPER" verify-purged-run "$RUN_ID" >/dev/null 2>>"${RUN_DIR}/media_stage_verify.err"; then
+    opg_result_line "$EXIT_OK" COMPLETE RESUME
+    return 0
+  fi
   initialize_local_media || { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED MEDIA; return "$EXIT_MANUAL"; }
   opg_acquire_lock; rc=$?
   if (( rc != 0 )); then
@@ -2675,6 +2682,7 @@ handle_signal() {
     opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED SIGNAL
   fi
   opg_release_lock || true
+  opg_release_media_lock || true
   exit "$EXIT_MANUAL"
 }
 

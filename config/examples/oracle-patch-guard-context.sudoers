@@ -6,5 +6,6 @@ Cmnd_Alias OPG_CONTEXT = /usr/local/sbin/opg_context_root.sh prepare-root, \
 
 oracle ALL=(root) NOPASSWD: OPG_CONTEXT
 
-Cmnd_Alias OPG_MEDIA_STAGE = /usr/local/sbin/opg_media_stage_root.sh stage-active-cycle
+Cmnd_Alias OPG_MEDIA_STAGE = /usr/local/sbin/opg_media_stage_root.sh stage-active-cycle, \
+                            /usr/local/sbin/opg_media_stage_root.sh purge-run *
 oracle ALL=(root) NOPASSWD: OPG_MEDIA_STAGE

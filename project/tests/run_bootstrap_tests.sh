@@ -77,6 +77,7 @@ run_bootstrap; rc=$?
 cmp -s "$SUDOERS_SOURCE" "$SUDOERS_TARGET" || rc=98
 grep -q "OPG_BOOTSTRAP|INSTALLED|$SUDOERS_TARGET" "$OUT" || rc=97
 grep -q '/usr/local/sbin/opg_context_root.sh publish-completion [*]' "$SUDOERS_TARGET" || rc=96
+grep -q '/usr/local/sbin/opg_media_stage_root.sh purge-run [*]' "$SUDOERS_TARGET" || rc=95
 record 'eerste bootstrap installeert meegeleverde sudoers inclusief publish-completion' 0 "$rc"
 
 fresh_rc=0
@@ -86,6 +87,15 @@ done
 [[ -d "$BASE/u01/stage" && $(stat -c '%U:%G:%a' "$BASE/u01/stage") == root:root:755 ]] || fresh_rc=98
 [[ -d "$BASE/u01/stage/oracle-patch-guard" && $(stat -c '%U:%G:%a' "$BASE/u01/stage/oracle-patch-guard") == root:root:750 ]] || fresh_rc=97
 record 'fresh host krijgt alle lokale helpers en stage-anchors zonder handmatige stap' 0 "$fresh_rc"
+
+lock_rc=0
+[[ -d "$BASE/u01/stage/oracle-patch-guard/.locks" && $(stat -c '%U:%G:%a' "$BASE/u01/stage/oracle-patch-guard/.locks") == root:root:750 ]] || lock_rc=99
+[[ -f "$BASE/u01/stage/oracle-patch-guard/.locks/media-stage.lock" && ! -L "$BASE/u01/stage/oracle-patch-guard/.locks/media-stage.lock" && $(stat -c '%U:%G:%a:%h' "$BASE/u01/stage/oracle-patch-guard/.locks/media-stage.lock") == root:root:640:1 ]] || lock_rc=98
+record 'bootstrap installeert de gedeelde veilige media-lock' 0 "$lock_rc"
+
+cleanup_evidence_rc=0
+[[ -d "$BASE/var/lib/oracle-patch-guard/stage-cleanup" && ! -L "$BASE/var/lib/oracle-patch-guard/stage-cleanup" && $(stat -c '%U:%G:%a' "$BASE/var/lib/oracle-patch-guard/stage-cleanup") == root:root:750 ]] || cleanup_evidence_rc=99
+record 'bootstrap maakt autoritatieve cleanup-evidenceroot veilig aan' 0 "$cleanup_evidence_rc"
 
 config_rc=0
 [[ -f "$CONFIG_TARGET" && ! -L "$CONFIG_TARGET" ]] || config_rc=99

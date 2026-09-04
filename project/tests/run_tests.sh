@@ -110,9 +110,10 @@ enable_local_media() {
   cp -a "$PATCH_ROOT/JUL2026/39222882" "$stage/media/JUL2026/"
   cp "$OPATCH_ROOT/p6880880_190000_Linux-x86-64.zip" "$stage/opatch/"
   LOCAL_MEDIA_HELPER="$CASE_DIR/opg_media_verify"
-  cat >"$LOCAL_MEDIA_HELPER" <<EOF
+cat >"$LOCAL_MEDIA_HELPER" <<EOF
 #!/usr/bin/env bash
 set -u
+if [[ \${1:-} == verify-purged-run && \${2:-} == R-PURGED && -f "$CASE_DIR/purge-record-valid" ]]; then exit 0; fi
 [[ \${1:-} == verify-active-stage && \${2:-} == JUL2026 ]] || exit 70
 db_hash=\$(sha256sum "$stage/media/JUL2026/39472050/payload.bin" | awk '{print \$1}')
 ojvm_hash=\$(sha256sum "$stage/media/JUL2026/39222882/payload.bin" | awk '{print \$1}')
@@ -658,6 +659,8 @@ setup_case precheckreadonly; precheck PRO1 >/dev/null; rc=$?
 if compgen -G "$RUN_ROOT/PRO1/shutdown_*.log" >/dev/null || compgen -G "$RUN_ROOT/PRO1/listener_stop_*.log" >/dev/null || compgen -G "$RUN_ROOT/PRO1/apply_*.log" >/dev/null || compgen -G "$RUN_ROOT/PRO1/datapatch_*.log" >/dev/null; then rc=99; fi
 [[ ! -e "$RUN_ROOT/PRO1/patch_manifest.sha256" ]] || rc=98
 record 'PRECHECK blijft read-only en publiceert geen manifesthash' 10 "$rc"
+
+setup_case resumepurged; enable_local_media; assess R-PURGED >/dev/null; plan R-PURGED >/dev/null; token=$(approval R-PURGED); guard apply --non-interactive --run-id R-PURGED --approved-manifest "$RUN_ROOT/R-PURGED/patch_manifest.json" --approval-token "$token" >/dev/null 2>&1; apply_rc=$?; touch "$CASE_DIR/purge-record-valid"; mv "$LOCAL_STAGE/ready/JUL2026/1111111111111111111111111111111111111111111111111111111111111111" "$CASE_DIR/purged-stage"; guard resume --non-interactive --run-id R-PURGED >"$CASE_DIR/resume-purged.out" 2>&1; resume_rc=$?; [[ $apply_rc -eq 0 && $resume_rc -eq 0 ]] && grep -q 'status=COMPLETE' "$CASE_DIR/resume-purged.out"; record 'COMPLETE-run blijft na bewezen purge raadpleegbaar zonder media-initialisatie' 0 $?
 
 for signal in TERM INT; do
   setup_case "prechecksignal${signal,,}"
