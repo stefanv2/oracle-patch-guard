@@ -10,6 +10,9 @@ staged media, cryptografische goedkeuring en multi-target-ondersteuning.
        width="900">
 </p>
 
+> **Wil je OPG testen?** Begin bij de
+> [praktische test-roadmap](TEST_ROADMAP.md).
+
 ## Ketenoverzicht
 
 Onderstaand overzicht laat zien hoe Oracle Patch Guard een nieuwe patchrelease
@@ -106,6 +109,7 @@ succesvol afgerond, inclusief completion-publicatie. Zie
 - `config/examples/` — generieke voorbeelden voor cycles en sudoers;
 - `PATCH_CYCLE_GUIDE.md` — actuele operationele handleiding voor een nieuwe
   patchcycle;
+- `TEST_ROADMAP.md` — praktijkgerichte acceptatietest voor DBA's;
 - `tools/` — standalone benchmark voor hashing;
 - `PILOT07_*.md`, `TREE_HASH_V2_SPEC.md` — documentatie over ontwerp, security
   en validatie.
