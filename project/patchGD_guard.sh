@@ -343,7 +343,7 @@ SQL
   opg_atomic_write "${RUN_DIR}/datapatch_sqlpatch_cdb.sql" <<SQL
 set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
 whenever sqlerror exit failure rollback
-select 'CDB_SQLPATCH|'||r.con_id||'|'||c.name||'|'||r.patch_id||'|'||r.status||'|'||
+select 'CDB_SQLPATCH|'||r.con_id||'|'||c.name||'|'||r.patch_id||'|'||r.action||'|'||r.status||'|'||
        to_char(r.action_time,'YYYYMMDDHH24MISSFF6')
 from cdb_registry_sqlpatch r join v\$containers c on c.con_id=r.con_id
 where r.patch_id in (${DB_PATCH},${OJVM_PATCH})
@@ -358,7 +358,7 @@ SQL
   opg_atomic_write "${RUN_DIR}/datapatch_sqlpatch_noncdb.sql" <<SQL
 set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
 whenever sqlerror exit failure rollback
-select 'CDB_SQLPATCH|0|NONCDB|'||r.patch_id||'|'||r.status||'|'||
+select 'CDB_SQLPATCH|0|NONCDB|'||r.patch_id||'|'||r.action||'|'||r.status||'|'||
        to_char(r.action_time,'YYYYMMDDHH24MISSFF6')
 from dba_registry_sqlpatch r
 where r.patch_id in (${DB_PATCH},${OJVM_PATCH})
@@ -371,10 +371,6 @@ SQL
   opg_atomic_write "${RUN_DIR}/validate.sql" <<SQL
 set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
 whenever sqlerror exit failure rollback
-select 'SQLPATCH|'||patch_id||'|'||status from (
-  select patch_id,status,row_number() over(partition by patch_id order by action_time desc) rn
-  from dba_registry_sqlpatch where patch_id in (${DB_PATCH},${OJVM_PATCH})
-) where rn=1 order by patch_id;
 select 'REGISTRY|'||comp_id||'|'||status from dba_registry order by comp_id;
 select 'INVALID|'||count(*) from dba_objects where status='INVALID';
 select 'CDB|'||cdb from v\$database;
@@ -382,16 +378,6 @@ select 'DB|'||name||'|'||database_role||'|'||open_mode||'|'||cdb from v\$databas
 select 'PDB|'||listagg(name||'='||open_mode, ';') within group(order by con_id) from v\$pdbs where con_id > 2;
 select 'SERVICES|'||listagg(name, ';') within group(order by name) from v\$active_services where name not like 'SYS$%';
 select 'CDB_REGISTRY|'||con_id||'|'||comp_id||'|'||status from cdb_registry order by con_id, comp_id;
-select 'CDB_SQLPATCH|'||r.con_id||'|'||c.name||'|'||r.patch_id||'|'||r.status||'|'||
-       to_char(r.action_time,'YYYYMMDDHH24MISSFF6')
-from cdb_registry_sqlpatch r join v\$containers c on c.con_id=r.con_id
-where r.patch_id in (${DB_PATCH},${OJVM_PATCH})
-  and (r.con_id = 1 or r.con_id > 2)
-  and r.action_time = (
-    select max(x.action_time) from cdb_registry_sqlpatch x
-    where x.con_id=r.con_id and x.patch_id=r.patch_id
-  )
-order by r.con_id, r.patch_id;
 exit success
 SQL
   opg_atomic_write "${RUN_DIR}/utlrp_wrapper.sql" <<'SQL'
@@ -2058,7 +2044,7 @@ prepare_pdbs_for_datapatch() {
 }
 
 validate_datapatch_sqlpatch_output() {
-  local sid=$1 output=$2 expected_file tag con_id name patch_id status action_time extra key label failed=0
+  local sid=$1 output=$2 expected_file tag con_id name patch_id action status action_time extra key label line failed=0
   local oracle_name_regex='^[A-Za-z][A-Za-z0-9_$#]{0,29}$'
   local -a patch_ids=("$DB_PATCH")
   local -A expected_containers=() expected_patches=() seen=()
@@ -2077,7 +2063,17 @@ validate_datapatch_sqlpatch_output() {
   done <"$expected_file"
   [[ ${#expected_containers[@]} -gt 0 ]] || return 1
 
-  while IFS='|' read -r tag con_id name patch_id status action_time extra; do
+  # SQL selects the latest timestamp across ALL actions/statuses, retaining ties.
+  # Historical APPLY/SUCCESS remains allowed; this does not bind a new attempt.
+  # Parse the entire dedicated SQL output, not grep-selected partial records.
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    if [[ ${OPG_TEST_MODE:-0} == 1 && "$line" == 'MOCK label='* ]]; then continue; fi
+    [[ "$line" =~ ^CDB_SQLPATCH\|[0-9]+\|[A-Za-z][A-Za-z0-9_\$#]{0,29}\|[0-9]+\|[A-Z]+\|[A-Z\ ]+\|[0-9]{20}$ ]] || {
+      opg_log ERROR "DATAPATCH_CONTAINER_VALIDATION|sid=${sid}|result=FAIL|reason=unparseable_record"
+      return 1
+    }
+    IFS='|' read -r tag con_id name patch_id action status action_time extra <<<"$line"
     if [[ "$tag" != CDB_SQLPATCH || -n "$extra" || ! "$con_id" =~ ^[0-9]+$ ||
           ! "$name" =~ $oracle_name_regex || ! "$patch_id" =~ ^[0-9]+$ ||
           ! "$action_time" =~ ^[0-9]{20}$ ]]; then
@@ -2095,9 +2091,11 @@ validate_datapatch_sqlpatch_output() {
     }
     seen[$key]=$status
     [[ "$patch_id" == "$DB_PATCH" ]] && label=RU || label=OJVM
-    opg_log INFO "DATAPATCH_CONTAINER_VALIDATION|sid=${sid}|container=${name}|con_id=${con_id}|patch_type=${label}|patch_id=${patch_id}|status=${status}"
-    [[ "$status" == SUCCESS ]] || failed=1
-  done < <(grep '^CDB_SQLPATCH|' "$output")
+    opg_log INFO "DATAPATCH_CONTAINER_VALIDATION|sid=${sid}|container=${name}|con_id=${con_id}|patch_type=${label}|patch_id=${patch_id}|status=${status}|action=${action}"
+    [[ "$action" == APPLY && "$status" == SUCCESS ]] || failed=1
+  done <"$output"
+  # An unterminated last line may be a partially written SQL record.
+  [[ -z "$line" ]] || return 1
   for con_id in "${!expected_containers[@]}"; do
     name=${expected_containers[$con_id]}
     for patch_id in "${patch_ids[@]}"; do
@@ -2114,15 +2112,15 @@ validate_datapatch_sqlpatch_output() {
 }
 
 validate_datapatch_sqlpatch() {
-  local sid=$1 cdb output sql_file
+  local sid=$1 prefix=${2:-datapatch_sqlpatch} cdb output sql_file
   cdb=$(opg_read_original_state "$sid" cdb)
-  output="${RUN_DIR}/datapatch_sqlpatch_${sid}.log"
+  output="${RUN_DIR}/${prefix}_${sid}.log"
   case "$cdb" in
     YES) sql_file="${RUN_DIR}/datapatch_sqlpatch_cdb.sql" ;;
     NO) sql_file="${RUN_DIR}/datapatch_sqlpatch_noncdb.sql" ;;
     *) return 1 ;;
   esac
-  opg_sqlplus "$sid" "datapatch_sqlpatch_${sid}" "$sql_file" "$output" &&
+  opg_sqlplus "$sid" "${prefix}_${sid}" "$sql_file" "$output" &&
     opg_verify_command_success_text "$output" &&
     validate_datapatch_sqlpatch_output "$sid" "$output"
 }
@@ -2370,7 +2368,7 @@ validate_all() {
   local sid running output failed=0 expected_services current_services expected_pdb current_pdb role mode cdb listener
   local expected_role expected_mode expected_cdb invalid_before invalid_after
   printf 'SID,ORACLE_HOME,oratab_autostart,instance_running,database_role,open_mode,CDB,PDB_status,listener,services\n' >"${RUN_DIR}/database_state_after.csv"
-  printf 'SID,patch_id,status,action_time\n' >"${RUN_DIR}/sqlpatch_after.csv"
+  printf 'SID,patch_id,status,action_time,action,container_id,container_name\n' >"${RUN_DIR}/sqlpatch_after.csv"
   printf 'SID,invalid_objects\n' >"${RUN_DIR}/invalid_objects_after.csv"
   : >"${RUN_DIR}/registry_components_validation.psv"
   while IFS= read -r sid; do
@@ -2394,17 +2392,16 @@ validate_all() {
     [[ "$role" == "$expected_role" && "$mode" == "$expected_mode" && "$cdb" == "$expected_cdb" ]] || { opg_log ERROR "Database-role/open mode/CDB wijkt af voor ${sid}."; failed=1; }
     listener=$(opg_read_original_state "$sid" listener)
     printf '"%s","%s","%s","true","%s","%s","%s","%s","%s","%s"\n' "$sid" "$TARGET_ORACLE_HOME" "$(opg_read_original_state "$sid" autostart)" "$role" "$mode" "$cdb" "$current_pdb" "$listener" "$current_services" >>"${RUN_DIR}/database_state_after.csv"
-    grep -qx "SQLPATCH|${DB_PATCH}|SUCCESS" "$output" || failed=1
-    grep -qx "SQLPATCH|${OJVM_PATCH}|SUCCESS" "$output" || failed=1
-    awk -F'|' '$1=="SQLPATCH" && $3!="SUCCESS"{bad=1} END{exit bad}' "$output" || failed=1
     compare_registry_with_baseline "$sid" "$cdb" "$output" validation || failed=1
-    if [[ "$cdb" == YES ]]; then
-      validate_datapatch_sqlpatch_output "$sid" "$output" || failed=1
+    if validate_datapatch_sqlpatch "$sid" validation_sqlpatch; then
+      awk -F'|' -v sid="$sid" '$1=="CDB_SQLPATCH"{printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n",sid,$4,$6,$7,$5,$2,$3}' \
+        "${RUN_DIR}/validation_sqlpatch_${sid}.log" >>"${RUN_DIR}/sqlpatch_after.csv"
+    else
+      failed=1
     fi
     invalid_before=$(awk -F, -v sid="\"${sid}\"" '$1==sid{v=$2;gsub(/^"|"$/,"",v);print v;exit}' "${RUN_DIR}/invalid_objects_before.csv")
     invalid_after=$(grep '^INVALID|' "$output" | tail -1 | cut -d'|' -f2)
     [[ "$invalid_before" =~ ^[0-9]+$ && "$invalid_after" =~ ^[0-9]+$ && "$invalid_after" -le "$invalid_before" ]] || { opg_log ERROR "Invalid objects namen toe of konden niet worden vergeleken voor ${sid}: voor=${invalid_before:-UNKNOWN}, na=${invalid_after:-UNKNOWN}."; failed=1; }
-    grep '^SQLPATCH|' "$output" | awk -F'|' -v sid="$sid" '{printf "\"%s\",\"%s\",\"%s\",\"\"\n",sid,$2,$3}' >>"${RUN_DIR}/sqlpatch_after.csv"
     printf '"%s","%s"\n' "$sid" "$invalid_after" >>"${RUN_DIR}/invalid_objects_after.csv"
   done < <(opg_manifest_sids)
   (( failed == 0 )) || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED VALIDATION "Eindvalidatie is niet voor iedere database geslaagd." 1; return 1; }

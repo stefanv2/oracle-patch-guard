@@ -332,6 +332,13 @@ door de beoogde DBA/operator op de beoogde targetklasse.
 
 ### TECHNICALLY READY
 
+Verplichte regressiesuite voor SQLPATCH ACTION-validatie (vanuit de repositoryroot,
+geïsoleerd en zonder productiecredentials of productie-installatiepaden):
+
+```bash
+python3 project/tests/run_sqlpatch_action_tests.py
+```
+
 - alle regressies van de exacte release zijn groen;
 - de representatieve happy path werkt;
 - approval-, window-, space- en mediafouten blokkeren vóór mutatie;

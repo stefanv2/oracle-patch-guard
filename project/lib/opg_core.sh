@@ -283,9 +283,12 @@ opg_mock_command() {
       printf 'OPatch Version: %s\n' "$mock_active_version" >>"$output_file" ;;
     conflict_db_ru|conflict_ojvm)
       printf 'Prereq CheckConflictAgainstOHWithDetail passed.\n' >>"$output_file" ;;
-    datapatch_sqlpatch_*)
+    datapatch_sqlpatch_*|validation_sqlpatch_*)
       local sqlpatch_sid expected_file expected_con_id expected_name expected_patch mock_status=${MOCK_DATAPATCH_SQLPATCH_STATUS:-SUCCESS}
-      sqlpatch_sid=${label#datapatch_sqlpatch_}
+      sqlpatch_sid=${label#*_sqlpatch_}
+      if [[ "$label" == validation_sqlpatch_* && ${MOCK_VALIDATION_SQLPATCH_BAD:-false} == true ]]; then
+        mock_status='WITH ERRORS'
+      fi
       if [[ -n ${MOCK_DATAPATCH_SQLPATCH_ROWS:-} ]]; then
         printf '%s\n' "$MOCK_DATAPATCH_SQLPATCH_ROWS" | tr ';' '\n' >>"$output_file"
       else
@@ -293,7 +296,7 @@ opg_mock_command() {
         while IFS='|' read -r expected_con_id expected_name; do
           for expected_patch in "${DB_PATCH:-0}" "${OJVM_PATCH:-0}"; do
             [[ -n "$expected_patch" ]] || continue
-            printf 'CDB_SQLPATCH|%s|%s|%s|%s|20260830120000000000\n' \
+            printf 'CDB_SQLPATCH|%s|%s|%s|APPLY|%s|20260830120000000000\n' \
               "$expected_con_id" "$expected_name" "$expected_patch" "$mock_status" >>"$output_file"
           done
         done <"$expected_file"
@@ -301,31 +304,15 @@ opg_mock_command() {
     datapatch_*) printf 'SQL Patching tool complete on %s\n' "${label#datapatch_}" >>"$output_file" ;;
     validation_*)
       local validation_sid=${label#validation_}
-      local mock_sqlpatch_status=SUCCESS mock_registry_rows validation_cdb validation_expected_file validation_con_id validation_name validation_patch
-      [[ ${MOCK_VALIDATION_SQLPATCH_BAD:-false} == true ]] && mock_sqlpatch_status='WITH ERRORS'
+      local mock_registry_rows validation_cdb
       validation_cdb=$(opg_read_original_state "$validation_sid" cdb 2>/dev/null || printf YES)
-      printf 'DB|%s|%s|%s|%s\nPDB|%s\nSERVICES|%s\nSQLPATCH|%s|%s\nSQLPATCH|%s|%s\nINVALID|%s\n' \
+      printf 'DB|%s|%s|%s|%s\nPDB|%s\nSERVICES|%s\nINVALID|%s\n' \
         "$validation_sid" "$(opg_read_original_state "$validation_sid" role 2>/dev/null || printf PRIMARY)" \
         "$(opg_read_original_state "$validation_sid" open_mode 2>/dev/null || printf 'READ WRITE')" \
         "$validation_cdb" \
         "$(opg_read_original_state "$validation_sid" pdb_status 2>/dev/null || true)" \
         "$(opg_read_original_state "$validation_sid" services 2>/dev/null || true)" \
-        "${DB_PATCH:-0}" "$mock_sqlpatch_status" "${OJVM_PATCH:-0}" "$mock_sqlpatch_status" \
         "${MOCK_VALIDATION_INVALID_COUNT:-0}" >>"$output_file"
-      if [[ "$validation_cdb" == YES ]]; then
-        if [[ -n ${MOCK_DATAPATCH_SQLPATCH_ROWS:-} ]]; then
-          printf '%s\n' "$MOCK_DATAPATCH_SQLPATCH_ROWS" | tr ';' '\n' >>"$output_file"
-        else
-          validation_expected_file="${RUN_DIR}/datapatch_expected_containers_${validation_sid}.psv"
-          while IFS='|' read -r validation_con_id validation_name; do
-            for validation_patch in "${DB_PATCH:-0}" "${OJVM_PATCH:-0}"; do
-              [[ -n "$validation_patch" ]] || continue
-              printf 'CDB_SQLPATCH|%s|%s|%s|%s|20260830120000000000\n' \
-                "$validation_con_id" "$validation_name" "$validation_patch" "$mock_sqlpatch_status" >>"$output_file"
-            done
-          done <"$validation_expected_file"
-        fi
-      fi
       mock_registry_rows=${MOCK_REGISTRY_AFTER:-${MOCK_REGISTRY_BEFORE:-REGISTRY|CATALOG|VALID}}
       printf '%s\n' "$mock_registry_rows" | tr ';' '\n' >>"$output_file"
       if [[ -z ${MOCK_REGISTRY_AFTER:-} && -z ${MOCK_REGISTRY_BEFORE:-} && "$validation_cdb" == YES ]]; then

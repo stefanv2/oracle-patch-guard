@@ -479,10 +479,10 @@ record 'ORA-65019 met exact correcte verse eindstate blijft idempotent' 0 "$rc" 
 
 # P0: exacte expected-container x expected-patch cardinaliteit.
 p0_ts=20260830120000000000
-p0_root_ru="CDB_SQLPATCH|1|CDB\$ROOT|39472050|SUCCESS|${p0_ts}"
-p0_root_ojvm="CDB_SQLPATCH|1|CDB\$ROOT|39222882|SUCCESS|${p0_ts}"
-p0_pdb1_ru="CDB_SQLPATCH|3|PDB1|39472050|SUCCESS|${p0_ts}"
-p0_pdb1_ojvm="CDB_SQLPATCH|3|PDB1|39222882|SUCCESS|${p0_ts}"
+p0_root_ru="CDB_SQLPATCH|1|CDB\$ROOT|39472050|APPLY|SUCCESS|${p0_ts}"
+p0_root_ojvm="CDB_SQLPATCH|1|CDB\$ROOT|39222882|APPLY|SUCCESS|${p0_ts}"
+p0_pdb1_ru="CDB_SQLPATCH|3|PDB1|39472050|APPLY|SUCCESS|${p0_ts}"
+p0_pdb1_ojvm="CDB_SQLPATCH|3|PDB1|39222882|APPLY|SUCCESS|${p0_ts}"
 
 setup_case p0noncdb; sed -i 's/"YES","PDB1=READ WRITE"/"NO",""/' "$CASE_DIR/fixture/database_inventory.csv"; assess P0R1 >/dev/null; plan P0R1 >/dev/null; token=$(approval P0R1)
 guard apply --non-interactive --run-id P0R1 --approved-manifest "$RUN_ROOT/P0R1/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
@@ -517,13 +517,13 @@ rc=$?; grep -Fq 'container=PDB1|con_id=3|patch_type=OJVM|patch_id=39222882|statu
 setup_case p0missingpdb; assess P0R8 >/dev/null; plan P0R8 >/dev/null; token=$(approval P0R8); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm}"
 guard apply --non-interactive --run-id P0R8 --approved-manifest "$RUN_ROOT/P0R8/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 volledig ontbrekende PDB faalt gesloten' 40 $? "$CASE_DIR/apply.out"
 
-setup_case p0badstatus; assess P0R9 >/dev/null; plan P0R9 >/dev/null; token=$(approval P0R9); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};${p0_pdb1_ru};CDB_SQLPATCH|3|PDB1|39222882|WITH ERRORS|${p0_ts}"
+setup_case p0badstatus; assess P0R9 >/dev/null; plan P0R9 >/dev/null; token=$(approval P0R9); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};${p0_pdb1_ru};CDB_SQLPATCH|3|PDB1|39222882|APPLY|WITH ERRORS|${p0_ts}"
 guard apply --non-interactive --run-id P0R9 --approved-manifest "$RUN_ROOT/P0R9/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 laatste status niet SUCCESS faalt gesloten' 40 $? "$CASE_DIR/apply.out"
 
 setup_case p0duplicate; assess P0R10 >/dev/null; plan P0R10 >/dev/null; token=$(approval P0R10); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};${p0_pdb1_ru};${p0_pdb1_ojvm};${p0_pdb1_ojvm}"
 guard apply --non-interactive --run-id P0R10 --approved-manifest "$RUN_ROOT/P0R10/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 dubbele container-patchregistratie is ambigu en faalt' 40 $? "$CASE_DIR/apply.out"
 
-setup_case p0badconid; assess P0R11 >/dev/null; plan P0R11 >/dev/null; token=$(approval P0R11); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};CDB_SQLPATCH|X|PDB1|39472050|SUCCESS|${p0_ts};${p0_pdb1_ojvm}"
+setup_case p0badconid; assess P0R11 >/dev/null; plan P0R11 >/dev/null; token=$(approval P0R11); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};CDB_SQLPATCH|X|PDB1|39472050|APPLY|SUCCESS|${p0_ts};${p0_pdb1_ojvm}"
 guard apply --non-interactive --run-id P0R11 --approved-manifest "$RUN_ROOT/P0R11/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 onparseerbare con_id faalt gesloten' 40 $? "$CASE_DIR/apply.out"
 
 setup_case p0unknownset; assess P0R12 >/dev/null; plan P0R12 >/dev/null; token=$(approval P0R12); printf "\nMOCK_DATAPATCH_CONTAINER_ROWS='DATAPATCH_CONTAINER|1|CDB\$ROOT|READ WRITE'\n" >>"$FIXTURE_ENV"
