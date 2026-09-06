@@ -332,12 +332,13 @@ door de beoogde DBA/operator op de beoogde targetklasse.
 
 ### TECHNICALLY READY
 
-Verplichte regressiesuites voor databasebaselinebinding, statepublicatie en
-SQLPATCH ACTION-validatie
+Verplichte regressiesuites voor PDB-validatievolgorde, databasebaselinebinding,
+statepublicatie en SQLPATCH ACTION-validatie
 (vanuit de repositoryroot, geïsoleerd en zonder productiecredentials of
 productie-installatiepaden):
 
 ```bash
+python3 project/tests/run_pdb_validation_order_tests.py
 python3 project/tests/run_database_baseline_tests.py
 python3 project/tests/run_state_write_tests.py
 python3 project/tests/run_sqlpatch_action_tests.py

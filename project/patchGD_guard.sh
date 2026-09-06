@@ -2307,12 +2307,16 @@ start_original_databases() {
 }
 
 run_datapatch_all() {
-  local sid running output marker previous_rc
+  local sid running output marker previous_rc failure_kind validation_output validation_marker restore_message
+  OPG_DATAPATCH_FINAL_VALIDATION_FAILED=false
   while IFS= read -r sid; do
+    failure_kind=
     running=$(opg_read_original_state "$sid" running)
     [[ "$running" == true ]] || continue
     output="${RUN_DIR}/datapatch_${sid}.log"
     marker="${RUN_DIR}/datapatch_${sid}.complete"
+    validation_output="${RUN_DIR}/validation_sqlpatch_${sid}.log"
+    validation_marker="${RUN_DIR}/validation_sqlpatch_${sid}.complete"
     if [[ ! -e "$marker" && -e "$output" ]]; then
       previous_rc=$(opg_last_command_exit "datapatch_${sid}")
       [[ -n "$previous_rc" && "$previous_rc" != 0 ]] || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Eerdere datapatch zonder geldig completion-marker is ambigu voor ${sid}." 1; return 1; }
@@ -2322,28 +2326,61 @@ run_datapatch_all() {
       return 1
     }
     if [[ -e "$marker" ]]; then
-      opg_completion_marker_valid "$marker" "$output" "$sid" datapatch || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Ongeldig datapatch completion-marker voor ${sid}." 1; return 1; }
-      validate_datapatch_sqlpatch "$sid" || {
-        opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Per-container SQLPATCH-hercontrole is mislukt voor ${sid}." 1
-        return 1
-      }
+      opg_completion_marker_valid "$marker" "$output" "$sid" datapatch || failure_kind=INVALID_DATAPATCH_MARKER
     else
       export ORACLE_HOME=$TARGET_ORACLE_HOME ORACLE_SID=$sid PATH="$TARGET_ORACLE_HOME/OPatch:$TARGET_ORACLE_HOME/bin:$SAFE_PATH"
       if ! opg_run_capture "datapatch_${sid}" "$output" "$TARGET_ORACLE_HOME/OPatch/datapatch" -verbose ||
          ! opg_verify_command_success_text "$output"; then
-        opg_mark_failure PARTIAL DATAPATCH "datapatch mislukt voor ${sid}; overige databases worden niet als geslaagd gemarkeerd." 1
-        return 1
+        failure_kind=DATAPATCH_COMMAND
       fi
-      validate_datapatch_sqlpatch "$sid" || {
-        opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Per-container SQLPATCH-validatie is mislukt voor ${sid}." 1
-        return 1
-      }
-      opg_write_completion_marker "$marker" "$output" "$sid" datapatch || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Datapatch completion-marker kon niet worden geschreven voor ${sid}." 1; return 1; }
     fi
-    restore_pdb_state "$sid" || {
-      opg_mark_failure MANUAL_INTERVENTION_REQUIRED RESTORE_PDB "Oorspronkelijke PDB-toestand kon na datapatch niet veilig worden hersteld voor ${sid}." 1
+
+    if [[ -z "$failure_kind" ]]; then
+      if ! validate_datapatch_sqlpatch "$sid"; then
+        failure_kind=SQLPATCH_VALIDATION
+        opg_log ERROR "DATAPATCH_SQLPATCH_VALIDATION_FAILED|sid=${sid}|restore_original_pdb_state=true"
+      elif ! validate_datapatch_sqlpatch "$sid" validation_sqlpatch; then
+        failure_kind=FINAL_SQLPATCH_VALIDATION
+        OPG_DATAPATCH_FINAL_VALIDATION_FAILED=true
+        opg_log ERROR "FINAL_SQLPATCH_VALIDATION_FAILED|sid=${sid}|restore_original_pdb_state=true"
+      elif [[ ! -e "$marker" ]] && ! opg_write_completion_marker "$marker" "$output" "$sid" datapatch; then
+        failure_kind=DATAPATCH_MARKER
+      elif ! opg_write_completion_marker "$validation_marker" "$validation_output" "$sid" sqlpatch_validation; then
+        failure_kind=SQLPATCH_VALIDATION_MARKER
+      fi
+    fi
+
+    if ! restore_pdb_state "$sid"; then
+      restore_message="Oorspronkelijke PDB-toestand kon na datapatch niet veilig worden hersteld voor ${sid}."
+      if [[ -n "$failure_kind" ]]; then
+        restore_message+=" Voorafgaand datapatchfalen: ${failure_kind}."
+      fi
+      opg_log ERROR "PDB_RESTORE_FAILED|sid=${sid}|prior_failure=${failure_kind:-NONE}|manual_intervention_required=true"
+      opg_mark_failure MANUAL_INTERVENTION_REQUIRED RESTORE_PDB "$restore_message" 1
       return 1
-    }
+    fi
+
+    case "$failure_kind" in
+      '') ;;
+      DATAPATCH_COMMAND)
+        opg_mark_failure PARTIAL DATAPATCH "datapatch mislukt voor ${sid}; de oorspronkelijke PDB-toestand is hersteld en overige databases worden niet als geslaagd gemarkeerd." 1
+        return 1 ;;
+      INVALID_DATAPATCH_MARKER)
+        opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Ongeldig datapatch completion-marker voor ${sid}; de oorspronkelijke PDB-toestand is hersteld." 1
+        return 1 ;;
+      SQLPATCH_VALIDATION)
+        opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Per-container SQLPATCH-validatie is mislukt voor ${sid}; de oorspronkelijke PDB-toestand is hersteld." 1
+        return 1 ;;
+      FINAL_SQLPATCH_VALIDATION)
+        opg_mark_failure MANUAL_INTERVENTION_REQUIRED VALIDATION "De volledige per-container SQLPATCH-eindvalidatie is mislukt voor ${sid}; de oorspronkelijke PDB-toestand is hersteld." 1
+        return 1 ;;
+      DATAPATCH_MARKER)
+        opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "Datapatch completion-marker kon niet worden geschreven voor ${sid}; de oorspronkelijke PDB-toestand is hersteld." 1
+        return 1 ;;
+      SQLPATCH_VALIDATION_MARKER)
+        opg_mark_failure MANUAL_INTERVENTION_REQUIRED DATAPATCH "SQLPATCH-validatiebewijs kon niet worden gebonden voor ${sid}; de oorspronkelijke PDB-toestand is hersteld." 1
+        return 1 ;;
+    esac
   done < <(opg_manifest_sids)
   opg_write_state 09_DATAPATCH_COMPLETE DATAPATCH || return 1
 }
@@ -2375,7 +2412,7 @@ run_utlrp_all() {
 
 validate_all() {
   local sid running output failed=0 expected_services current_services expected_pdb current_pdb role mode cdb listener
-  local expected_role expected_mode expected_cdb invalid_before invalid_after baseline
+  local expected_role expected_mode expected_cdb invalid_before invalid_after baseline sqlpatch_output sqlpatch_marker
   baseline=$(opg_database_baseline_file)
   printf 'SID,ORACLE_HOME,oratab_autostart,instance_running,database_role,open_mode,CDB,PDB_status,listener,services\n' >"${RUN_DIR}/database_state_after.csv"
   printf 'SID,patch_id,status,action_time,action,container_id,container_name\n' >"${RUN_DIR}/sqlpatch_after.csv"
@@ -2403,9 +2440,12 @@ validate_all() {
     listener=$(opg_read_original_state "$sid" listener)
     printf '"%s","%s","%s","true","%s","%s","%s","%s","%s","%s"\n' "$sid" "$TARGET_ORACLE_HOME" "$(opg_read_original_state "$sid" autostart)" "$role" "$mode" "$cdb" "$current_pdb" "$listener" "$current_services" >>"${RUN_DIR}/database_state_after.csv"
     compare_registry_with_baseline "$sid" "$cdb" "$output" validation || failed=1
-    if validate_datapatch_sqlpatch "$sid" validation_sqlpatch; then
+    sqlpatch_output="${RUN_DIR}/validation_sqlpatch_${sid}.log"
+    sqlpatch_marker="${RUN_DIR}/validation_sqlpatch_${sid}.complete"
+    if opg_completion_marker_valid "$sqlpatch_marker" "$sqlpatch_output" "$sid" sqlpatch_validation &&
+       validate_datapatch_sqlpatch_output "$sid" "$sqlpatch_output"; then
       awk -F'|' -v sid="$sid" '$1=="CDB_SQLPATCH"{printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n",sid,$4,$6,$7,$5,$2,$3}' \
-        "${RUN_DIR}/validation_sqlpatch_${sid}.log" >>"${RUN_DIR}/sqlpatch_after.csv"
+        "$sqlpatch_output" >>"${RUN_DIR}/sqlpatch_after.csv"
     else
       failed=1
     fi
@@ -2543,6 +2583,10 @@ perform_apply() {
   }
   run_datapatch_all || {
     [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]] && { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE; return "$EXIT_MANUAL"; }
+    if [[ ${OPG_DATAPATCH_FINAL_VALIDATION_FAILED:-false} == true || "$CURRENT_STATE" == MANUAL_INTERVENTION_REQUIRED ]]; then
+      opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED "${CURRENT_PHASE:-VALIDATION}"
+      return "$EXIT_MANUAL"
+    fi
     opg_result_line "$EXIT_PARTIAL" PARTIAL DATAPATCH; return "$EXIT_PARTIAL"
   }
   run_utlrp_all || {

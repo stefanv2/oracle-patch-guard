@@ -460,7 +460,7 @@ record 'PDB oorspronkelijk MOUNTED wordt na datapatch weer MOUNTED' 0 "$rc" "$CA
 setup_case pdbfinalmismatch; sed -i 's/PDB1=READ WRITE/PDB1=MOUNTED/' "$CASE_DIR/fixture/database_inventory.csv"; assess R67 >/dev/null; plan R67 >/dev/null; token=$(approval R67); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=MOUNTED'\nMOCK_PDB_RESTORE_FINAL_STATES='PDB1=READ WRITE'\n" >>"$FIXTURE_ENV"
 guard apply --non-interactive --run-id R67 --approved-manifest "$RUN_ROOT/R67/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
 rc=$?; [[ -e "$RUN_ROOT/R67/datapatch_DB1.log" ]] || rc=99; grep -Fq '"phase": "RESTORE_PDB"' "$RUN_ROOT/R67/execution_state.json" || rc=98
-record 'afwijkende PDB-eindstate na datapatch faalt gesloten' 40 "$rc" "$CASE_DIR/apply.out"
+record 'afwijkende PDB-eindstate na datapatch faalt gesloten' 50 "$rc" "$CASE_DIR/apply.out"
 
 setup_case pdbseed; assess R68 >/dev/null; plan R68 >/dev/null; token=$(approval R68); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=READ WRITE'\n" >>"$FIXTURE_ENV"
 guard apply --non-interactive --run-id R68 --approved-manifest "$RUN_ROOT/R68/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
@@ -506,34 +506,34 @@ rc=$?; grep -Fqx 'alter pluggable database "PDB1" open read write;' "$RUN_ROOT/P
 record 'P0 oorspronkelijk MOUNTED wordt gepatcht en exact hersteld' 0 "$rc" "$CASE_DIR/apply.out"
 
 setup_case p0missingru; assess P0R6 >/dev/null; plan P0R6 >/dev/null; token=$(approval P0R6); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};${p0_pdb1_ojvm}"
-guard apply --non-interactive --run-id P0R6 --approved-manifest "$RUN_ROOT/P0R6/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 ontbrekende RU voor één PDB faalt gesloten' 40 $? "$CASE_DIR/apply.out"
+guard apply --non-interactive --run-id P0R6 --approved-manifest "$RUN_ROOT/P0R6/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 ontbrekende RU voor één PDB faalt gesloten' 50 $? "$CASE_DIR/apply.out"
 
 # Permanente reproductie van de oorspronkelijke false-PASS: root is volledig,
 # maar de verwachte PDB mist OJVM. De oude generieke greps zouden beide patch-ID's zien.
 setup_case p0originalfalsepass; assess P0R7 >/dev/null; plan P0R7 >/dev/null; token=$(approval P0R7); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};${p0_pdb1_ru}"
 guard apply --non-interactive --run-id P0R7 --approved-manifest "$RUN_ROOT/P0R7/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
-rc=$?; grep -Fq 'container=PDB1|con_id=3|patch_type=OJVM|patch_id=39222882|status=MISSING' "$RUN_ROOT/P0R7/commands.log" || rc=99; record 'P0 oorspronkelijke false-PASS mist OJVM en faalt gesloten' 40 "$rc" "$CASE_DIR/apply.out"
+rc=$?; grep -Fq 'container=PDB1|con_id=3|patch_type=OJVM|patch_id=39222882|status=MISSING' "$RUN_ROOT/P0R7/commands.log" || rc=99; record 'P0 oorspronkelijke false-PASS mist OJVM en faalt gesloten' 50 "$rc" "$CASE_DIR/apply.out"
 
 setup_case p0missingpdb; assess P0R8 >/dev/null; plan P0R8 >/dev/null; token=$(approval P0R8); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm}"
-guard apply --non-interactive --run-id P0R8 --approved-manifest "$RUN_ROOT/P0R8/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 volledig ontbrekende PDB faalt gesloten' 40 $? "$CASE_DIR/apply.out"
+guard apply --non-interactive --run-id P0R8 --approved-manifest "$RUN_ROOT/P0R8/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 volledig ontbrekende PDB faalt gesloten' 50 $? "$CASE_DIR/apply.out"
 
 setup_case p0badstatus; assess P0R9 >/dev/null; plan P0R9 >/dev/null; token=$(approval P0R9); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};${p0_pdb1_ru};CDB_SQLPATCH|3|PDB1|39222882|APPLY|WITH ERRORS|${p0_ts}"
-guard apply --non-interactive --run-id P0R9 --approved-manifest "$RUN_ROOT/P0R9/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 laatste status niet SUCCESS faalt gesloten' 40 $? "$CASE_DIR/apply.out"
+guard apply --non-interactive --run-id P0R9 --approved-manifest "$RUN_ROOT/P0R9/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 laatste status niet SUCCESS faalt gesloten' 50 $? "$CASE_DIR/apply.out"
 
 setup_case p0duplicate; assess P0R10 >/dev/null; plan P0R10 >/dev/null; token=$(approval P0R10); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};${p0_pdb1_ru};${p0_pdb1_ojvm};${p0_pdb1_ojvm}"
-guard apply --non-interactive --run-id P0R10 --approved-manifest "$RUN_ROOT/P0R10/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 dubbele container-patchregistratie is ambigu en faalt' 40 $? "$CASE_DIR/apply.out"
+guard apply --non-interactive --run-id P0R10 --approved-manifest "$RUN_ROOT/P0R10/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 dubbele container-patchregistratie is ambigu en faalt' 50 $? "$CASE_DIR/apply.out"
 
 setup_case p0badconid; assess P0R11 >/dev/null; plan P0R11 >/dev/null; token=$(approval P0R11); mock_datapatch_sqlpatch_rows "${p0_root_ru};${p0_root_ojvm};CDB_SQLPATCH|X|PDB1|39472050|APPLY|SUCCESS|${p0_ts};${p0_pdb1_ojvm}"
-guard apply --non-interactive --run-id P0R11 --approved-manifest "$RUN_ROOT/P0R11/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 onparseerbare con_id faalt gesloten' 40 $? "$CASE_DIR/apply.out"
+guard apply --non-interactive --run-id P0R11 --approved-manifest "$RUN_ROOT/P0R11/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 onparseerbare con_id faalt gesloten' 50 $? "$CASE_DIR/apply.out"
 
 setup_case p0unknownset; assess P0R12 >/dev/null; plan P0R12 >/dev/null; token=$(approval P0R12); printf "\nMOCK_DATAPATCH_CONTAINER_ROWS='DATAPATCH_CONTAINER|1|CDB\$ROOT|READ WRITE'\n" >>"$FIXTURE_ENV"
-guard apply --non-interactive --run-id P0R12 --approved-manifest "$RUN_ROOT/P0R12/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 onbetrouwbare verwachte containerset faalt gesloten' 40 $? "$CASE_DIR/apply.out"
+guard apply --non-interactive --run-id P0R12 --approved-manifest "$RUN_ROOT/P0R12/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 onbetrouwbare verwachte containerset faalt gesloten' 50 $? "$CASE_DIR/apply.out"
 
 setup_case p0openfail; sed -i 's/PDB1=READ WRITE/PDB1=MOUNTED/' "$CASE_DIR/fixture/database_inventory.csv"; assess P0R13 >/dev/null; plan P0R13 >/dev/null; token=$(approval P0R13); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=MOUNTED'\nMOCK_RC_prepare_datapatch_pdb_DB1=1\n" >>"$FIXTURE_ENV"
-guard apply --non-interactive --run-id P0R13 --approved-manifest "$RUN_ROOT/P0R13/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 noodzakelijke PDB kan niet worden geopend en faalt gesloten' 40 $? "$CASE_DIR/apply.out"
+guard apply --non-interactive --run-id P0R13 --approved-manifest "$RUN_ROOT/P0R13/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 noodzakelijke PDB kan niet worden geopend en faalt gesloten' 50 $? "$CASE_DIR/apply.out"
 
 setup_case p0restorefail; sed -i 's/PDB1=READ WRITE/PDB1=MOUNTED/' "$CASE_DIR/fixture/database_inventory.csv"; assess P0R14 >/dev/null; plan P0R14 >/dev/null; token=$(approval P0R14); printf "\nMOCK_PDB_CURRENT_STATES='PDB1=MOUNTED'\nMOCK_PDB_RESTORE_FINAL_STATES='PDB1=READ WRITE'\n" >>"$FIXTURE_ENV"
-guard apply --non-interactive --run-id P0R14 --approved-manifest "$RUN_ROOT/P0R14/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 oorspronkelijke PDB-state kan niet worden hersteld en faalt gesloten' 40 $? "$CASE_DIR/apply.out"
+guard apply --non-interactive --run-id P0R14 --approved-manifest "$RUN_ROOT/P0R14/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; record 'P0 oorspronkelijke PDB-state kan niet worden hersteld en faalt gesloten' 50 $? "$CASE_DIR/apply.out"
 
 # PRECHECK gebruikt exact de bestaande assessmentfunctie, maar publiceert geen
 # formele state of manifest en kan daardoor nooit een APPLY autoriseren.

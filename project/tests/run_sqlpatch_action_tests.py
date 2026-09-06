@@ -127,7 +127,10 @@ def check(scope, route, scenario):
             command = ('opg_write_completion_marker "$RUN_DIR/datapatch_DB1.complete" '
                        '"$RUN_DIR/datapatch_DB1.log" DB1 datapatch\nrun_datapatch_all')
         else:
-            command = "validate_all"
+            command = ('cp "$RUN_DIR/rows" "$RUN_DIR/validation_sqlpatch_DB1.log"\n'
+                       'opg_write_completion_marker "$RUN_DIR/validation_sqlpatch_DB1.complete" '
+                       '"$RUN_DIR/validation_sqlpatch_DB1.log" DB1 sqlpatch_validation\n'
+                       'validate_all')
         result = shell(work, cdb, command)
         expected = scenario in ("apply", "rollback_then_apply", "historical")
         actual = result.returncode == 0
