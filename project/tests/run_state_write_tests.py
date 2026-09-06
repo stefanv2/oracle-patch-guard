@@ -155,6 +155,7 @@ load_run_context() { CURRENT_STATE=03_PLAN_GENERATED; CURRENT_PHASE=PLAN; }
 initialize_local_media() { :; }; opg_verify_manifest_hash() { :; }
 opg_sha256() { printf same; }; verify_approval() { :; }; confirm_interactive_apply() { :; }
 opg_acquire_lock() { :; }; opg_release_lock() { :; }; perform_preapply_recheck() { :; }
+opg_prepare_database_baseline_snapshot() { :; }
 perform_opatch_upgrade() { printf 'OPATCH\n' >>"$RUN_DIR/mutations"; }
 stop_databases() { printf 'STOP\n' >>"$RUN_DIR/mutations"; }
 apply_binary_patches() { printf 'DBPATCH\n' >>"$RUN_DIR/mutations"; }
@@ -194,6 +195,7 @@ load_run_context() { CURRENT_STATE=03_PLAN_GENERATED; CURRENT_PHASE=PLAN; }
 initialize_local_media() { :; }; opg_verify_manifest_hash() { :; }
 opg_sha256() { printf same; }; verify_approval() { :; }; confirm_interactive_apply() { :; }
 opg_acquire_lock() { :; }; opg_release_lock() { :; }; perform_preapply_recheck() { :; }
+opg_prepare_database_baseline_snapshot() { :; }
 perform_opatch_upgrade() { :; }; stop_databases() { :; }
 apply_binary_patches() {
   printf 'DBPATCH\n' >>"$RUN_DIR/mutations"

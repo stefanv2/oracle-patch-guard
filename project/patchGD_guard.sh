@@ -747,7 +747,7 @@ EOF
 write_patch_manifest() {
   local publish=${1:-true}
   local db_dir="${PATCH_ROOT}/${MONTH}/${DB_PATCH}" ojvm_dir="${PATCH_ROOT}/${MONTH}/${OJVM_PATCH}"
-  local zip="${OPATCH_ROOT}/${OPATCH_ZIPFILE}" db_hash ojvm_hash zip_hash oratab_hash db_count recovery_hash window_hash registry_hash approval_key_hash
+  local zip="${OPATCH_ROOT}/${OPATCH_ZIPFILE}" db_hash ojvm_hash zip_hash oratab_hash db_count recovery_hash window_hash registry_hash approval_key_hash baseline_hash
   if [[ "$LOCAL_MEDIA_MODE" == required ]]; then
     db_hash=${LOCAL_DB_TREE_SHA256:-UNAVAILABLE}; ojvm_hash=${LOCAL_OJVM_TREE_SHA256:-UNAVAILABLE}; zip_hash=${LOCAL_OPATCH_ZIP_SHA256:-UNAVAILABLE}
   else
@@ -756,7 +756,14 @@ write_patch_manifest() {
     zip_hash=$(opg_sha256 "$zip" 2>/dev/null || printf 'UNAVAILABLE')
   fi
   oratab_hash=$(opg_sha256 "$ORATAB_FILE" 2>/dev/null || printf 'UNAVAILABLE')
-  db_count=$(awk 'END{print NR-1}' "${RUN_DIR}/database_state_before.csv")
+  if opg_validate_database_baseline "${RUN_DIR}/database_state_before.csv" "" "" "$TARGET_ORACLE_HOME"; then
+    db_count=$OPG_DATABASE_BASELINE_COUNT
+    baseline_hash=$(opg_sha256 "${RUN_DIR}/database_state_before.csv" 2>/dev/null || printf 'UNAVAILABLE')
+  else
+    db_count=0
+    baseline_hash=UNAVAILABLE
+    opg_add_finding BLOCKED DATABASE_BASELINE_INVALID "Databasebaseline is leeg, malformed, dubbel of bevat databases buiten de doelhome." "${RUN_DIR}/database_state_before.csv"
+  fi
   recovery_hash=$(opg_sha256 "${RUN_DIR}/recovery_manifest.json" 2>/dev/null || printf 'UNAVAILABLE')
   window_hash=$(opg_sha256 "$MAINTENANCE_WINDOW_MANIFEST" 2>/dev/null || printf 'UNAVAILABLE')
   registry_hash=$(opg_sha256 "${RUN_DIR}/registry_components_before.psv" 2>/dev/null || printf 'UNAVAILABLE')
@@ -767,7 +774,7 @@ write_patch_manifest() {
   [[ "$publish" == true ]] || return 0
   opg_atomic_write "${RUN_DIR}/patch_manifest.json" <<EOF
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "run_id": "$(opg_json_escape "$RUN_ID")",
   "created_at": "$(opg_now)",
   "created_epoch": $(date +%s),
@@ -794,6 +801,7 @@ write_patch_manifest() {
   "maintenance_window_manifest_sha256": "$window_hash",
   "approval_public_key_sha256": "$approval_key_hash",
   "registry_components_before_sha256": "$registry_hash",
+  "database_state_before_sha256": "$baseline_hash",
   "database_count": $db_count,
   "database_state_file": "database_state_before.csv",
   "registry_components_file": "registry_components_before.psv"
@@ -1272,11 +1280,12 @@ report_approval_blocked() {
 
 verify_database_state_unchanged() {
   local sid expected_running current_running output expected_role expected_mode expected_pdb expected_services current_role current_mode current_pdb current_services
-  local pmon_pid pmon_exe sqlpatch_errors component_invalid asm_files
+  local pmon_pid pmon_exe sqlpatch_errors component_invalid asm_files baseline
   if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then
     [[ ${MOCK_ENVIRONMENT_CHANGED:-false} != true && ${MOCK_PREAPPLY_DATAPUMP:-false} != true && ${MOCK_PREAPPLY_SQLPATCH_ERROR:-false} != true && ${MOCK_UNEXPECTED_DATABASE:-false} != true && ${MOCK_REGISTRY_PREAPPLY_CHANGED:-false} != true ]]
     return $?
   fi
+  baseline=$(opg_database_baseline_file)
   : >"${RUN_DIR}/registry_components_preapply.psv"
   while IFS= read -r sid; do
     expected_running=$(opg_read_original_state "$sid" running); current_running=false
@@ -1288,7 +1297,7 @@ verify_database_state_unchanged() {
     [[ "$pmon_exe" == "$TARGET_ORACLE_HOME/bin/oracle" ]] || return 1
     output="${RUN_DIR}/preapply_recheck_${sid}.log"
     opg_sqlplus "$sid" "preapply_recheck_${sid}" "${RUN_DIR}/inventory.sql" "$output" && opg_verify_command_success_text "$output" || return 1
-    expected_role=$(awk -F, -v sid="\"${sid}\"" '$1==sid{v=$5;gsub(/^"|"$/,"",v);print v;exit}' "${RUN_DIR}/database_state_before.csv")
+    expected_role=$(awk -F, -v sid="\"${sid}\"" '$1==sid{v=$5;gsub(/^"|"$/,"",v);print v;exit}' "$baseline")
     expected_mode=$(opg_read_original_state "$sid" open_mode)
     expected_pdb=$(opg_read_original_state "$sid" pdb_status)
     expected_services=$(opg_read_original_state "$sid" services)
@@ -1755,7 +1764,7 @@ stop_databases() {
 }
 
 manifest_listeners() {
-  awk -F, 'NR>1 {v=$9; gsub(/^"|"$/, "", v); if (v!="" && v!="UNKNOWN" && v!="NONE") print v}' "${RUN_DIR}/database_state_before.csv" | tr ';' '\n' | sort -u
+  awk -F, 'NR>1 {v=$9; gsub(/^"|"$/, "", v); if (v!="" && v!="UNKNOWN" && v!="NONE") print v}' "$(opg_database_baseline_file)" | tr ';' '\n' | sort -u
 }
 
 stop_original_listeners() {
@@ -2366,7 +2375,8 @@ run_utlrp_all() {
 
 validate_all() {
   local sid running output failed=0 expected_services current_services expected_pdb current_pdb role mode cdb listener
-  local expected_role expected_mode expected_cdb invalid_before invalid_after
+  local expected_role expected_mode expected_cdb invalid_before invalid_after baseline
+  baseline=$(opg_database_baseline_file)
   printf 'SID,ORACLE_HOME,oratab_autostart,instance_running,database_role,open_mode,CDB,PDB_status,listener,services\n' >"${RUN_DIR}/database_state_after.csv"
   printf 'SID,patch_id,status,action_time,action,container_id,container_name\n' >"${RUN_DIR}/sqlpatch_after.csv"
   printf 'SID,invalid_objects\n' >"${RUN_DIR}/invalid_objects_after.csv"
@@ -2374,7 +2384,7 @@ validate_all() {
   while IFS= read -r sid; do
     running=$(opg_read_original_state "$sid" running)
     if [[ "$running" != true ]]; then
-      awk -F, -v sid="\"${sid}\"" '$1==sid{print;exit}' "${RUN_DIR}/database_state_before.csv" >>"${RUN_DIR}/database_state_after.csv"
+      awk -F, -v sid="\"${sid}\"" '$1==sid{print;exit}' "$baseline" >>"${RUN_DIR}/database_state_after.csv"
       continue
     fi
     output="${RUN_DIR}/validation_${sid}.log"
@@ -2457,6 +2467,13 @@ perform_apply() {
     return "$EXIT_BLOCKED"
   fi
   trap 'opg_release_lock' EXIT
+  if [[ "$DRY_RUN" != true ]] && ! opg_prepare_database_baseline_snapshot "${RUN_DIR}/patch_manifest.json"; then
+    opg_log ERROR "DATABASE_BASELINE_BINDING_FAILED|route=APPLY|run_id=${RUN_ID}|manual_intervention_required=true"
+    report_approval_blocked "signed database baseline binding is missing or invalid"
+    opg_mark_failure BLOCKED PREAPPLY "De databasebaseline is niet volledig en cryptografisch aan het goedgekeurde manifest gebonden." 1
+    opg_result_line "$EXIT_BLOCKED" BLOCKED PREAPPLY
+    return "$EXIT_BLOCKED"
+  fi
   perform_preapply_recheck; rc=$?
   if (( rc != 0 )); then
     if (( rc == EXIT_UNKNOWN )); then
@@ -2556,6 +2573,12 @@ perform_resume() {
     opg_result_line "$EXIT_BLOCKED" BLOCKED LOCK_SETUP; return "$EXIT_BLOCKED"
   fi
   trap 'opg_release_lock' EXIT
+  if [[ "$DRY_RUN" != true ]] && ! opg_prepare_database_baseline_snapshot "${RUN_DIR}/patch_manifest.json"; then
+    opg_log ERROR "DATABASE_BASELINE_BINDING_FAILED|route=RESUME|run_id=${RUN_ID}|manual_intervention_required=true"
+    opg_mark_failure MANUAL_INTERVENTION_REQUIRED RESUME "De databasebaseline is niet volledig en cryptografisch aan het goedgekeurde manifest gebonden; automatisch hervatten is verboden." 1
+    opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED RESUME
+    return "$EXIT_MANUAL"
+  fi
   if verify_resume_environment; then
     rc=0
   else

@@ -593,7 +593,88 @@ opg_parse_oratab() {
 }
 
 opg_manifest_sids() {
-  awk -F, 'NR>1 {gsub(/^"|"$/, "", $1); print $1}' "${RUN_DIR}/database_state_before.csv"
+  awk -F, 'NR>1 {gsub(/^"|"$/, "", $1); print $1}' "$(opg_database_baseline_file)"
+}
+
+opg_database_baseline_file() {
+  printf '%s\n' "${OPG_DATABASE_BASELINE_FILE:-${RUN_DIR}/database_state_before.csv}"
+}
+
+opg_validate_database_baseline() {
+  local file=$1 expected_hash=${2:-} expected_count=${3:-} expected_home=${4:-$TARGET_ORACLE_HOME}
+  local actual_hash count expected_header
+  expected_header='SID,ORACLE_HOME,oratab_autostart,instance_running,database_role,open_mode,CDB,PDB_status,listener,services'
+  [[ -r "$file" && -s "$file" ]] || return 1
+  if [[ -n "$expected_hash" ]]; then
+    [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
+    actual_hash=$(opg_sha256 "$file") || return 1
+    [[ "$actual_hash" == "$expected_hash" ]] || return 1
+  fi
+  if [[ -n "$expected_count" ]]; then
+    [[ "$expected_count" =~ ^[1-9][0-9]*$ ]] || return 1
+  fi
+  count=$(awk -F, -v header="$expected_header" -v home="$expected_home" '
+    NR == 1 { if ($0 != header) exit 10; next }
+    {
+      if (NF != 10) exit 11
+      for (i=1; i<=10; i++) {
+        if ($i !~ /^"[^"]*"$/) exit 12
+        value[i]=$i; sub(/^"/, "", value[i]); sub(/"$/, "", value[i])
+      }
+      if (value[1] == "" || value[1] !~ /^[A-Za-z][A-Za-z0-9_$#]{0,29}$/) exit 13
+      if (seen[value[1]]++) exit 14
+      if (value[2] != home) exit 15
+      count++
+    }
+    END { if (NR < 2 || count < 1) exit 16; print count }
+  ' "$file") || return 1
+  [[ -n "$count" ]] || return 1
+  if [[ -n "$expected_count" && "$count" != "$expected_count" ]]; then return 1; fi
+  OPG_DATABASE_BASELINE_COUNT=$count
+  return 0
+}
+
+opg_release_database_baseline_snapshot() {
+  if [[ ${OPG_DATABASE_BASELINE_FD:-} =~ ^[0-9]+$ ]]; then
+    exec {OPG_DATABASE_BASELINE_FD}<&- || true
+  fi
+  unset OPG_DATABASE_BASELINE_FD OPG_DATABASE_BASELINE_FILE
+}
+
+opg_prepare_database_baseline_snapshot() {
+  local manifest=${1:-${RUN_DIR}/patch_manifest.json}
+  local source="${RUN_DIR}/database_state_before.csv" temporary schema stored_file expected_hash expected_count stored_home fd
+  opg_release_database_baseline_snapshot
+  [[ -f "$source" && ! -L "$source" && -r "$source" && -s "$source" ]] || return 1
+  [[ -f "$manifest" && ! -L "$manifest" && -r "$manifest" && -s "$manifest" ]] || return 1
+  schema=$(opg_get_json_number "$manifest" schema_version)
+  stored_file=$(opg_get_json_string "$manifest" database_state_file)
+  expected_hash=$(opg_get_json_string "$manifest" database_state_before_sha256)
+  expected_count=$(opg_get_json_number "$manifest" database_count)
+  stored_home=$(opg_get_json_string "$manifest" target_oracle_home)
+  [[ "$schema" == 2 && "$stored_file" == database_state_before.csv ]] || return 1
+  [[ "$stored_home" == "$TARGET_ORACLE_HOME" ]] || return 1
+  [[ "$expected_hash" =~ ^[0-9a-f]{64}$ && "$expected_count" =~ ^[1-9][0-9]*$ ]] || return 1
+  temporary=$(mktemp "${RUN_DIR}/.database-baseline.XXXXXX") || return 1
+  if ! dd if="$source" of="$temporary" iflag=nofollow status=none || ! chmod 0400 "$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if ! exec {fd}<"$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if ! rm -f -- "$temporary"; then
+    exec {fd}<&-
+    return 1
+  fi
+  OPG_DATABASE_BASELINE_FD=$fd
+  OPG_DATABASE_BASELINE_FILE="/proc/self/fd/${fd}"
+  if ! opg_validate_database_baseline "$OPG_DATABASE_BASELINE_FILE" "$expected_hash" "$expected_count" "$stored_home"; then
+    opg_release_database_baseline_snapshot
+    return 1
+  fi
+  return 0
 }
 
 opg_verify_manifest_hash() {
@@ -635,7 +716,8 @@ opg_last_command_exit() {
 }
 
 opg_read_original_state() {
-  local sid=$1 field=$2 csv="${RUN_DIR}/database_state_before.csv" column
+  local sid=$1 field=$2 csv column
+  csv=$(opg_database_baseline_file)
   case "$field" in
     autostart) column=3 ;;
     running) column=4 ;;
