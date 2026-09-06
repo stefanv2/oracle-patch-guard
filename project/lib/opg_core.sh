@@ -55,13 +55,21 @@ opg_canonical_dir() {
 
 opg_atomic_write() {
   local destination=$1
-  local directory temporary
-  directory=$(dirname -- "$destination") || return 1
-  mkdir -p -- "$directory" || return 1
-  temporary=$(mktemp "${directory}/.opg.tmp.XXXXXX") || return 1
-  cat >"$temporary" || { rm -f -- "$temporary"; return 1; }
+  local directory temporary rc
+  OPG_ATOMIC_WRITE_ERROR=
+  directory=$(dirname -- "$destination") || { OPG_ATOMIC_WRITE_ERROR=destination_directory; return 1; }
+  mkdir -p -- "$directory" || { OPG_ATOMIC_WRITE_ERROR=directory_create; return 1; }
+  temporary=$(mktemp "${directory}/.opg.tmp.XXXXXX") || { OPG_ATOMIC_WRITE_ERROR=temporary_create; return 1; }
+  cat >"$temporary" || { OPG_ATOMIC_WRITE_ERROR=write_or_close; rm -f -- "$temporary"; return 1; }
   chmod 0600 "$temporary" 2>/dev/null || true
-  mv -f -- "$temporary" "$destination"
+  sync "$temporary" || { OPG_ATOMIC_WRITE_ERROR=flush; rm -f -- "$temporary"; return 1; }
+  mv -f -- "$temporary" "$destination" || {
+    rc=$?
+    OPG_ATOMIC_WRITE_ERROR=rename
+    rm -f -- "$temporary"
+    return "$rc"
+  }
+  sync "$directory" || { OPG_ATOMIC_WRITE_ERROR=directory_flush; return 1; }
 }
 
 opg_get_json_string() {
@@ -108,17 +116,32 @@ opg_result_line() {
     "${HOST_NAME:-unknown}" "${TARGET_ORACLE_HOME:-unknown}" "${RUN_ID:-unknown}" "$status" "$phase" "$code"
 }
 
+opg_report_state_publication_failure() {
+  local reason=$1 previous=$2 next=$3 phase=$4
+  OPG_STATE_WRITE_FAILED=true
+  OPG_STATE_WRITE_FAILURE_PHASE=$phase
+  printf 'ERROR: STATE_PUBLICATION_FAILED|reason=%s|previous=%s|next=%s|phase=%s|manual_intervention_required=true\n' \
+    "$reason" "$previous" "$next" "$phase" >&2
+}
+
 opg_write_state() {
   local next=$1 phase=${2:-$1} sid=${3:-} command=${4:-} command_exit=${5:-0}
-  local previous=${CURRENT_STATE:-NONE} timestamp
+  local previous=${CURRENT_STATE:-NONE} timestamp history_file
   if [[ ${OPG_STATE_READ_ONLY:-false} == true ]]; then
     opg_log INFO "STATE_WRITE_SUPPRESSED|previous=${previous}|next=${next}|phase=${phase}|reason=read_only_apply"
     return 0
   fi
   timestamp=$(opg_now)
-  CURRENT_STATE=$next
-  CURRENT_PHASE=$phase
-  opg_atomic_write "${RUN_DIR}/execution_state.json" <<EOF
+  history_file="${RUN_DIR}/state_history.log"
+  if ! printf '%s|%s|%s|%s|%s|%s|%s\n' "$timestamp" "$previous" "$next" "$phase" "$sid" "$command_exit" "$command" >>"$history_file"; then
+    opg_report_state_publication_failure history_write "$previous" "$next" "$phase"
+    return 1
+  fi
+  if ! sync "$history_file"; then
+    opg_report_state_publication_failure history_flush "$previous" "$next" "$phase"
+    return 1
+  fi
+  if ! opg_atomic_write "${RUN_DIR}/execution_state.json" <<EOF
 {
   "schema_version": 1,
   "run_id": "$(opg_json_escape "$RUN_ID")",
@@ -135,7 +158,14 @@ opg_write_state() {
   "pid": $$
 }
 EOF
-  printf '%s|%s|%s|%s|%s|%s|%s\n' "$timestamp" "$previous" "$next" "$phase" "$sid" "$command_exit" "$command" >>"${RUN_DIR}/state_history.log"
+  then
+    opg_report_state_publication_failure "authoritative_state_${OPG_ATOMIC_WRITE_ERROR:-write}" "$previous" "$next" "$phase"
+    return 1
+  fi
+  CURRENT_STATE=$next
+  CURRENT_PHASE=$phase
+  OPG_STATE_WRITE_FAILED=false
+  OPG_STATE_WRITE_FAILURE_PHASE=
 }
 
 opg_load_state() {
@@ -150,9 +180,14 @@ opg_load_state() {
 
 opg_mark_failure() {
   local state=$1 phase=$2 message=$3 code=${4:-1}
+  local failed=0
   opg_log ERROR "$message"
-  opg_write_state "$state" "$phase" "" "$message" "$code" || true
-  printf '%s\n' "$message" >"${RUN_DIR}/last_error.txt"
+  opg_write_state "$state" "$phase" "" "$message" "$code" || failed=1
+  if ! printf '%s\n' "$message" >"${RUN_DIR}/last_error.txt"; then
+    printf 'ERROR: LAST_ERROR_WRITE_FAILED|phase=%s|manual_intervention_required=true\n' "$phase" >&2
+    failed=1
+  fi
+  (( failed == 0 ))
 }
 
 opg_run_capture() {

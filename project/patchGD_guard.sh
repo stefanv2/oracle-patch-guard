@@ -1037,13 +1037,13 @@ perform_assessment() {
       emit_precheck_result
       return "$ASSESSMENT_EXIT"
     fi
-    opg_write_state BLOCKED MEDIA
+    opg_write_state BLOCKED MEDIA || return 1
     opg_result_line "$EXIT_BLOCKED" BLOCKED MEDIA
     return "$EXIT_BLOCKED"
   fi
   RECOVERY_MANIFEST_FILE="${RUN_DIR}/recovery_manifest.json"
   write_sql_files
-  opg_write_state 01_ASSESS_STARTED ASSESS
+  opg_write_state 01_ASSESS_STARTED ASSESS || return 1
 
   if [[ ${OPG_TEST_MODE:-0} != 1 ]]; then
     local dependency
@@ -1181,9 +1181,9 @@ EOF
     return "$ASSESSMENT_EXIT"
   fi
   if [[ "$ASSESSMENT_STATUS" == READY || "$ASSESSMENT_STATUS" == CONDITIONAL ]]; then
-    opg_write_state 02_ASSESS_OK ASSESS
+    opg_write_state 02_ASSESS_OK ASSESS || return 1
   else
-    opg_write_state BLOCKED ASSESS
+    opg_write_state BLOCKED ASSESS || return 1
   fi
   opg_result_line "$ASSESSMENT_EXIT" "$ASSESSMENT_STATUS" ASSESS
   return "$ASSESSMENT_EXIT"
@@ -1226,7 +1226,7 @@ EOF
 
 De patch-README blijft leidend. Iedere CONDITIONAL finding moet met zijn eigen ID in het approval-token staan.
 EOF
-  opg_write_state 03_PLAN_GENERATED PLAN
+  opg_write_state 03_PLAN_GENERATED PLAN || return 1
   opg_result_line "$EXIT_OK" PLAN_GENERATED PLAN
 }
 
@@ -1639,7 +1639,7 @@ EOF
     unzip -q "$zip" -d "$stage_root" >>"${RUN_DIR}/opatch_stage_extract.log" 2>&1 || return 1
   fi
   validate_staged_opatch "${stage_root}/OPatch" || return 1
-  opg_write_state OPATCH_STAGED OPATCH_UPGRADE
+  opg_write_state OPATCH_STAGED OPATCH_UPGRADE || return 1
   opg_log INFO "OPATCH_STAGE_END|status=OK|stage=${stage_root}"
 }
 
@@ -1673,12 +1673,12 @@ perform_opatch_upgrade() {
     if [[ "$relation" == 0 ]]; then
       if [[ -e "$backup" ]]; then
         [[ -r "${RUN_DIR}/opatch_upgrade_metadata.txt" ]] || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OPATCH_UPGRADE "Actieve OPatch is vervangen, maar rungebonden upgrademetadata ontbreekt." 1; return 1; }
-        opg_write_state OPATCH_INSTALLED_UNVERIFIED OPATCH_UPGRADE
+        opg_write_state OPATCH_INSTALLED_UNVERIFIED OPATCH_UPGRADE || return 1
         validate_active_opatch_after_upgrade || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OPATCH_UPGRADE "Nieuwe actieve OPatch kon niet exact worden gevalideerd; automatische rollback is uitgeschakeld." 1; return 1; }
       else
         opg_run_capture opatch_upgrade_inventory "${RUN_DIR}/opatch_upgrade_inventory.txt" "$live/opatch" lsinventory -detail || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OPATCH_UPGRADE "Bestaande vereiste OPatch kan de inventory niet lezen." 1; return 1; }
       fi
-      opg_write_state OPATCH_READY OPATCH_UPGRADE
+      opg_write_state OPATCH_READY OPATCH_UPGRADE || return 1
       opg_log INFO "OPATCH_UPGRADE_SKIP|reason=active_version_exact|version=${active_version}"
       return 0
     fi
@@ -1700,7 +1700,7 @@ perform_opatch_upgrade() {
     fi
     return 1
   fi
-  opg_write_state MEDIA_VALIDATED OPATCH_UPGRADE
+  opg_write_state MEDIA_VALIDATED OPATCH_UPGRADE || return 1
 
   if [[ ! -e "$backup" ]]; then
     stage_opatch_upgrade || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OPATCH_STAGING "OPatch-staging kon niet veilig worden voltooid; de actieve OPatch is niet vervangen." 1; return 1; }
@@ -1711,7 +1711,7 @@ perform_opatch_upgrade() {
     [[ ! -e "$backup" ]] || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OPATCH_BACKUP "Rungebonden OPatch-backup bestaat al en wordt niet overschreven." 1; return 1; }
     opg_log INFO "OPATCH_BACKUP_START|source=${live}|backup=${backup}"
     mv -- "$live" "$backup" || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OPATCH_BACKUP "Bestaande OPatch kon niet atomair naar de rungebonden backup worden verplaatst." 1; return 1; }
-    opg_write_state OPATCH_BACKED_UP OPATCH_UPGRADE
+    opg_write_state OPATCH_BACKED_UP OPATCH_UPGRADE || return 1
     opg_log INFO "OPATCH_BACKUP_END|status=OK|backup=${backup}"
     if [[ ${MOCK_OPATCH_INTERRUPT_AFTER:-} == BACKUP ]]; then
       opg_mark_failure PARTIAL OPATCH_BACKED_UP "Gesimuleerde onderbreking na OPatch-backup." 1
@@ -1726,7 +1726,7 @@ perform_opatch_upgrade() {
     fi
     opg_log INFO "OPATCH_PROMOTE_START|stage=${staged}|target=${live}"
     mv -- "$staged" "$live" || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OPATCH_PROMOTION "Gestagede OPatch kon niet atomair worden gepromoveerd; automatische rollback is uitgeschakeld." 1; return 1; }
-    opg_write_state OPATCH_INSTALLED_UNVERIFIED OPATCH_UPGRADE
+    opg_write_state OPATCH_INSTALLED_UNVERIFIED OPATCH_UPGRADE || return 1
     opg_log INFO "OPATCH_PROMOTE_END|status=OK|target=${live}|stage_root=${stage_root}"
     if [[ ${MOCK_OPATCH_INTERRUPT_AFTER:-} == PROMOTION ]]; then
       opg_mark_failure PARTIAL OPATCH_INSTALLED_UNVERIFIED "Gesimuleerde onderbreking na OPatch-promotie." 1
@@ -1734,7 +1734,7 @@ perform_opatch_upgrade() {
     fi
   fi
   validate_active_opatch_after_upgrade || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OPATCH_UPGRADE "Nieuwe actieve OPatch-versie/inventory/permissions zijn niet exact valide; automatische rollback is uitgeschakeld." 1; return 1; }
-  opg_write_state OPATCH_READY OPATCH_UPGRADE
+  opg_write_state OPATCH_READY OPATCH_UPGRADE || return 1
   opg_log INFO "OPATCH_UPGRADE_COMPLETE|old_version=${OPATCH_ACTUAL_VERSION}|new_version=${OPATCH_VERSION}|backup=${backup}"
 }
 
@@ -1751,7 +1751,7 @@ stop_databases() {
     fi
   done < <(opg_manifest_sids)
   stop_original_listeners || return 1
-  opg_write_state 05_DATABASES_STOPPED STOP_DATABASES
+  opg_write_state 05_DATABASES_STOPPED STOP_DATABASES || return 1
 }
 
 manifest_listeners() {
@@ -2223,11 +2223,11 @@ apply_binary_patches() {
   opg_run_critical apply_db_ru "${RUN_DIR}/apply_db_ru.log" PARTIAL DB_BINARY "$TARGET_ORACLE_HOME/OPatch/opatch" apply -silent "$db_dir" || return 1
   opg_run_capture verify_db_ru "${RUN_DIR}/verify_db_ru.log" "$TARGET_ORACLE_HOME/OPatch/opatch" lspatches || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED DB_BINARY "DB-RU inventoryvalidatie mislukt." 1; return 1; }
   grep -q "$DB_PATCH" "${RUN_DIR}/verify_db_ru.log" || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED DB_BINARY "DB-RU ontbreekt na apply in inventory." 1; return 1; }
-  opg_write_state 06_DB_BINARY_APPLIED DB_BINARY
+  opg_write_state 06_DB_BINARY_APPLIED DB_BINARY || return 1
   opg_run_critical apply_ojvm "${RUN_DIR}/apply_ojvm.log" PARTIAL OJVM_BINARY "$TARGET_ORACLE_HOME/OPatch/opatch" apply -silent "$ojvm_dir" || return 1
   opg_run_capture verify_ojvm "${RUN_DIR}/verify_ojvm.log" "$TARGET_ORACLE_HOME/OPatch/opatch" lspatches || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OJVM_BINARY "OJVM inventoryvalidatie mislukt." 1; return 1; }
   grep -q "$OJVM_PATCH" "${RUN_DIR}/verify_ojvm.log" || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OJVM_BINARY "OJVM ontbreekt na apply in inventory." 1; return 1; }
-  opg_write_state 07_OJVM_BINARY_APPLIED OJVM_BINARY
+  opg_write_state 07_OJVM_BINARY_APPLIED OJVM_BINARY || return 1
 }
 
 verify_successful_database_startup() {
@@ -2294,7 +2294,7 @@ start_original_databases() {
   done < <(opg_manifest_sids)
   register_original_databases || return 1
   start_original_listeners || return 1
-  opg_write_state 08_DATABASES_STARTED START_DATABASES
+  opg_write_state 08_DATABASES_STARTED START_DATABASES || return 1
 }
 
 run_datapatch_all() {
@@ -2336,7 +2336,7 @@ run_datapatch_all() {
       return 1
     }
   done < <(opg_manifest_sids)
-  opg_write_state 09_DATAPATCH_COMPLETE DATAPATCH
+  opg_write_state 09_DATAPATCH_COMPLETE DATAPATCH || return 1
 }
 
 run_utlrp_all() {
@@ -2361,7 +2361,7 @@ run_utlrp_all() {
     fi
     opg_write_completion_marker "$marker" "$output" "$sid" utlrp || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED UTLRP "Utlrp completion-marker kon niet worden geschreven voor ${sid}." 1; return 1; }
   done < <(opg_manifest_sids)
-  opg_write_state 10_UTLRP_COMPLETE UTLRP
+  opg_write_state 10_UTLRP_COMPLETE UTLRP || return 1
 }
 
 validate_all() {
@@ -2417,7 +2417,7 @@ validate_all() {
     opg_mark_failure MANUAL_INTERVENTION_REQUIRED OEM_REFRESH "OEM-upload kon niet worden uitgevoerd: EMCTL_PATH ontbreekt." 1
     return 1
   fi
-  opg_write_state 11_VALIDATION_COMPLETE VALIDATION
+  opg_write_state 11_VALIDATION_COMPLETE VALIDATION || return 1
   opg_atomic_write "${RUN_DIR}/summary.txt" <<EOF
 Run ${RUN_ID} technisch voltooid
 Host: ${HOST_NAME}
@@ -2428,7 +2428,7 @@ Databases: $(opg_manifest_sids | paste -sd, -)
 Lokale stage-cleanup volgt pas na succesvolle completion-publicatie.
 OS-update en reboot zijn niet uitgevoerd.
 EOF
-  opg_write_state 12_COMPLETE COMPLETE
+  opg_write_state 12_COMPLETE COMPLETE || return 1
 }
 
 perform_apply() {
@@ -2494,8 +2494,15 @@ perform_apply() {
     return "$EXIT_OK"
   fi
 
-  opg_write_state 04_APPROVED APPROVAL
+  opg_write_state 04_APPROVED APPROVAL || {
+    opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE
+    return "$EXIT_MANUAL"
+  }
   if ! perform_opatch_upgrade; then
+    if [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]]; then
+      opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE
+      return "$EXIT_MANUAL"
+    fi
     case "$CURRENT_STATE" in
       BLOCKED) rc=$EXIT_BLOCKED ;;
       UNKNOWN) rc=$EXIT_UNKNOWN ;;
@@ -2505,12 +2512,30 @@ perform_apply() {
     opg_result_line "$rc" "$CURRENT_STATE" "${CURRENT_PHASE:-OPATCH_UPGRADE}"
     return "$rc"
   fi
-  stop_databases || { opg_result_line "$EXIT_PARTIAL" PARTIAL STOP_DATABASES; return "$EXIT_PARTIAL"; }
-  apply_binary_patches || { opg_result_line "$EXIT_PARTIAL" "$CURRENT_STATE" "$CURRENT_PHASE"; return "$EXIT_PARTIAL"; }
-  start_original_databases || { opg_result_line "$EXIT_PARTIAL" PARTIAL START_DATABASES; return "$EXIT_PARTIAL"; }
-  run_datapatch_all || { opg_result_line "$EXIT_PARTIAL" PARTIAL DATAPATCH; return "$EXIT_PARTIAL"; }
-  run_utlrp_all || { opg_result_line "$EXIT_PARTIAL" PARTIAL UTLRP; return "$EXIT_PARTIAL"; }
-  validate_all || { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED VALIDATION; return "$EXIT_MANUAL"; }
+  stop_databases || {
+    [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]] && { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE; return "$EXIT_MANUAL"; }
+    opg_result_line "$EXIT_PARTIAL" PARTIAL STOP_DATABASES; return "$EXIT_PARTIAL"
+  }
+  apply_binary_patches || {
+    [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]] && { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE; return "$EXIT_MANUAL"; }
+    opg_result_line "$EXIT_PARTIAL" "$CURRENT_STATE" "$CURRENT_PHASE"; return "$EXIT_PARTIAL"
+  }
+  start_original_databases || {
+    [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]] && { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE; return "$EXIT_MANUAL"; }
+    opg_result_line "$EXIT_PARTIAL" PARTIAL START_DATABASES; return "$EXIT_PARTIAL"
+  }
+  run_datapatch_all || {
+    [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]] && { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE; return "$EXIT_MANUAL"; }
+    opg_result_line "$EXIT_PARTIAL" PARTIAL DATAPATCH; return "$EXIT_PARTIAL"
+  }
+  run_utlrp_all || {
+    [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]] && { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE; return "$EXIT_MANUAL"; }
+    opg_result_line "$EXIT_PARTIAL" PARTIAL UTLRP; return "$EXIT_PARTIAL"
+  }
+  validate_all || {
+    opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED "${OPG_STATE_WRITE_FAILURE_PHASE:-VALIDATION}"
+    return "$EXIT_MANUAL"
+  }
   opg_release_lock
   trap - EXIT
   opg_result_line "$EXIT_OK" COMPLETE VALIDATION
@@ -2583,7 +2608,10 @@ perform_resume() {
         opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED OJVM_BINARY
         return "$EXIT_MANUAL"
       fi
-      opg_write_state 07_OJVM_BINARY_APPLIED OJVM_BINARY
+      opg_write_state 07_OJVM_BINARY_APPLIED OJVM_BINARY || {
+        opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE
+        return "$EXIT_MANUAL"
+      }
       if ! start_original_databases || ! run_datapatch_all || ! run_utlrp_all || ! validate_all; then
         opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED "${CURRENT_PHASE:-RESUME}"
         return "$EXIT_MANUAL"
@@ -2610,7 +2638,10 @@ perform_resume() {
         opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED "${CURRENT_PHASE:-START_LISTENER}"
         return "$EXIT_MANUAL"
       fi
-      opg_write_state 08_DATABASES_STARTED START_DATABASES
+      opg_write_state 08_DATABASES_STARTED START_DATABASES || {
+        opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE
+        return "$EXIT_MANUAL"
+      }
       if ! run_datapatch_all || ! run_utlrp_all || ! validate_all; then
         opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED "${CURRENT_PHASE:-RESUME}"
         return "$EXIT_MANUAL"
