@@ -342,12 +342,22 @@ python3 project/tests/run_pdb_validation_order_tests.py
 python3 project/tests/run_database_baseline_tests.py
 python3 project/tests/run_state_write_tests.py
 python3 project/tests/run_sqlpatch_action_tests.py
+bash project/tests/run_media_lock_fd_tests.sh
 ```
 
 - alle regressies van de exacte release zijn groen;
 - de representatieve happy path werkt;
 - approval-, window-, space- en mediafouten blokkeren vóór mutatie;
 - terminale state, completion-publicatie en cleanup-evidence zijn coherent.
+
+De live acceptatie van 2026-09-07 bewees daarnaast een `COMPLETE`
+APR2026-commandlinerun en een `COMPLETE` JUL2026-OEM-run. De JUL2026-run
+publiceerde completion-evidence en ruimde de lokale stage na de
+media-lockdescriptorfix op met `PURGED`. Dezelfde acceptatie bewees automatische
+rotatie van een terminale APR2026-context naar JUL2026 en aansluitend
+idempotent `REUSED`-gedrag. Bootstrap eindigde op de fresh host met `READY`
+nadat de ontbrekende `/var/log/oracle-patch-guard` door bootstrap zelf was
+aangemaakt en gevalideerd.
 
 ### OPERATIONALLY READY
 

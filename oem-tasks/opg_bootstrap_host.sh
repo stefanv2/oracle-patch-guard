@@ -16,7 +16,9 @@ if [[ ${OPG_BOOTSTRAP_TEST_MODE:-0} == 1 ]]; then
     SUDOERS_DST="$TEST_ROOT/etc/sudoers.d/oracle-patch-guard-context"
     CONFIG_DST="$TEST_ROOT/etc/oracle-patch-guard/patchGD_guard.conf"
     CONTEXT_ROOT="$TEST_ROOT/var/lib/oracle-patch-guard"
+    LOG_ROOT="$TEST_ROOT/var/log/oracle-patch-guard"
     VISUDO_BIN=${OPG_BOOTSTRAP_TEST_VISUDO:-$TEST_ROOT/usr/sbin/visudo}
+    RUN_USER=root
     PRIVILEGED_GROUP=root
     STAGE_GROUP=root
     CONFIG_GROUP=root
@@ -30,7 +32,9 @@ else
     SUDOERS_DST=/etc/sudoers.d/oracle-patch-guard-context
     CONFIG_DST=/etc/oracle-patch-guard/patchGD_guard.conf
     CONTEXT_ROOT=/var/lib/oracle-patch-guard
+    LOG_ROOT=/var/log/oracle-patch-guard
     VISUDO_BIN=/usr/sbin/visudo
+    RUN_USER=oracle
     PRIVILEGED_GROUP=root
     STAGE_GROUP=oinstall
     CONFIG_GROUP=oinstall
@@ -135,6 +139,25 @@ config_source_mode=$(stat -c '%a' "$SRC_CONFIG") \
 (( (8#$config_source_mode & 0022) == 0 )) \
     || fail "centrale config is group/world-writable: $SRC_CONFIG"
 validate_config_candidate "$SRC_CONFIG"
+
+# ---------------------------------------------------------------------------
+# Authoritative run-log root
+# ---------------------------------------------------------------------------
+
+if [[ -e "$LOG_ROOT" || -L "$LOG_ROOT" ]]; then
+    [[ -d "$LOG_ROOT" && ! -L "$LOG_ROOT" ]] \
+        || fail "bestaande LOG_ROOT is geen veilige directory: $LOG_ROOT"
+else
+    install -d -o "$RUN_USER" -g "$STAGE_GROUP" -m 0750 "$LOG_ROOT" \
+        || fail "LOG_ROOT kon niet veilig worden gemaakt: $LOG_ROOT"
+    log "CREATED|$LOG_ROOT"
+fi
+
+log_root_identity=$(stat -c '%U:%G:%a' "$LOG_ROOT") \
+    || fail "stat mislukt voor LOG_ROOT: $LOG_ROOT"
+[[ "$log_root_identity" == "${RUN_USER}:${STAGE_GROUP}:750" ]] \
+    || fail "onjuiste owner/mode voor LOG_ROOT: $log_root_identity"
+log "LOG_ROOT_OK|$LOG_ROOT|owner=${RUN_USER}|group=${STAGE_GROUP}|mode=750"
 
 # ---------------------------------------------------------------------------
 # Ensure local privileged directories exist

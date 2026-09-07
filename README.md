@@ -101,6 +101,17 @@ CDB en user-PDB, DB RU 39472050 en OJVM RU 39222882. De volledige live flow is
 succesvol afgerond, inclusief completion-publicatie. Zie
 [`RELEASE_NOTES_20260831.md`](RELEASE_NOTES_20260831.md).
 
+### Live acceptatie 2026-09-07
+
+De gecontroleerde APR2026-commandlinerun en JUL2026-OEM-run eindigden beide
+`COMPLETE`. Tijdens deze acceptatie zijn drie gerichte runtimeproblemen
+gevonden en hersteld: fresh-host bootstrap maakt de ontbrekende logroot veilig
+aan, externe Oracle-processen erven de media-lockdescriptor niet meer en een
+terminale APR2026-context roteert bij `prepare` automatisch naar JUL2026. Na de
+descriptorfix eindigde de automatische lokale media-cleanup aantoonbaar op
+`PURGED`; een tweede JUL2026-prepare hergebruikte dezelfde context als
+`REUSED`.
+
 ## Repository-indeling
 
 - `project/` — Patch Guard-core, controles, OEM-wrappers, fixtures en tests;
@@ -138,6 +149,7 @@ bash tests/run_open_checks_tests.sh
 bash tests/run_pilot05b_tests.sh
 bash tests/run_oem14_approval_tests.sh
 bash tests/run_oem_wrapper_tests.sh
+bash tests/run_media_lock_fd_tests.sh
 bash tests/run_pilot07_tests.sh
 bash tests/run_signer_pending_tests.sh
 bash tests/run_signer_batch_tests.sh
@@ -146,7 +158,8 @@ bash tests/run_completion_publication_tests.sh
 sudo bash tests/run_bootstrap_tests.sh
 ```
 
-De huidige kandidaat heeft 405/405 geslaagde regressietests. De
+De op 2026-09-07 gevalideerde kandidaat heeft 637/637 geslaagde regressietests,
+inclusief de gerichte bootstrap-, contextrotatie- en media-lock-FD-tests. De
 oorspronkelijke evidence van de publieke Pilot07-release blijft beschikbaar in
 `PILOT07_VALIDATION_REPORT.md` en `PUBLIC_RELEASE_AUDIT.md`; de validatie van
 completion-publicatie is gedocumenteerd in

@@ -226,6 +226,30 @@ export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z
 grep -q "OPG_NEW_RUN_RESULT|status=REUSED|run_id=${reused_run}|cycle=JUL2026" "$OUT" || rc=97
 record 'new-run hergebruikt dezelfde target/cycle-context zonder rotatie' 0 "$rc"
 
+# PREPARE gebruikt exact dezelfde vijf veilige contextbeslissingen als new-run.
+setup_case preparecontextcreate; run_wrapper prepare; rc=$?
+grep -q 'OPG_NEW_RUN_RESULT|status=CREATED|' "$OUT" || rc=99
+record 'prepare maakt zonder context een nieuwe context' 0 "$rc"
+
+setup_case preparecontextreuse; run_wrapper prepare; reused_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}'); run_wrapper prepare; rc=$?
+[[ "$reused_run" == "$(json_get "$CONTEXT_ROOT/current_run.json" run_id)" && "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" ]] || rc=99
+grep -q 'OPG_NEW_RUN_RESULT|status=REUSED|' "$OUT" || rc=98
+record 'prepare hergebruikt dezelfde cycle en metadata' 0 "$rc"
+
+setup_case preparesamemismatch; run_wrapper prepare; sed -i 's/39472050/39472051/' "$CONTEXT_ROOT/current_run.json"; context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}'); run_wrapper prepare; rc=$?
+[[ "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" ]] || rc=99
+record 'prepare blokkeert dezelfde cycle met afwijkende metadata' 20 "$rc"
+
+setup_case preparecrossnonterminal; activate_cycle APR2026 39034528 38906621; run_wrapper prepare; old_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$old_run" 02_ASSESS_OK ASSESS; context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}'); activate_cycle JUL2026 39472050 39222882; run_wrapper prepare; rc=$?
+[[ "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" && ! -e "$CONTEXT_ROOT/archive" ]] || rc=99
+record 'prepare blokkeert cyclerotatie vanuit niet-terminale state' 20 "$rc"
+
+setup_case preparecrossrotate; activate_cycle APR2026 39034528 38906621; run_wrapper prepare; old_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$old_run" 12_COMPLETE COMPLETE; activate_cycle JUL2026 39472050 39222882; export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z; run_wrapper prepare; rc=$?; new_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id)
+archive_file=$(find "$CONTEXT_ROOT/archive" -maxdepth 1 -type f -name "${old_run}.*.json" -print -quit)
+[[ "$new_run" != "$old_run" && -n "$archive_file" ]] || rc=99
+grep -q 'OPG_NEW_RUN_RESULT|status=ROTATED|.*cycle=JUL2026|reason=Automatic OEM run rotation: APR2026 -> JUL2026' "$OUT" || rc=98
+record 'prepare roteert terminale APR2026-context naar JUL2026' 0 "$rc"
+
 setup_case newrunnonterminal; activate_cycle APR2026 39034528 38906621; run_wrapper new-run; blocked_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$blocked_run" 02_ASSESS_OK ASSESS; context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}'); activate_cycle JUL2026 39472050 39222882
 export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z; run_wrapper new-run; rc=$?
 [[ "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" && ! -e "$CONTEXT_ROOT/archive" ]] || rc=99

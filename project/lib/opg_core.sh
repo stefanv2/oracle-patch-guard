@@ -205,10 +205,20 @@ opg_run_capture() {
     opg_mock_command "$label" "$output_file" "$@"
     rc=$?
   elif command -v timeout >/dev/null 2>&1; then
-    timeout --signal=TERM --kill-after=30 "${COMMAND_TIMEOUT_SECONDS}" "$@" >"$output_file" 2>&1
+    (
+      if [[ -n ${MEDIA_LOCK_FD:-} ]]; then
+        exec {MEDIA_LOCK_FD}>&- || exit "$EXIT_UNKNOWN"
+      fi
+      exec timeout --signal=TERM --kill-after=30 "${COMMAND_TIMEOUT_SECONDS}" "$@"
+    ) >"$output_file" 2>&1
     rc=$?
   else
-    "$@" >"$output_file" 2>&1
+    (
+      if [[ -n ${MEDIA_LOCK_FD:-} ]]; then
+        exec {MEDIA_LOCK_FD}>&- || exit "$EXIT_UNKNOWN"
+      fi
+      exec "$@"
+    ) >"$output_file" 2>&1
     rc=$?
   fi
   finished=$(opg_now)

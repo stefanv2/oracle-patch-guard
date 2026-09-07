@@ -381,9 +381,12 @@ require_state() {
 
 load_or_create_context() {
   local allow_create=$1
+  if [[ "$allow_create" == true ]]; then
+    archive_context_for_new_run
+    return 0
+  fi
   discover_all
   if [[ -e "$CONTEXT_FILE" ]]; then validate_context_file
-  elif [[ "$allow_create" == true ]]; then create_context
   else fail "$EXIT_BLOCKED" CONTEXT "Geen actieve run-context; start eerst prepare, create-window of assess."
   fi
 }

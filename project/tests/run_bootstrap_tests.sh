@@ -88,6 +88,13 @@ done
 [[ -d "$BASE/u01/stage/oracle-patch-guard" && $(stat -c '%U:%G:%a' "$BASE/u01/stage/oracle-patch-guard") == root:root:750 ]] || fresh_rc=97
 record 'fresh host krijgt alle lokale helpers en stage-anchors zonder handmatige stap' 0 "$fresh_rc"
 
+log_root="$BASE/var/log/oracle-patch-guard"
+log_root_rc=0
+[[ -d "$log_root" && ! -L "$log_root" && $(stat -c '%U:%G:%a' "$log_root") == root:root:750 ]] || log_root_rc=99
+grep -Fq "OPG_BOOTSTRAP|CREATED|$log_root" "$OUT" || log_root_rc=98
+grep -Fq "OPG_BOOTSTRAP|LOG_ROOT_OK|$log_root|owner=root|group=root|mode=750" "$OUT" || log_root_rc=97
+record 'test-mode bootstrap maakt ontbrekende LOG_ROOT root:root 0750 aan' 0 "$log_root_rc"
+
 lock_rc=0
 [[ -d "$BASE/u01/stage/oracle-patch-guard/.locks" && $(stat -c '%U:%G:%a' "$BASE/u01/stage/oracle-patch-guard/.locks") == root:root:750 ]] || lock_rc=99
 [[ -f "$BASE/u01/stage/oracle-patch-guard/.locks/media-stage.lock" && ! -L "$BASE/u01/stage/oracle-patch-guard/.locks/media-stage.lock" && $(stat -c '%U:%G:%a:%h' "$BASE/u01/stage/oracle-patch-guard/.locks/media-stage.lock") == root:root:640:1 ]] || lock_rc=98
@@ -113,6 +120,14 @@ config_dir_identity=$(stat -c '%U:%G:%a' "${CONFIG_TARGET%/*}" 2>/dev/null || tr
 record 'configdirectory is root:root 0755' root:root:755 "$config_dir_identity"
 grep -q '^    CONFIG_GROUP=oinstall$' "$BOOTSTRAP" && grep -Fq "install -o root -g \"\$CONFIG_GROUP\" -m 0640" "$BOOTSTRAP"
 record 'productiecontract installeert runtimeconfig root:oinstall 0640' 0 $?
+grep -q '^    LOG_ROOT=/var/log/oracle-patch-guard$' "$BOOTSTRAP" && grep -q '^    RUN_USER=oracle$' "$BOOTSTRAP"
+record 'productiecontract beheert LOG_ROOT voor oracle' 0 $?
+mode_rc=0
+printf '[safe]\n\tdirectory = %s\n' "$ROOT" >"$BASE/gitconfig"
+[[ $(GIT_CONFIG_GLOBAL="$BASE/gitconfig" git -C "$ROOT" ls-files -s -- oem-tasks/opg_bootstrap_host.sh | awk '{print $1}') == 100755 ]] || mode_rc=99
+[[ $(GIT_CONFIG_GLOBAL="$BASE/gitconfig" git -C "$ROOT" ls-files -s -- oem-tasks/opg_oem.sh | awk '{print $1}') == 100755 ]] || mode_rc=98
+[[ $(GIT_CONFIG_GLOBAL="$BASE/gitconfig" git -C "$ROOT" ls-files -s -- project/patchGD_guard.sh | awk '{print $1}') == 100755 ]] || mode_rc=97
+record 'release bewaart executable bits van bootstrap OEM-wrapper en patchguard' 0 "$mode_rc"
 
 first_hash=$(sha256sum "$SUDOERS_TARGET" | awk '{print $1}')
 run_bootstrap; rc=$?
@@ -122,6 +137,15 @@ grep -q "OPG_BOOTSTRAP|UNCHANGED|$SUDOERS_TARGET" "$OUT" || rc=98
 record 'tweede identieke bootstrap is idempotent' 0 "$rc"
 grep -q "OPG_BOOTSTRAP|UNCHANGED|$CONFIG_TARGET" "$OUT"
 record 'tweede identieke configinstallatie is UNCHANGED' 0 $?
+grep -Fq "OPG_BOOTSTRAP|LOG_ROOT_OK|$log_root|owner=root|group=root|mode=750" "$OUT"
+record 'tweede bootstrap hergebruikt veilige LOG_ROOT idempotent' 0 $?
+
+chmod 0755 "$log_root"; run_bootstrap; rc=$?; chmod 0750 "$log_root"
+record 'bestaande LOG_ROOT met verkeerde mode faalt gesloten' 30 "$rc"
+chown 65534:root "$log_root"; run_bootstrap; rc=$?; chown root:root "$log_root"
+record 'bestaande LOG_ROOT met verkeerde owner faalt gesloten' 30 "$rc"
+chown root:65534 "$log_root"; run_bootstrap; rc=$?; chown root:root "$log_root"
+record 'bestaande LOG_ROOT met verkeerde group faalt gesloten' 30 "$rc"
 
 printf '\n# gecontroleerde policy-update\n' >>"$SUDOERS_SOURCE"
 changed_hash=$(sha256sum "$SUDOERS_SOURCE" | awk '{print $1}')
