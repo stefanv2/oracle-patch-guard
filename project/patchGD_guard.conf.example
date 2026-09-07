@@ -38,6 +38,10 @@ STOP_NEXT_WAVE_ON_FAILURE=true
 # Optionele, organisatiespecifieke read-only controles. Een niet-geconfigureerde
 # koppeling levert UNKNOWN op; nooit een verzonnen successtatus.
 BACKUP_CHECK_COMMAND=
+# Site-specifieke RMAN-verwachtingen; laat leeg in publieke configuratie.
+EXPECTED_SBT_LIBRARY=
+EXPECTED_BACKUP_HOST=
+EXPECTED_STORAGE_UNIT=
 # Hersteloptie 2: gecontroleerde rebuild van exact dezelfde Oracle Home.
 ORACLE_HOME_RECOVERY_CHECK_COMMAND=/opt/oracle-patch-guard/checks/check_oracle_home_recovery
 RECOVERY_BASE_IMAGE=/secure/oracle-media/LINUX.X64_193000_db_home.zip

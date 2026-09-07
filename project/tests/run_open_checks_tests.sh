@@ -152,5 +152,36 @@ expect_rc 'verkeerde Oracle Home in venster' 2 bash "$ROOT/checks/check_maintena
 sed -i "s|allowed_oracle_home=.*|allowed_oracle_home=$HOME_DIR|; s|start=.*|start=2026-99-99T10:00:00Z|" "$WINDOW"
 expect_rc 'onbetrouwbare venstertijd' 3 bash "$ROOT/checks/check_maintenance_window"
 
+ENV_CAPTURE="$TMP_BASE/capture_backup_expectations"
+cat >"$ENV_CAPTURE" <<'EOF'
+#!/usr/bin/env bash
+printf 'SBT=%s\nHOST=%s\nUNIT=%s\n' "$EXPECTED_SBT_LIBRARY" "$EXPECTED_BACKUP_HOST" "$EXPECTED_STORAGE_UNIT"
+EOF
+chmod 0755 "$ENV_CAPTURE"
+(
+  export -n EXPECTED_SBT_LIBRARY EXPECTED_BACKUP_HOST EXPECTED_STORAGE_UNIT
+  EXPECTED_SBT_LIBRARY=/opt/example/lib/libbackup.so
+  EXPECTED_BACKUP_HOST=backup.example
+  EXPECTED_STORAGE_UNIT=/example-backups
+  OPG_TEST_MODE=0
+  RUN_DIR="$TMP_BASE/config-export"
+  mkdir -p "$RUN_DIR"
+  opg_run_capture() { local label=$1 output=$2; shift 2; "$@" >"$output" 2>&1; }
+  # Alleen de productie-implementatie van deze begrensde aanroep wordt geladen.
+  source <(sed -n '/^run_optional_check() {/,/^}/p' "$ROOT/patchGD_guard.sh")
+  run_optional_check backup "$ENV_CAPTURE" true
+) || export_rc=$?
+export_rc=${export_rc:-0}
+grep -Fxq 'SBT=/opt/example/lib/libbackup.so' "$TMP_BASE/config-export/backup.txt" || export_rc=99
+grep -Fxq 'HOST=backup.example' "$TMP_BASE/config-export/backup.txt" || export_rc=98
+grep -Fxq 'UNIT=/example-backups' "$TMP_BASE/config-export/backup.txt" || export_rc=97
+if [[ $export_rc -eq 0 ]]; then printf 'ok - root-configured RMAN-verwachtingen bereiken externe backupcheck\n'; PASS=$((PASS+1)); else printf 'not ok - RMAN-configexport ontbreekt (actual=%s)\n' "$export_rc"; FAIL=$((FAIL+1)); fi
+
+example_rc=0
+grep -q '^EXPECTED_SBT_LIBRARY=$' "$ROOT/patchGD_guard.conf.example" || example_rc=99
+grep -q '^EXPECTED_BACKUP_HOST=$' "$ROOT/patchGD_guard.conf.example" || example_rc=98
+grep -q '^EXPECTED_STORAGE_UNIT=$' "$ROOT/patchGD_guard.conf.example" || example_rc=97
+if [[ $example_rc -eq 0 ]]; then printf 'ok - publiek configvoorbeeld biedt uitsluitend lege RMAN-sitewaarden\n'; PASS=$((PASS+1)); else printf 'not ok - generieke RMAN-configinterface ontbreekt (actual=%s)\n' "$example_rc"; FAIL=$((FAIL+1)); fi
+
 printf '\nResultaat open checks: %s geslaagd, %s mislukt\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))
