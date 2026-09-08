@@ -833,14 +833,16 @@ precheck_summary_severity() {
 }
 
 precheck_summary_add() {
-  local id=$1 success=$2 evidence=$3 ids=$4 severity
+  local id=$1 success=$2 evidence=$3 ids=$4 failure_message=${5:-Readiness-samenvatting op basis van bestaande controles.} severity message
   severity=$(precheck_summary_severity "$ids")
   if [[ -z "$severity" ]]; then
     [[ "$success" == true ]] || return 0
     severity=READY
+    message='Readiness-samenvatting op basis van bestaande controles.'
+  else
+    message=$failure_message
   fi
-  printf '%s|%s|Readiness-samenvatting op basis van bestaande controles.|%s\n' \
-    "$severity" "$id" "$evidence" >>"${RUN_DIR}/precheck_summary.psv"
+  printf '%s|%s|%s|%s\n' "$severity" "$id" "$message" "$evidence" >>"${RUN_DIR}/precheck_summary.psv"
 }
 
 write_precheck_summary() {
@@ -937,7 +939,8 @@ write_precheck_summary() {
   success=false
   if grep -Eq '^(READY:|OK$|VERIFIED$)' "${RUN_DIR}/maintenance_window.txt" 2>/dev/null; then success=true; fi
   precheck_summary_add MAINTENANCE_WINDOW_READINESS "$success" "${RUN_DIR}/maintenance_window.txt" \
-    'WINDOW_INVALID WINDOW_UNKNOWN'
+    'WINDOW_INVALID WINDOW_UNKNOWN' \
+    'Maintenance window readiness is nog niet voldaan; vereist vóór PLAN/APPLY.'
 }
 
 emit_precheck_result() {
@@ -957,13 +960,23 @@ emit_precheck_result() {
       printf 'FINDING|severity=%s|id=%s\n' "$severity" "$id"
     done <"${RUN_DIR}/precheck_summary.psv"
   } | opg_atomic_write "${RUN_DIR}/precheck_result.psv"
-  while IFS='|' read -r severity id _; do
+  while IFS='|' read -r severity id message _; do
     [[ -n "$severity" && -n "$id" ]] || continue
-    printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s\n' "$RUN_ID" "$severity" "$id"
+    case "$id" in
+      WINDOW_INVALID|MAINTENANCE_WINDOW_READINESS)
+        printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s|message=%s\n' "$RUN_ID" "$severity" "$id" "$message"
+        ;;
+      *) printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s\n' "$RUN_ID" "$severity" "$id" ;;
+    esac
   done <"${RUN_DIR}/findings.psv"
-  while IFS='|' read -r severity id _; do
+  while IFS='|' read -r severity id message _; do
     [[ -n "$severity" && -n "$id" ]] || continue
-    printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s\n' "$RUN_ID" "$severity" "$id"
+    case "$id" in
+      WINDOW_INVALID|MAINTENANCE_WINDOW_READINESS)
+        printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s|message=%s\n' "$RUN_ID" "$severity" "$id" "$message"
+        ;;
+      *) printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s\n' "$RUN_ID" "$severity" "$id" ;;
+    esac
   done <"${RUN_DIR}/precheck_summary.psv"
   printf 'OPG_PRECHECK_RESULT|host=%s|sid=%s|cycle=%s|timestamp=%s|run_id=%s|status=%s|exit_code=%s\n' \
     "$HOST_NAME" "$sid_list" "$MONTH" "$timestamp" "$RUN_ID" "$ASSESSMENT_STATUS" "$ASSESSMENT_EXIT"
@@ -1167,7 +1180,17 @@ perform_assessment() {
   ROLLBACK_PLAN_VERIFIED=$ORACLE_HOME_RECOVERY_VERIFIED
   if check_datapump_evidence assess; then :; else rc=$?; (( rc == 2 )) && opg_add_finding BLOCKED ACTIVE_DATAPUMP "Actieve Data Pump-job gevonden." "${RUN_DIR}/assess_datapump.txt"; (( rc == 3 )) && opg_add_finding UNKNOWN DATAPUMP_UNKNOWN "Data Pump kon niet voor iedere draaiende database betrouwbaar worden gecontroleerd." "${RUN_DIR}/assess_datapump.txt"; fi
   if run_optional_check dataguard "$DATAGUARD_CHECK_COMMAND" true; then :; else rc=$?; (( rc == 2 )) && opg_add_finding BLOCKED DATAGUARD_UNHEALTHY "Data Guard is niet gezond of niet ondersteund." "${RUN_DIR}/dataguard.txt"; (( rc == 3 )) && opg_add_finding UNKNOWN DATAGUARD_UNKNOWN "Data Guard-afwezigheid/status kon niet aantoonbaar worden vastgesteld." "${RUN_DIR}/dataguard.txt"; fi
-  if run_optional_check maintenance_window "$MAINTENANCE_WINDOW_CHECK_COMMAND" false; then :; else rc=$?; (( rc == 2 )) && opg_add_finding BLOCKED WINDOW_INVALID "Onderhoudsvenster is verlopen, ongeldig, niet passend of te kort." "${RUN_DIR}/maintenance_window.txt"; (( rc == 3 )) && opg_add_finding UNKNOWN WINDOW_UNKNOWN "Onderhoudsvenster kon niet betrouwbaar worden gecontroleerd." "${RUN_DIR}/maintenance_window.txt"; fi
+  if run_optional_check maintenance_window "$MAINTENANCE_WINDOW_CHECK_COMMAND" false; then :; else
+    rc=$?
+    if (( rc == 2 )); then
+      if [[ "$assessment_mode" == precheck ]]; then
+        opg_add_finding CONDITIONAL WINDOW_INVALID "Maintenance window ontbreekt of is nog niet geldig; vereist vóór PLAN/APPLY." "${RUN_DIR}/maintenance_window.txt"
+      else
+        opg_add_finding BLOCKED WINDOW_INVALID "Onderhoudsvenster is verlopen, ongeldig, niet passend of te kort." "${RUN_DIR}/maintenance_window.txt"
+      fi
+    fi
+    (( rc == 3 )) && opg_add_finding UNKNOWN WINDOW_UNKNOWN "Onderhoudsvenster kon niet betrouwbaar worden gecontroleerd." "${RUN_DIR}/maintenance_window.txt"
+  fi
   [[ ${MOCK_ACTIVE_DATAPUMP:-false} == true ]] && opg_add_finding BLOCKED ACTIVE_DATAPUMP "Actieve Data Pump-taak gevonden." MOCK
   [[ ${MOCK_SQLPATCH_ERROR:-false} == true ]] && opg_add_finding BLOCKED SQLPATCH_ERROR "Bestaande SQL-patchfout gevonden." MOCK
 

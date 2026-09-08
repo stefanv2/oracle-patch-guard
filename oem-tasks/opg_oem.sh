@@ -6,7 +6,7 @@ set -o pipefail
 umask 077
 IFS=$'\n\t'
 
-readonly EXIT_BLOCKED=20 EXIT_UNKNOWN=30 EXIT_USAGE=70
+readonly EXIT_CONDITIONAL=10 EXIT_BLOCKED=20 EXIT_UNKNOWN=30 EXIT_USAGE=70
 readonly SAFE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH=$SAFE_PATH
 
@@ -498,7 +498,7 @@ clean_oracle_env() {
 }
 
 run_precheck() {
-  local run_stamp precheck_run_id
+  local run_stamp precheck_run_id patch_guard_rc=0 oem_rc status
   discover_all
   run_stamp=${OPG_TEST_PRECHECK_RUN_STAMP:-$(date -u '+%Y%m%dT%H%M%SZ')}
   [[ "$run_stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || fail "$EXIT_UNKNOWN" PRECHECK 'PRECHECK-tijdstempel is ongeldig.'
@@ -507,7 +507,16 @@ run_precheck() {
   [[ ! -e "${RUN_ROOT}/${precheck_run_id}" ]] || fail "$EXIT_BLOCKED" PRECHECK "Afgeleide PRECHECK RUN_ID bestaat al: ${precheck_run_id}"
   require_script "$CORE_SCRIPT" core
   clean_oracle_env /bin/bash "$CORE_SCRIPT" precheck --non-interactive --target-oracle-home "$ORACLE_HOME" \
-    --run-id "$precheck_run_id" --config "$CONFIG_FILE" "$DB_RU_PATCH_ID" "$OJVM_PATCH_ID" "$PATCH_CYCLE" "$OPATCH_VERSION" "$OPATCH_ZIP"
+    --run-id "$precheck_run_id" --config "$CONFIG_FILE" "$DB_RU_PATCH_ID" "$OJVM_PATCH_ID" "$PATCH_CYCLE" "$OPATCH_VERSION" "$OPATCH_ZIP" || patch_guard_rc=$?
+  oem_rc=$patch_guard_rc
+  case "$patch_guard_rc" in
+    0) status=READY ;;
+    "$EXIT_CONDITIONAL") status=CONDITIONAL; oem_rc=0 ;;
+    "$EXIT_BLOCKED") status=BLOCKED ;;
+    *) status=UNKNOWN ;;
+  esac
+  printf 'OPG_OEM_PRECHECK_RESULT|status=%s|patch_guard_exit_code=%s|oem_exit_code=%s\n' "$status" "$patch_guard_rc" "$oem_rc"
+  return "$oem_rc"
 }
 
 valid_new_run_reason() {

@@ -301,6 +301,12 @@ setup_case datapumpunknown; printf '\nMOCK_CHECK_DATAPUMP=UNKNOWN\n' >>"$FIXTURE
 setup_case windowblocked; printf '\nMOCK_CHECK_MAINTENANCE_WINDOW=BLOCKED\n' >>"$FIXTURE_ENV"; assess R32; record 'ongeldig onderhoudsvenster blokkeert' 20 $? "$CASE_DIR/R32.out"
 setup_case windowunknown; printf '\nMOCK_CHECK_MAINTENANCE_WINDOW=UNKNOWN\n' >>"$FIXTURE_ENV"; assess R33; record 'onbetrouwbaar onderhoudsvenster is UNKNOWN' 30 $? "$CASE_DIR/R33.out"
 
+setup_case applywindowblocked; assess R33A >/dev/null; plan R33A >/dev/null; token=$(approval R33A); printf '\nMOCK_CHECK_MAINTENANCE_WINDOW=BLOCKED\n' >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id R33A --approved-manifest "$RUN_ROOT/R33A/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1; apply_window_rc=$?
+grep -Fq 'BLOCKED|WINDOW_CHANGED|' "$RUN_ROOT/R33A/preapply_findings.psv" || apply_window_rc=99
+record 'ongeldig onderhoudsvenster direct voor APPLY blijft BLOCKED' 20 "$apply_window_rc" "$CASE_DIR/apply.out"
+assert_no_downtime_started 'ongeldig onderhoudsvenster start geen patchmutatie' R33A
+
 # 34-35. Regressies: RAC OPTION OFF is geen componentfout en alleen de laatste
 # status per patch_id+action telt in DBA_REGISTRY_SQLPATCH.
 setup_case sqlregression; assess R34 >/dev/null
@@ -561,6 +567,17 @@ for summary_id in PATCH_CONFLICT_READINESS TOPOLOGY_READINESS DATABASE_RUNTIME_R
 done
 record 'succesvolle PRECHECK-controles tonen compacte READY-summary' 0 "$summary_rc"
 
+setup_case precheckwindowinvalid; printf '\nMOCK_CHECK_MAINTENANCE_WINDOW=BLOCKED\n' >>"$FIXTURE_ENV"; precheck PWI; rc=$?
+grep -Fq 'CONDITIONAL|WINDOW_INVALID|Maintenance window ontbreekt of is nog niet geldig; vereist vóór PLAN/APPLY.|' "$RUN_ROOT/PWI/findings.psv" || rc=99
+grep -Fq 'CONDITIONAL|MAINTENANCE_WINDOW_READINESS|Maintenance window readiness is nog niet voldaan; vereist vóór PLAN/APPLY.|' "$RUN_ROOT/PWI/precheck_summary.psv" || rc=98
+grep -Fq 'OPG_PRECHECK_FINDING|run_id=PWI|severity=CONDITIONAL|id=WINDOW_INVALID|message=Maintenance window ontbreekt of is nog niet geldig; vereist vóór PLAN/APPLY.' "$CASE_DIR/PWI.out" || rc=97
+grep -Fq 'OPG_PRECHECK_FINDING|run_id=PWI|severity=CONDITIONAL|id=MAINTENANCE_WINDOW_READINESS|message=Maintenance window readiness is nog niet voldaan; vereist vóór PLAN/APPLY.' "$CASE_DIR/PWI.out" || rc=96
+record_precheck 'PRECHECK verzacht beide maintenance-window findings naar CONDITIONAL' 10 "$rc" "$CASE_DIR/PWI.out"
+
+setup_case precheckstageblocked; printf '\nMIN_STAGE_FREE_MB=999999999\n' >>"$CONFIG"; precheck PSB; rc=$?
+grep -Fq 'BLOCKED|STAGE_SPACE|' "$RUN_ROOT/PSB/findings.psv" || rc=99
+record_precheck 'PRECHECK behoudt echte capacity-blocker' 20 "$rc" "$CASE_DIR/PSB.out"
+
 setup_case precheckblocked; printf '\nMOCK_RC_conflict_db_ru=1\n' >>"$FIXTURE_ENV"; precheck PB1; rc=$?
 grep -Fq 'BLOCKED|DB_RU_CONFLICT|' "$RUN_ROOT/PB1/findings.psv" || rc=99
 record_precheck 'PRECHECK BLOCKED toont blocker machineleesbaar' 20 "$rc" "$CASE_DIR/PB1.out"
@@ -636,6 +653,7 @@ precheck PWINDOW; precheck_window_rc=$?
 [[ $precheck_window_rc -eq 10 ]] || precheck_window_rc=99
 grep -Fq 'READY: change_id=PRECHECK-WINDOW-TEST' "$RUN_ROOT/PWINDOW/maintenance_window.txt" || precheck_window_rc=98
 grep -Fq 'WINDOW_INVALID' "$RUN_ROOT/PWINDOW/findings.psv" && precheck_window_rc=97
+grep -Fq 'READY|MAINTENANCE_WINDOW_READINESS|' "$RUN_ROOT/PWINDOW/precheck_summary.psv" || precheck_window_rc=94
 [[ ! -e "$RUN_ROOT/PWINDOW/execution_state.json" && ! -e "$RUN_ROOT/PWINDOW/patch_manifest.json" && ! -e "$RUN_ROOT/PWINDOW/approval.json" ]] || precheck_window_rc=96
 [[ "$context_before" == "$(sha256sum "$CASE_DIR/current_run.json" | awk '{print $1}')" && "$approval_before" == "$(sha256sum "$CASE_DIR/approval-root/approval.sig" | awk '{print $1}')" ]] || precheck_window_rc=95
 record_precheck 'PRECHECK valideert window-readiness zonder formele RUN_ID-binding' 10 "$precheck_window_rc" "$CASE_DIR/PWINDOW.out"

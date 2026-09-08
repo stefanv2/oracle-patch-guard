@@ -289,6 +289,14 @@ grep -q "^core|precheck --non-interactive --target-oracle-home ${HOME_DIR} --run
 [[ -z "$(find "$OPG_ROOT/approvals" -mindepth 1 -print -quit)" ]] || rc=97
 record 'OEM PRECHECK route maakt geen formele current context' 0 "$rc"
 
+setup_case precheckconditionalexit; printf '10\n' >"$CASE/core.rc"; export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090010Z; run_wrapper precheck; rc=$?
+grep -Fq 'OPG_OEM_PRECHECK_RESULT|status=CONDITIONAL|patch_guard_exit_code=10|oem_exit_code=0' "$OUT" || rc=99
+record 'OEM PRECHECK vertaalt CONDITIONAL naar succesvolle task-exit' 0 "$rc"
+
+setup_case precheckblockedexit; printf '20\n' >"$CASE/core.rc"; export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090020Z; run_wrapper precheck; blocked_rc=$?
+grep -Fq 'OPG_OEM_PRECHECK_RESULT|status=BLOCKED|patch_guard_exit_code=20|oem_exit_code=20' "$OUT" || blocked_rc=99
+record 'OEM PRECHECK behoudt BLOCKED task-exit' 20 "$blocked_rc"
+
 setup_case precheckpreserve; run_wrapper prepare; context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}'); export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090100Z; run_wrapper precheck; rc=$?
 [[ "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" ]] || rc=99
 record 'OEM PRECHECK overschrijft bestaande current run niet' 0 "$rc"
