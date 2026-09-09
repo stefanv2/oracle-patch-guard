@@ -7,30 +7,33 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 usage() {
   cat <<'EOF'
-Gebruik: opg_approve_pending.sh [--all [--dry-run] | --help]
+Gebruik: opg_approve_pending.sh [--all [--dry-run | --yes] | --help]
 
 Zonder opties       Toon uitsluitend runs die READY FOR APPROVAL zijn; wijzig niets.
 --all               Toon selectie en skips, vraag exact één batchbevestiging en
                     roep daarna opg_approve_run.sh afzonderlijk per RUN_ID aan.
 --all --dry-run     Voer dezelfde selectie uit zonder approval-artifacts te schrijven.
+--all --yes         Sla uitsluitend de interactieve batchbevestiging over.
 --help              Toon deze hulp.
 
-Alleen exact "yes" op de batchvraag start de bestaande single-run signerflow.
+Zonder --yes start alleen exact "yes" op de batchvraag de bestaande single-run signerflow.
 EOF
 }
 
 DO_ALL=false
 DRY_RUN=false
+ASSUME_YES=false
 while (( $# > 0 )); do
   case $1 in
     --all) DO_ALL=true ;;
     --dry-run) DRY_RUN=true ;;
+    --yes) ASSUME_YES=true ;;
     --help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
   shift
 done
-if [[ "$DRY_RUN" == true && "$DO_ALL" != true ]]; then
+if [[ ( "$DRY_RUN" == true || "$ASSUME_YES" == true ) && "$DO_ALL" != true ]]; then
   usage >&2
   exit 2
 fi
@@ -66,10 +69,13 @@ validate_program "$APPROVE_RUN" opg_approve_run.sh || exit 70
 
 declare -a READY_LINES=() READY_RUNS=() SKIPPED_LINES=()
 declare -A SEEN_RUNS=()
+snapshot_skipped=0
+snapshot_blocked=0
 
 collect_snapshot() {
   local output line host sid cycle created status run_id reason
   READY_LINES=(); READY_RUNS=(); SKIPPED_LINES=(); SEEN_RUNS=()
+  snapshot_skipped=0; snapshot_blocked=0
   if ! output=$("$LIST_PENDING" --list --machine); then
     printf 'OPG batch UNKNOWN: statusinventarisatie is mislukt.\n' >&2
     return 70
@@ -92,6 +98,11 @@ collect_snapshot() {
         ;;
       APPROVED|COMPLETE|UNKNOWN)
         SKIPPED_LINES+=("$host"$'\t'"$sid"$'\t'"$status"$'\t'"$reason"$'\t'"$run_id")
+        if [[ "$status" == UNKNOWN ]]; then
+          snapshot_blocked=$((snapshot_blocked + 1))
+        else
+          snapshot_skipped=$((snapshot_skipped + 1))
+        fi
         ;;
       *)
         printf 'OPG batch UNKNOWN: onbekende status voor RUN_ID=%s.\n' "$run_id" >&2
@@ -152,6 +163,12 @@ fi
 show_skipped
 if (( ${#READY_RUNS[@]} == 0 )); then
   printf '\nGeen READY-runs gevonden; er is niets ondertekend.\n'
+  if [[ "$ASSUME_YES" == true ]]; then
+    result_status=SUCCESS
+    (( snapshot_blocked == 0 )) || result_status=PARTIAL
+    printf 'OPG_APPROVAL_RESULT|ready=0|approved=0|skipped=%d|blocked=%d|status=%s\n' \
+      "$snapshot_skipped" "$snapshot_blocked" "$result_status"
+  fi
   exit 20
 fi
 if [[ "$DRY_RUN" == true ]]; then
@@ -159,18 +176,21 @@ if [[ "$DRY_RUN" == true ]]; then
   exit 0
 fi
 
-printf '\nApprove all %d READY runs? [yes/no]: ' "${#READY_RUNS[@]}"
-answer=
-IFS= read -r answer || true
-if [[ "$answer" != yes ]]; then
-  printf 'Geannuleerd; er is niets ondertekend.\n'
-  exit 0
+if [[ "$ASSUME_YES" != true ]]; then
+  printf '\nApprove all %d READY runs? [yes/no]: ' "${#READY_RUNS[@]}"
+  answer=
+  IFS= read -r answer || true
+  if [[ "$answer" != yes ]]; then
+    printf 'Geannuleerd; er is niets ondertekend.\n'
+    exit 0
+  fi
 fi
 
 declare -a RESULT_LINES=()
 approved_count=0
 failed_count=0
 runtime_skipped=0
+runtime_blocked=0
 for run_id in "${READY_RUNS[@]}"; do
   CURRENT_STATUS=UNKNOWN
   CURRENT_REASON='statushercontrole mislukt'
@@ -181,7 +201,11 @@ for run_id in "${READY_RUNS[@]}"; do
     exit 70
   fi
   if (( check_rc != 0 )) || [[ "$CURRENT_STATUS" != PENDING ]]; then
-    runtime_skipped=$((runtime_skipped + 1))
+    if [[ "$CURRENT_STATUS" == APPROVED || "$CURRENT_STATUS" == COMPLETE ]]; then
+      runtime_skipped=$((runtime_skipped + 1))
+    else
+      runtime_blocked=$((runtime_blocked + 1))
+    fi
     RESULT_LINES+=("$run_id"$'\t'"SKIPPED"$'\t'"status gewijzigd: $CURRENT_STATUS ($CURRENT_REASON)")
     continue
   fi
@@ -216,7 +240,16 @@ for result in "${RESULT_LINES[@]}"; do
   printf '%s  %-9s  %s\n' "$run_id" "$result_status" "$result_reason"
 done
 
-if (( failed_count > 0 || runtime_skipped > 0 )); then
+if [[ "$ASSUME_YES" == true ]]; then
+  blocked_count=$((snapshot_blocked + runtime_blocked + failed_count))
+  skipped_count=$((snapshot_skipped + runtime_skipped))
+  result_status=SUCCESS
+  (( blocked_count == 0 && runtime_skipped == 0 )) || result_status=PARTIAL
+  printf 'OPG_APPROVAL_RESULT|ready=%d|approved=%d|skipped=%d|blocked=%d|status=%s\n' \
+    "${#READY_RUNS[@]}" "$approved_count" "$skipped_count" "$blocked_count" "$result_status"
+fi
+
+if (( failed_count > 0 || runtime_skipped > 0 || runtime_blocked > 0 )); then
   exit 30
 fi
 exit 0

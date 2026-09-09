@@ -885,8 +885,25 @@ def validate_completion_for_run(run_id):
         die(EXIT_BLOCKED, "completion.json is niet exact aan state/approval/manifest gebonden")
     return {"cycle": cycle, "identity": identity, "stage": local / "ready" / cycle / identity,
             "manifest_sha256": manifest_hash, "approval_sha256": approval_hash,
+            "hostname": hostname, "home": home, "sid": completion.get("sid"),
             "completion_epoch": completed_epoch, "completion_sha256": hashlib.sha256(
                 safe_lifecycle_file(approval_dir / "completion.json", expected_root)).hexdigest()}
+
+
+def validate_historical_context(run_id):
+    if not SAFE_RUN.fullmatch(run_id):
+        die(70, "ongeldige RUN_ID")
+    binding = validate_completion_for_run(run_id)
+    _, _, context_root = lifecycle_roots()
+    expected_owner = os.getuid() if os.environ.get("OPG_MEDIA_TEST_MODE") == "1" else 0
+    context, _ = lifecycle_json(context_root / "current_run.json", expected_owner)
+    if (context.get("schema_version") != "1" or context.get("run_id") != run_id or
+            context.get("patch_cycle") != binding["cycle"] or
+            context.get("fqdn") != binding["hostname"] or
+            context.get("oracle_home") != binding["home"] or
+            context.get("oracle_sid") != binding["sid"]):
+        die(EXIT_BLOCKED, "historische context is niet exact aan completion-evidence gebonden")
+    print(f"COMPLETE|{run_id}|{binding['cycle']}")
 
 
 def write_audit(path, payload, gid, manage_parent=True):
@@ -1091,7 +1108,7 @@ def verify_purged_run(run_id):
 
 def main():
     if len(sys.argv) not in (2, 3):
-        die(70, "gebruik: opg_media_stage_root.sh {stage-active-cycle|verify-active-stage CYCLE|purge-run RUN_ID|verify-purged-run RUN_ID}")
+        die(70, "gebruik: opg_media_stage_root.sh {stage-active-cycle|verify-active-stage CYCLE|validate-completion RUN_ID|purge-run RUN_ID|verify-purged-run RUN_ID}")
     action = sys.argv[1]
     if action == "stage-active-cycle" and len(sys.argv) == 2:
         stage_active_cycle_locked()
@@ -1099,6 +1116,8 @@ def main():
         _, _, local, _, _ = roots()
         with media_lock(local, roots()[4], False):
             verify_published(sys.argv[2], local)
+    elif action == "validate-completion" and len(sys.argv) == 3:
+        validate_historical_context(sys.argv[2])
     elif action == "purge-run" and len(sys.argv) == 3:
         purge_run(sys.argv[2])
     elif action == "verify-purged-run" and len(sys.argv) == 3:

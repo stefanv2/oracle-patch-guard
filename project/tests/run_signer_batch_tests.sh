@@ -206,8 +206,53 @@ run_batch >"$OUT" 2>&1; rc=$?
 [[ $rc -eq 0 && ! -s "$LOG" ]] && grep -Fq "$DEFAULT" "$OUT" && grep -Fq -- '--all --dry-run' "$OUT"
 record 'default toont READY-runs en wijzigt niets' $?
 run_batch --help >"$OUT" 2>&1; rc=$?
-[[ $rc -eq 0 ]] && grep -Fq -- '--all' "$OUT" && grep -Fq -- '--dry-run' "$OUT"
+[[ $rc -eq 0 ]] && grep -Fq -- '--all' "$OUT" && grep -Fq -- '--dry-run' "$OUT" && grep -Fq -- '--yes' "$OUT"
 record '--help documenteert de batchopties' $?
+
+# 15. --yes slaat alleen de batchbevestiging over en gebruikt dezelfde signerflow.
+setup_case noninteractive
+NONINTERACTIVE=DBHOST07-ORCL7-JUL2026-OEM-20260827T132000Z
+make_run "$NONINTERACTIVE" DBHOST07 ORCL7 1787836800
+run_batch --all --yes </dev/null >"$OUT" 2>&1; rc=$?
+[[ $rc -eq 0 && -f "$APPROVALS/$NONINTERACTIVE/approval.sig" &&
+   $(cat "$LOG") == "$NONINTERACTIVE" &&
+   $(grep -c 'Approve all .* READY runs?' "$OUT") -eq 0 &&
+   $(grep -c '^OPG_APPROVAL_RESULT|ready=1|approved=1|skipped=0|blocked=0|status=SUCCESS$' "$OUT") -eq 1 ]]
+record '--all --yes vraagt geen stdin en gebruikt de bestaande signerflow' $?
+
+# 16. Zonder --yes blijft de exacte interactieve bevestiging vereist.
+setup_case interactive
+INTERACTIVE=DBHOST08-ORCL8-JUL2026-OEM-20260827T133000Z
+make_run "$INTERACTIVE" DBHOST08 ORCL8 1787837400
+run_batch --all </dev/null >"$OUT" 2>&1; rc=$?
+[[ $rc -eq 0 && ! -e "$APPROVALS/$INTERACTIVE/approval.json" && ! -s "$LOG" &&
+   $(grep -c 'Approve all 1 READY runs?' "$OUT") -eq 1 ]]
+record '--all zonder --yes blijft interactief en schrijft zonder yes niets' $?
+
+# 17. Een retry zonder READY-runs blijft no-write en rapporteert bestaande approvals.
+setup_case zero
+ZERO=DBHOST09-ORCL9-JUL2026-OEM-20260827T134000Z
+make_run "$ZERO" DBHOST09 ORCL9 1787838000
+sign_direct "$ZERO"
+: >"$LOG"
+run_batch --all --yes </dev/null >"$OUT" 2>&1; rc=$?
+[[ $rc -eq 20 && ! -s "$LOG" &&
+   $(grep -c '^OPG_APPROVAL_RESULT|ready=0|approved=0|skipped=1|blocked=0|status=SUCCESS$' "$OUT") -eq 1 ]]
+record '--all --yes met nul READY-runs blijft veilig en idempotent' $?
+
+# 18. Corrupte evidence blijft niet selecteerbaar en wordt compact als blocked gemeld.
+setup_case noninteractiveblocked
+NONINTERACTIVE_GOOD=DBHOST10-ORCL10-JUL2026-OEM-20260827T135000Z
+NONINTERACTIVE_BAD=DBHOST11-ORCL11-JUL2026-OEM-20260827T134959Z
+make_run "$NONINTERACTIVE_GOOD" DBHOST10 ORCL10 1787838000
+make_run "$NONINTERACTIVE_BAD" DBHOST11 ORCL11 1787837999
+printf '{broken\n' >"$APPROVALS/$NONINTERACTIVE_BAD/assessment.json"
+run_batch --all --yes </dev/null >"$OUT" 2>&1; rc=$?
+[[ $rc -eq 0 && -f "$APPROVALS/$NONINTERACTIVE_GOOD/approval.sig" &&
+   ! -e "$APPROVALS/$NONINTERACTIVE_BAD/approval.json" &&
+   $(cat "$LOG") == "$NONINTERACTIVE_GOOD" &&
+   $(grep -c '^OPG_APPROVAL_RESULT|ready=1|approved=1|skipped=0|blocked=1|status=PARTIAL$' "$OUT") -eq 1 ]]
+record '--all --yes laat corrupte evidence geblokkeerd' $?
 
 printf '\nSigner batch results: %d passed, %d failed\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

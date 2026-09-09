@@ -57,7 +57,7 @@ ORATAB_FILE=$CASE/oratab
 EOF
   printf 'DB1|%s|%s\n' "$HOME_DIR" "$HOME_DIR" >"$CASE/discovery.psv"
   chmod 0600 "$OPG_ROOT/config/active_cycle" "$CENTRAL/JUL2026/opg_cycle.conf" "$CENTRAL/opatch/p6880880_190000_Linux-x86-64.zip" "$CONFIG" "$CASE/discovery.psv"
-  : >"$CASE/routes.log"; : >"$CASE/summary.log"; printf '0\n' >"$CASE/core.rc"
+  : >"$CASE/routes.log"; : >"$CASE/summary.log"; printf '0\n' >"$CASE/core.rc"; printf '0\n' >"$CASE/completion-validation.rc"
   write_mock "$TASK_ROOT/opg_prepare_host.sh" "printf 'prepare|%s\\n' \"\$*\" >>'$CASE/routes.log'; exit 0"
   write_mock "$TASK_ROOT/opg_create_window.sh" "printf 'window|%s|%s|%s\\n' \"\$1\" \"\$2\" \"\$3\" >>'$CASE/routes.log'; exit 0"
   write_mock "$TASK_ROOT/opg_assess_task.sh" "printf 'assess|sid=%s|home=%s|ld=%s|args=%s\\n' \"\$ORACLE_SID\" \"\$ORACLE_HOME\" \"\$LD_LIBRARY_PATH\" \"\$*\" >>'$CASE/routes.log'; exit 10"
@@ -100,6 +100,19 @@ OJVM_PATCH_ID=$ojvm_patch
 OPATCH_VERSION=12.2.0.1.52
 OPATCH_ZIP=p6880880_190000_Linux-x86-64.zip
 EOF
+  if grep -Fqx 'LOCAL_MEDIA_MODE=required' "$CONFIG"; then
+    cat >>"$CENTRAL/$cycle/opg_cycle.conf" <<EOF
+DB_RU_ZIP=p${db_patch}_190000_Linux-x86-64.zip
+DB_RU_ZIP_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+OJVM_ZIP=p${ojvm_patch}_190000_Linux-x86-64.zip
+OJVM_ZIP_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+OPATCH_ZIP_SHA256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+ARTIFACT_MANIFEST=artifact_manifest.json
+ARTIFACT_MANIFEST_SIG=artifact_manifest.sig
+EOF
+    printf zip >"$CENTRAL/$cycle/p${db_patch}_190000_Linux-x86-64.zip"
+    printf zip >"$CENTRAL/$cycle/p${ojvm_patch}_190000_Linux-x86-64.zip"
+  fi
   printf '%s\n' "$cycle" >"$OPG_ROOT/config/active_cycle"
   chmod 0600 "$CENTRAL/$cycle/opg_cycle.conf" "$OPG_ROOT/config/active_cycle"
 }
@@ -134,7 +147,7 @@ ARTIFACT_MANIFEST=artifact_manifest.json
 ARTIFACT_MANIFEST_SIG=artifact_manifest.sig
 EOF
   printf zip >"$CENTRAL/JUL2026/p39472050_190000_Linux-x86-64.zip"; printf zip >"$CENTRAL/JUL2026/p39222882_190000_Linux-x86-64.zip"
-  write_mock "$MEDIA_HELPER" "printf 'media-stage|%s\\n' \"\$*\" >>'$CASE/routes.log'; exit 0"; chmod 0755 "$MEDIA_HELPER"
+  write_mock "$MEDIA_HELPER" "printf 'media-stage|%s\\n' \"\$*\" >>'$CASE/routes.log'; if [[ \"\${1:-}\" == validate-completion ]]; then rc=\$(cat '$CASE/completion-validation.rc'); (( rc != 0 )) || printf 'COMPLETE|%s|APR2026\\n' \"\$2\"; exit \"\$rc\"; fi; exit 0"; chmod 0755 "$MEDIA_HELPER"
   OPG_TEST_MEDIA_STAGE_HELPER_OWNER=$(id -un); OPG_TEST_MEDIA_STAGE_HELPER_GROUP=$(id -gn)
   export OPG_TEST_MEDIA_STAGE_HELPER="$MEDIA_HELPER" OPG_TEST_MEDIA_STAGE_HELPER_OWNER OPG_TEST_MEDIA_STAGE_HELPER_GROUP OPG_TEST_MEDIA_STAGE_HELPER_PARENT_STOP="$LOCAL_SBIN"
 }
@@ -244,6 +257,12 @@ setup_case preparecrossnonterminal; activate_cycle APR2026 39034528 38906621; ru
 [[ "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" && ! -e "$CONTEXT_ROOT/archive" ]] || rc=99
 record 'prepare blokkeert cyclerotatie vanuit niet-terminale state' 20 "$rc"
 
+setup_case preparecrossorphan; activate_cycle APR2026 39034528 38906621; run_wrapper prepare; orphan_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')
+[[ ! -e "$RUN_ROOT/$orphan_run" ]] || exit 99
+activate_cycle JUL2026 39472050 39222882; run_wrapper prepare; orphan_rc=$?
+[[ "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" && ! -e "$CONTEXT_ROOT/archive" ]] || orphan_rc=99
+record 'prepare ruimt een echte cross-cycle orphan-context niet stilzwijgend op' 20 "$orphan_rc"
+
 setup_case preparecrossrotate; activate_cycle APR2026 39034528 38906621; run_wrapper prepare; old_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$old_run" 12_COMPLETE COMPLETE; activate_cycle JUL2026 39472050 39222882; export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z; run_wrapper prepare; rc=$?; new_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id)
 archive_file=$(find "$CONTEXT_ROOT/archive" -maxdepth 1 -type f -name "${old_run}.*.json" -print -quit)
 [[ "$new_run" != "$old_run" && -n "$archive_file" ]] || rc=99
@@ -273,6 +292,10 @@ setup_case writableparent; chmod 0775 "$LOCAL_SBIN"; run_wrapper prepare; record
 setup_case missinghelper; rm "$CONTEXT_HELPER"; run_wrapper prepare; record 'ontbrekende lokale helper wordt geweigerd' 30 $?
 
 setup_case p07media; enable_pilot07_media; run_wrapper prepare >/dev/null; run_wrapper stage-media; rc=$?; grep -q '^media-stage|stage-active-cycle$' "$CASE/routes.log" || rc=99; record 'Pilot07 stage-media gebruikt exact lokale root-helperactie' 0 "$rc"
+setup_case p07contextfree; enable_pilot07_media; run_wrapper stage-media; rc=$?
+grep -q '^media-stage|stage-active-cycle$' "$CASE/routes.log" || rc=99
+[[ ! -e "$CONTEXT_ROOT/current_run.json" ]] || rc=98
+record 'readiness stage-media creëert geen formele lifecycle-context' 0 "$rc"
 setup_case p07writable; enable_pilot07_media; chmod 0775 "$MEDIA_HELPER"; run_wrapper prepare >/dev/null; run_wrapper stage-media; record 'writable media-helper wordt geweigerd' 30 $?
 setup_case p07symlink; enable_pilot07_media; mv "$MEDIA_HELPER" "$LOCAL_SBIN/opg_media_stage_root.real"; ln -s opg_media_stage_root.real "$MEDIA_HELPER"; run_wrapper prepare >/dev/null; run_wrapper stage-media; record 'symlink media-helper wordt geweigerd' 30 $?
 setup_case p07missing; enable_pilot07_media; rm "$MEDIA_HELPER"; run_wrapper prepare >/dev/null; run_wrapper stage-media; record 'ontbrekende media-helper wordt fail-closed geweigerd' 30 $?
@@ -288,6 +311,32 @@ grep -q "^core|precheck --non-interactive --target-oracle-home ${HOME_DIR} --run
 [[ ! -e "$CONTEXT_ROOT/current_run.json" ]] || rc=98
 [[ -z "$(find "$OPG_ROOT/approvals" -mindepth 1 -print -quit)" ]] || rc=97
 record 'OEM PRECHECK route maakt geen formele current context' 0 "$rc"
+
+setup_case prechecknextcycle; enable_pilot07_media; run_wrapper stage-media; stage_rc=$?
+export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090005Z; run_wrapper precheck; precheck_rc=$?
+[[ ! -e "$CONTEXT_ROOT/current_run.json" ]] || precheck_rc=99
+activate_cycle OCT2026 40000001 40000002; run_wrapper prepare; next_cycle_rc=$?
+[[ -f "$CONTEXT_ROOT/current_run.json" && $(json_get "$CONTEXT_ROOT/current_run.json" patch_cycle) == OCT2026 ]] || next_cycle_rc=98
+[[ $stage_rc -eq 0 && $precheck_rc -eq 0 ]] || next_cycle_rc=97
+record 'nieuwe cycle na lifecycle-neutrale PRECHECK wordt niet door PRECHECK-artefacten geblokkeerd' 0 "$next_cycle_rc"
+
+setup_case precheckhistoricalcomplete; activate_cycle APR2026 39034528 38906621; run_wrapper prepare; historical_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$historical_run" 12_COMPLETE COMPLETE
+context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}'); enable_pilot07_media; activate_cycle JUL2026 39472050 39222882
+run_wrapper stage-media; historical_stage_rc=$?; export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090006Z; run_wrapper precheck; historical_precheck_rc=$?
+grep -q 'PRECHECK-20260824T090006Z' "$CASE/routes.log" || historical_precheck_rc=99
+[[ "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" && $(json_get "$CONTEXT_ROOT/current_run.json" patch_cycle) == APR2026 ]] || historical_precheck_rc=98
+[[ $historical_stage_rc -eq 0 ]] || historical_precheck_rc=97
+record 'historische bewezen COMPLETE-context blokkeert nieuwe-cycle PRECHECK niet' 0 "$historical_precheck_rc"
+
+for historical_case in incomplete orphan corrupt; do
+  setup_case "precheckhistorical${historical_case}"; activate_cycle APR2026 39034528 38906621; run_wrapper prepare; historical_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id)
+  [[ "$historical_case" == orphan ]] || write_state "$historical_run" 02_ASSESS_OK ASSESS
+  printf '20\n' >"$CASE/completion-validation.rc"; context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}'); enable_pilot07_media; activate_cycle JUL2026 39472050 39222882
+  run_wrapper stage-media; stage_blocked_rc=$?; export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090007Z; run_wrapper precheck; precheck_blocked_rc=$?
+  [[ "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" ]] || precheck_blocked_rc=99
+  [[ $stage_blocked_rc -eq 20 ]] || precheck_blocked_rc=98
+  record "cross-cycle ${historical_case}-context blokkeert stage-media en PRECHECK" 20 "$precheck_blocked_rc"
+done
 
 setup_case precheckconditionalexit; printf '10\n' >"$CASE/core.rc"; export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090010Z; run_wrapper precheck; rc=$?
 grep -Fq 'OPG_OEM_PRECHECK_RESULT|status=CONDITIONAL|patch_guard_exit_code=10|oem_exit_code=0' "$OUT" || rc=99

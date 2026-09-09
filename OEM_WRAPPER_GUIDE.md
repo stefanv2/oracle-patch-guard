@@ -195,17 +195,18 @@ Rotatie is alleen toegestaan vanuit `12_COMPLETE`, `BLOCKED`, `UNKNOWN` of
 `MANUAL_INTERVENTION_REQUIRED`. De oude context wordt onder `archive/` bewaard
 en de reden wordt aan `context_history.log` toegevoegd. Een PARTIAL/in-progress
 run wordt niet vervangen en `current_run.json` wordt nooit blind verwijderd.
+Tussen `prepare` en de eerste formele core-state kan een geldige context bewust
+kort zonder run-directory bestaan. Daarom ruimt OPG een ontbrekende of corrupte
+run-directory nooit automatisch op; cross-cycle gebruik blijft fail-closed.
 
 ## OEM-tasks
 
-Voor een volledig nieuwe cycle is de praktische startvolgorde:
+Voor een volledig nieuwe cycle is de lifecycle-neutrale readinessvolgorde:
 
 ```bash
 # Eenmalig op een fresh host via de daarvoor ingerichte privileged OEM-taak:
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_bootstrap_host.sh
 
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh new-run
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh prepare
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh stage-media
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh precheck
 ```
@@ -222,16 +223,25 @@ lifecycle worden gestart:
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh precheck
 ```
 
-Richt hiervoor in OEM de taak `OPG_PRECHECK` in. PRECHECK gebruikt dezelfde
+Richt hiervoor in OEM de keten `00_BOOTSTRAP`, `OPG_STAGE_MEDIA`,
+`OPG_PRECHECK` in, zonder `OPG_PREPARE_HOST`. PRECHECK gebruikt dezelfde
 assessmentregels als PLAN, maar maakt geen `current_run.json`, formeel manifest
 of approval-artifacts en kan APPLY niet autoriseren. Een last-minute PRECHECK
 vóór APPLY is toegestaan, maar vervangt de verplichte pre-apply-hercontrole in
 APPLY niet.
 
+Een context van een andere cycle wordt voor `stage-media` en PRECHECK alleen
+toegestaan wanneer de bestaande state, manifesten, approval, signatures en
+completion samen exact `12_COMPLETE/COMPLETE/0` bewijzen. De historische
+`current_run.json` blijft daarbij byte-identiek. Incomplete, ontbrekende of
+corrupte evidence blijft `BLOCKED`.
+
 Na de eerste PRECHECK volgt de formele lifecycle. Gebruik op iedere geselecteerde
 host exact dezelfde commands:
 
 ```bash
+/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh new-run
+/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh prepare
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh create-window
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh assess
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh plan
@@ -289,19 +299,19 @@ Optionele diagnose, niet automatisch onderdeel van APPLY:
 
 OEM mag voor een eerste wave rechtstreeks drie geselecteerde hosts gebruiken; een permanente OEM-group is niet vereist. Iedere host maakt zijn eigen RUN_ID en stagingdirectory. PLAN kan operationeel bijvoorbeeld 3–5 hosts parallel draaien; APPLY begint behoudend met 1–2 hosts parallel. De Home-lock blijft per target bepalen dat nooit twee runs dezelfde Oracle Home muteren.
 
-De signing-server blijft gescheiden. Maak na staging een expliciete lijst en geef die aan een eenvoudige operatorloop; dit wijzigt de signer niet:
+De signing-server blijft gescheiden. Voeg aan de OEM Multi-Task PLAN-job na de
+targetgebonden stagingtaken één OS Command-task toe met de secure/OEM-server als
+enig target. Gebruik exact:
 
 ```bash
-for run_id in \
-  svhost1-DB1-JUL2026-OEM-20260824T103000Z \
-  svhost2-DB2-JUL2026-OEM-20260824T103005Z \
-  svhost3-DB3-JUL2026-OEM-20260824T103010Z
-do
-  /secure/oracle-patch-guard/bin/opg_approve_run.sh "$run_id" || exit $?
-done
+/secure/oracle-patch-guard/bin/opg_approve_pending.sh --all --yes
 ```
 
-Dit is batching van afzonderlijke manifestgebonden approvals, geen automatische wave-approval.
+Deze laatste task draait alleen door de bewuste PLAN-submit. `--yes` omzeilt
+uitsluitend de interactieve bevestiging; de bestaande selectie, per-run
+hercontrole, single-run signer en cryptografische post-verificatie blijven
+actief. De task verwerkt geldige READY-runs onafhankelijk en toont de compacte
+`OPG_APPROVAL_RESULT`-eindregel naast de bestaande menselijk leesbare output.
 
 ## Migratie en rollback
 

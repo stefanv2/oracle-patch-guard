@@ -379,6 +379,27 @@ require_state() {
   [[ "$actual" == "$expected" ]] || fail "$EXIT_BLOCKED" CONTEXT "Fase ${COMMAND} vereist state ${expected}; gevonden ${actual}."
 }
 
+validate_lifecycle_neutral_context() {
+  local rc=0 result
+  LIFECYCLE_CONTEXT_SCOPE=NONE
+  [[ -e "$CONTEXT_FILE" || -L "$CONTEXT_FILE" ]] || return 0
+  read_context_file
+  if [[ "$CTX_CYCLE" == "$PATCH_CYCLE" ]]; then
+    validate_context_file
+    LIFECYCLE_CONTEXT_SCOPE=SAME_CYCLE
+    return 0
+  fi
+  [[ "$CTX_SHORT_HOST" == "$SHORT_HOST" && "$CTX_FQDN" == "$FQDN" &&
+     "$CTX_SID" == "$ORACLE_SID" && "$CTX_HOME" == "$ORACLE_HOME" ]] ||
+    fail "$EXIT_BLOCKED" CONTEXT 'Historische context hoort niet bij het actueel ontdekte target.'
+  require_media_stage_helper
+  result=$("$SUDO_BIN" -n "$MEDIA_STAGE_HELPER" validate-completion "$RUN_ID") || rc=$?
+  (( rc == 0 )) || fail "$EXIT_BLOCKED" CONTEXT 'Andere-cycle context is niet aantoonbaar COMPLETE/SUCCESS.'
+  [[ "$result" == "COMPLETE|${RUN_ID}|${CTX_CYCLE}" ]] ||
+    fail "$EXIT_BLOCKED" CONTEXT 'Completion-validator gaf geen eenduidig historisch resultaat.'
+  LIFECYCLE_CONTEXT_SCOPE=HISTORICAL_COMPLETE
+}
+
 load_or_create_context() {
   local allow_create=$1
   if [[ "$allow_create" == true ]]; then
@@ -500,6 +521,7 @@ clean_oracle_env() {
 run_precheck() {
   local run_stamp precheck_run_id patch_guard_rc=0 oem_rc status
   discover_all
+  validate_lifecycle_neutral_context
   run_stamp=${OPG_TEST_PRECHECK_RUN_STAMP:-$(date -u '+%Y%m%dT%H%M%SZ')}
   [[ "$run_stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || fail "$EXIT_UNKNOWN" PRECHECK 'PRECHECK-tijdstempel is ongeldig.'
   precheck_run_id=${SHORT_HOST}-${ORACLE_SID}-${PATCH_CYCLE}-PRECHECK-${run_stamp}
@@ -575,13 +597,21 @@ case "$COMMAND" in
     ;;
   stage-media)
     rc=0
-    load_or_create_context false; require_state NONE; require_media_stage_helper
+    discover_all
+    validate_lifecycle_neutral_context
+    if [[ "$LIFECYCLE_CONTEXT_SCOPE" == SAME_CYCLE ]]; then
+      require_state NONE
+      stage_subject="run_id=${RUN_ID}"
+    else
+      stage_subject="cycle=${PATCH_CYCLE}"
+    fi
+    require_media_stage_helper
     "$SUDO_BIN" -n "$MEDIA_STAGE_HELPER" stage-active-cycle || rc=$?
     if (( rc != 0 )); then
       if (( rc == EXIT_UNKNOWN )); then fail "$EXIT_UNKNOWN" MEDIA 'Lokale immutable media-stage kon niet betrouwbaar worden uitgevoerd.'; fi
       fail "$EXIT_BLOCKED" MEDIA 'Lokale immutable media-stage kon niet veilig worden gepubliceerd/gevalideerd.'
     fi
-    printf 'OPG_OEM_RESULT|status=READY|phase=STAGE_MEDIA|exit_code=0|run_id=%s\n' "$RUN_ID"
+    printf 'OPG_OEM_RESULT|status=READY|phase=STAGE_MEDIA|exit_code=0|%s\n' "$stage_subject"
     ;;
   create-window)
     load_or_create_context true; require_state NONE; require_script "$WINDOW_SCRIPT" create-window

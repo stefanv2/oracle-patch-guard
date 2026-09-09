@@ -118,6 +118,20 @@ wijzigt niets. `--all --dry-run` gebruikt exact dezelfde selectie zonder de
 single-run signer aan te roepen. `--all` toont eerst READY en SKIPPED, vraagt
 één bevestiging en accepteert uitsluitend exact `yes`.
 
+Voor de OEM-flow kan dezelfde uitvoering non-interactive als laatste PLAN-task
+op de secure/OEM-server draaien:
+
+```bash
+/secure/oracle-patch-guard/bin/opg_approve_pending.sh --all --yes
+```
+
+Configureer deze aparte OS Command-task na de targetgebonden stagingtaken en
+laat hem uitsluitend op de centrale secure/OEM-server uitvoeren. `--yes` slaat
+alleen de interactieve bevestiging over. Selectie, statushercontrole, de
+bestaande single-run signer en post-signing verificatie blijven gelijk. De
+eindregel `OPG_APPROVAL_RESULT|...` maakt approved, skipped en blocked compact
+zichtbaar in OEM.
+
 Voor iedere geselecteerde RUN_ID wordt de PENDING-status direct voor signing
 opnieuw via `opg_list_pending.sh` vastgesteld. Daarna wordt uitsluitend
 `opg_approve_run.sh RUN_ID` aangeroepen. Een succesvolle single-run returncode

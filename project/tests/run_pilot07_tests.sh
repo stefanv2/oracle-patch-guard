@@ -86,6 +86,7 @@ PY
 stage() { "$HELPER" stage-active-cycle >"$CASE/stage.out" 2>"$CASE/stage.err"; }
 verify() { "$HELPER" verify-active-stage JUL2026 >"$CASE/verify.out" 2>"$CASE/verify.err"; }
 purge() { "$HELPER" purge-run "$1" >"$CASE/purge.out" 2>"$CASE/purge.err"; }
+validate_completion() { "$HELPER" validate-completion "$1" >"$CASE/completion.out" 2>"$CASE/completion.err"; }
 
 make_completed_run() {
   local run_id=$1 state=${2:-12_COMPLETE} publish=${3:-yes} identity
@@ -110,6 +111,14 @@ PY
   openssl dgst -sha256 -sign "$CASE/private.pem" -out "$CASE/approvals/$run_id/approval.sig" "$CASE/approvals/$run_id/approval.json"
   chmod 0440 "$CASE/approvals/$run_id"/*
   chmod 0600 "$CASE/runs/$run_id"/*
+}
+
+write_current_context() {
+  local run_id=$1
+  cat >"$CASE/context/current_run.json" <<EOF
+{"schema_version":"1","run_id":"${run_id}","fqdn":"db.example.test","oracle_home":"/u01/app/oracle/product/19c/dbhome_1","oracle_sid":"TESTDB","patch_cycle":"JUL2026"}
+EOF
+  chmod 0640 "$CASE/context/current_run.json"
 }
 v2_hash() { python3 - "$HELPER" "$1" <<'PY'
 import importlib.machinery,sys
@@ -320,6 +329,9 @@ p=sys.argv[1]; d=json.load(open(p)); d['unexpected']='x'; open(p,'w').write(json
 PY
 chmod u+w "$CASE/central/JUL2026/artifact_manifest.sig"
 openssl dgst -sha256 -sign "$CASE/private.pem" -out "$CASE/central/JUL2026/artifact_manifest.sig" "$CASE/central/JUL2026/artifact_manifest.json"; stage; record 'onbekend signed-manifestveld wordt geblokkeerd' 20 $?
+
+setup_case validatecomplete; stage >/dev/null; make_completed_run RUN-VALIDATE; write_current_context RUN-VALIDATE; validate_completion RUN-VALIDATE; rc=$?; grep -Fxq 'COMPLETE|RUN-VALIDATE|JUL2026' "$CASE/completion.out" || rc=99; record 'read-only completion-validator accepteert exact gebonden COMPLETE-context' 0 "$rc"
+chmod u+w "$CASE/approvals/RUN-VALIDATE/completion.json"; sed -i 's/"12_COMPLETE"/"PARTIAL"/' "$CASE/approvals/RUN-VALIDATE/completion.json"; chmod 0440 "$CASE/approvals/RUN-VALIDATE/completion.json"; validate_completion RUN-VALIDATE; record 'read-only completion-validator weigert corrupte completionbinding' 20 $?
 
 setup_case purgeok; stage >/dev/null; make_completed_run RUN-COMPLETE; identity=$(manifest_hash); mkdir -p "$CASE/oracle-home/.patch_storage"; printf keep >"$CASE/oracle-home/.patch_storage/evidence"; purge RUN-COMPLETE; rc=$?; "$HELPER" verify-purged-run RUN-COMPLETE >/dev/null 2>&1; verify_rc=$?; [[ $rc -eq 0 && $verify_rc -eq 0 && ! -e "$(local_root)/ready/JUL2026/$identity" && ! -e "$(local_root)/ready/JUL2026/active_stage" && -f "$CASE/context/stage-cleanup/RUN-COMPLETE.json" && -f "$CASE/runs/RUN-COMPLETE/stage_cleanup.json" && -f "$CASE/oracle-home/.patch_storage/evidence" && -f "$CASE/approvals/RUN-COMPLETE/completion.json" && -f "$CASE/central/JUL2026/artifact_manifest.json" ]]; record 'COMPLETE plus publication purget alleen lokale stage en bewaart audit/evidence' 0 $?
 setup_case nopublish; stage >/dev/null; make_completed_run RUN-NOPUBLISH 12_COMPLETE no; purge RUN-NOPUBLISH; rc=$?; [[ $rc -eq 20 && -d "$(local_root)/ready/JUL2026/$(manifest_hash)" ]]; record 'COMPLETE zonder completion-publication blijft behouden' 0 $?

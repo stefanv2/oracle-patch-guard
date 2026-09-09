@@ -20,23 +20,24 @@ van voorbereiding tot gecontroleerde uitvoering en bewijsvoering verwerkt.
 
 ![Oracle Patch Guard ketenoverzicht](docs/images/oracle_patch_guard_ketenoverzicht.png)
 
-Het diagram toont de functionele controles. Voor een volledig nieuwe cycle zijn
-eerst een formele targetcontext en gevalideerde lokale media nodig:
+Het diagram toont de functionele controles. De lifecycle-neutrale readinessflow
+staged eerst de gevalideerde lokale media:
 
 ```text
-new-run → prepare → stage-media → precheck
+bootstrap (eenmalig) → stage-media → precheck
 ```
 
-Daarna volgt de formele lifecycle:
+Daarna start pas de formele lifecycle:
 
 ```text
-create-window → assess → plan → stage → approve → approval-check → apply
+new-run → prepare → create-window → assess → plan → stage → approve → approval-check → apply
 ```
 
 PRECHECK is functioneel een vroege veiligheidscontrole, maar bij
 `LOCAL_MEDIA_MODE=required` moet de lokale media-stage eerst bestaan. Een
 PRECHECK vóór staging mag fail-closed blokkeren met `MEDIA_STAGE_UNAVAILABLE`.
-`new-run` is de idempotente eerste formele OEM-stap: hij maakt de initiële
+`stage-media` en PRECHECK maken of wijzigen geen formele runcontext. `new-run`
+is de idempotente eerste formele OEM-stap: hij maakt de initiële
 context, hergebruikt een exact gelijke context of roteert uitsluitend een
 conflicterende terminale context met een auditreden.
 PRECHECK kan later opnieuw worden uitgevoerd als last-minute readiness-check

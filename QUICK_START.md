@@ -13,16 +13,16 @@ change-, backup-, recovery- en securityprocedures.
 ## 1. Wat is OPG?
 
 Oracle Patch Guard (OPG) beheert een nieuwe patchcycle in twee opeenvolgende
-delen. Eerst worden targetcontext en lokale media voorbereid:
+delen. Eerst worden de lokale media lifecycle-neutraal voorbereid en getoetst:
 
 ```text
-new-run → prepare → stage-media → precheck
+bootstrap (eenmalig) → stage-media → precheck
 ```
 
-Daarna volgt de formele lifecycle:
+Daarna volgt de formele lifecycle en wordt pas de targetcontext aangemaakt:
 
 ```text
-create-window → assess → plan → stage → approve → approval-check → apply
+new-run → prepare → create-window → assess → plan → stage → approve → approval-check → apply
 ```
 
 PRECHECK is een herhaalbare, read-only readinesscontrole. Bij
@@ -97,16 +97,13 @@ operationele pointer op `APR2026`:
 Gebruik niet `current/config/active_cycle`. Start vervolgens op het target:
 
 ```text
-new-run → prepare → stage-media → precheck
+stage-media → precheck
 ```
 
-`new-run` maakt de initiële formele context, hergebruikt een exact passende
-context of roteert een terminale context van de vorige cycle. Zonder
-`OPG_NEW_RUN_REASON` wordt daarvoor automatisch een auditreden gemaakt.
-`prepare` voert daarna de hostvoorbereiding uit en gebruikt dezelfde context.
 `stage-media` verifieert signature,
 ZIP SHA256, OPatch-versie en lokale V2 tree hashes en publiceert de immutable
 stage onder `/u01/stage/oracle-patch-guard/ready/<cycle>/<identity>/`.
+Geen van beide readinessstappen maakt of wijzigt `current_run.json`.
 
 Zie [PATCH_CYCLE_GUIDE.md](PATCH_CYCLE_GUIDE.md) voor de volledige
 stap-voor-stapprocedure, het signercommando, de technische bindings en de
@@ -118,7 +115,7 @@ Start PLAN via de ondersteunde OEM/OPG-flow. Conceptueel doorloopt een nieuwe
 run de volgende voorbereidende fasen:
 
 ```text
-create-window → assess → plan → stage
+new-run → prepare → create-window → assess → plan → stage
 ```
 
 Een succesvolle voorbereiding eindigt in `WAITING_FOR_APPROVAL`. Leg minimaal

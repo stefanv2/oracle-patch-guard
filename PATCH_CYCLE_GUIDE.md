@@ -42,10 +42,10 @@ database, maakt geen formeel patchmanifest en kan APPLY niet autoriseren. In de
 huidige stable is `LOCAL_MEDIA_MODE=required`. PRECHECK moet daarom ook kunnen
 bewijzen dat de geselecteerde lokale patchmedia bestaan en geldig zijn.
 
-Voor een volledig nieuwe cycle is de praktische voorbereidingsflow dus:
+Voor een volledig nieuwe cycle is de lifecycle-neutrale readinessflow dus:
 
 ```text
-new-run → prepare → stage-media → precheck
+bootstrap (eenmalig) → stage-media → precheck
 ```
 
 Een PRECHECK vóór `stage-media` mag en hoort fail-closed te blokkeren met
@@ -182,18 +182,18 @@ APR2026
 Behoud de beveiligde owner/mode van de operationele configuratie. De pointer,
 de cycledirectory en `PATCH_CYCLE=APR2026` moeten exact overeenkomen.
 
-### 2.6 Target voorbereiden en media stagen
+### 2.6 Media stagen en readiness controleren
 
 Voer voor een volledig nieuwe cycle uit:
 
 ```bash
-opg_oem.sh new-run
-opg_oem.sh prepare
 opg_oem.sh stage-media
 opg_oem.sh precheck
 ```
 
-`new-run` ontdekt de actieve SID en exacte Oracle Home. Als nog geen context
+Deze stappen maken of wijzigen geen `current_run.json`. Na een bruikbare
+PRECHECK start de formele lifecycle met `new-run` en `prepare`. `new-run`
+ontdekt de actieve SID en exacte Oracle Home. Als nog geen context
 bestaat, maakt deze stap de formele RUN_ID/context in
 `/var/lib/oracle-patch-guard/current_run.json`. Een exact passende context
 wordt ongewijzigd hergebruikt. Alleen een terminale context van een andere
@@ -231,12 +231,14 @@ een conflicterende, gemuteerde of incomplete stage wordt geweigerd.
 Na een bruikbare PRECHECK volgt de formele lifecycle:
 
 ```text
-create-window → assess → plan → stage → approve → approval-check → apply
+new-run → prepare → create-window → assess → plan → stage → approve → approval-check → apply
 ```
 
 Via de OEM-wrapper:
 
 ```bash
+opg_oem.sh new-run
+opg_oem.sh prepare
 opg_oem.sh create-window
 opg_oem.sh assess
 opg_oem.sh plan

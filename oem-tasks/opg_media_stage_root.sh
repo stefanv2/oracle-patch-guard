@@ -30,7 +30,7 @@ done
 
 case "${1:-}:$#" in
   stage-active-cycle:1) ;;
-  verify-active-stage:2|purge-run:2|verify-purged-run:2) ;;
+  verify-active-stage:2|validate-completion:2|purge-run:2|verify-purged-run:2) ;;
   *) fail 'onbekende of onveilig begrensde media-actie' ;;
 esac
 
