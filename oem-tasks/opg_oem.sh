@@ -380,24 +380,33 @@ require_state() {
 }
 
 validate_lifecycle_neutral_context() {
-  local rc=0 result
+  local rc=0 result state same_cycle=false
   LIFECYCLE_CONTEXT_SCOPE=NONE
   [[ -e "$CONTEXT_FILE" || -L "$CONTEXT_FILE" ]] || return 0
   read_context_file
   if [[ "$CTX_CYCLE" == "$PATCH_CYCLE" ]]; then
     validate_context_file
-    LIFECYCLE_CONTEXT_SCOPE=SAME_CYCLE
-    return 0
+    state=$(run_state) || fail "$EXIT_UNKNOWN" CONTEXT 'Run-state kon niet betrouwbaar worden gelezen.'
+    if [[ "$state" != 12_COMPLETE ]]; then
+      LIFECYCLE_CONTEXT_SCOPE=SAME_CYCLE
+      return 0
+    fi
+    same_cycle=true
+  else
+    [[ "$CTX_SHORT_HOST" == "$SHORT_HOST" && "$CTX_FQDN" == "$FQDN" &&
+       "$CTX_SID" == "$ORACLE_SID" && "$CTX_HOME" == "$ORACLE_HOME" ]] ||
+      fail "$EXIT_BLOCKED" CONTEXT 'Historische context hoort niet bij het actueel ontdekte target.'
   fi
-  [[ "$CTX_SHORT_HOST" == "$SHORT_HOST" && "$CTX_FQDN" == "$FQDN" &&
-     "$CTX_SID" == "$ORACLE_SID" && "$CTX_HOME" == "$ORACLE_HOME" ]] ||
-    fail "$EXIT_BLOCKED" CONTEXT 'Historische context hoort niet bij het actueel ontdekte target.'
   require_media_stage_helper
   result=$("$SUDO_BIN" -n "$MEDIA_STAGE_HELPER" validate-completion "$RUN_ID") || rc=$?
-  (( rc == 0 )) || fail "$EXIT_BLOCKED" CONTEXT 'Andere-cycle context is niet aantoonbaar COMPLETE/SUCCESS.'
+  (( rc == 0 )) || fail "$EXIT_BLOCKED" CONTEXT 'Context is niet aantoonbaar COMPLETE/SUCCESS.'
   [[ "$result" == "COMPLETE|${RUN_ID}|${CTX_CYCLE}" ]] ||
     fail "$EXIT_BLOCKED" CONTEXT 'Completion-validator gaf geen eenduidig historisch resultaat.'
-  LIFECYCLE_CONTEXT_SCOPE=HISTORICAL_COMPLETE
+  if [[ "$same_cycle" == true ]]; then
+    LIFECYCLE_CONTEXT_SCOPE=SAME_CYCLE_COMPLETE
+  else
+    LIFECYCLE_CONTEXT_SCOPE=HISTORICAL_COMPLETE
+  fi
 }
 
 load_or_create_context() {
@@ -599,12 +608,11 @@ case "$COMMAND" in
     rc=0
     discover_all
     validate_lifecycle_neutral_context
-    if [[ "$LIFECYCLE_CONTEXT_SCOPE" == SAME_CYCLE ]]; then
-      require_state NONE
-      stage_subject="run_id=${RUN_ID}"
-    else
-      stage_subject="cycle=${PATCH_CYCLE}"
-    fi
+    case "$LIFECYCLE_CONTEXT_SCOPE" in
+      SAME_CYCLE) require_state NONE; stage_subject="run_id=${RUN_ID}" ;;
+      SAME_CYCLE_COMPLETE) stage_subject="run_id=${RUN_ID}" ;;
+      *) stage_subject="cycle=${PATCH_CYCLE}" ;;
+    esac
     require_media_stage_helper
     "$SUDO_BIN" -n "$MEDIA_STAGE_HELPER" stage-active-cycle || rc=$?
     if (( rc != 0 )); then
