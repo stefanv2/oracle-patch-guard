@@ -307,7 +307,21 @@ opg_mock_command() {
         done < <(printf '%s\n' "$listener_services" | tr ';' '\n')
       done < <(opg_manifest_sids) ;;
     opatch_lsinventory_before)
-      printf 'Oracle Database 19c\nNo target patches installed.\n' >>"$output_file" ;;
+      if [[ ${MOCK_INVENTORY_BEFORE:-NONE} == BOTH ]]; then
+        printf 'Oracle Database 19c\nPatch %s : applied\nPatch %s : applied\n' "${DB_PATCH:-0}" "${OJVM_PATCH:-0}" >>"$output_file"
+      elif [[ ${MOCK_INVENTORY_BEFORE:-NONE} == DB_ONLY ]]; then
+        printf 'Oracle Database 19c\nPatch %s : applied\n' "${DB_PATCH:-0}" >>"$output_file"
+      else
+        printf 'Oracle Database 19c\nNo target patches installed.\n' >>"$output_file"
+      fi ;;
+    preapply_lsinventory)
+      if [[ ${MOCK_PREAPPLY_INVENTORY:-NONE} == BOTH ]]; then
+        printf 'Oracle Database 19c\nPatch %s : applied\nPatch %s : applied\n' "${DB_PATCH:-0}" "${OJVM_PATCH:-0}" >>"$output_file"
+      elif [[ ${MOCK_PREAPPLY_INVENTORY:-NONE} == DB_ONLY ]]; then
+        printf 'Oracle Database 19c\nPatch %s : applied\n' "${DB_PATCH:-0}" >>"$output_file"
+      else
+        printf 'Oracle Database 19c\nNo target patches installed.\n' >>"$output_file"
+      fi ;;
     verify_db_ru)
       printf 'Patch %s : applied\n' "${DB_PATCH:-0}" >>"$output_file" ;;
     opatch_lsinventory_after|opatch_upgrade_inventory|verify_ojvm|verify_ojvm_resume)

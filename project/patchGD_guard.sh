@@ -308,6 +308,14 @@ select 'COMPONENT_INVALID|'||count(*) from dba_registry where status in ('INVALI
 select 'REGISTRY|'||comp_id||'|'||status from dba_registry order by comp_id;
 select 'CDB_REGISTRY|'||con_id||'|'||comp_id||'|'||status from cdb_registry order by con_id, comp_id;
 select 'SQLPATCH_ERRORS|'||count(*) from (select patch_id, action, status, row_number() over (partition by patch_id, action order by action_time desc) rn from dba_registry_sqlpatch) where rn = 1 and status <> 'SUCCESS';
+select 'SQLPATCH|'||patch_id||'|'||action||'|'||status||'|'||to_char(action_time,'YYYYMMDDHH24MISSFF6')
+from (
+  select patch_id, action, status, action_time,
+         row_number() over (partition by patch_id order by action_time desc) rn
+  from dba_registry_sqlpatch
+)
+where rn = 1
+order by patch_id;
 select 'DATAPUMP|'||count(*) from dba_datapump_jobs where state not in ('NOT RUNNING','COMPLETED');
 select 'DATAPUMP_JOB|'||owner_name||'|'||job_name||'|'||operation||'|'||job_mode||'|'||state
 from dba_datapump_jobs where state not in ('NOT RUNNING','COMPLETED') order by owner_name, job_name;
@@ -536,6 +544,71 @@ write_mock_registry_inventory() {
   if [[ -z ${MOCK_REGISTRY_BEFORE:-} && "$cdb" == YES ]]; then
     printf 'CDB_REGISTRY|1|CATALOG|VALID\n' >>"$destination"
   fi
+  if [[ -n ${MOCK_SQLPATCH_BEFORE:-} ]]; then
+    printf '%s\n' "$MOCK_SQLPATCH_BEFORE" | tr ';' '\n' >>"$destination"
+  fi
+}
+
+inventory_contains_patch() {
+  local inventory=$1 patch_id=$2
+  [[ "$patch_id" =~ ^[0-9]+$ ]] || return 1
+  grep -Eq "(^|[[:space:]])Patch[[:space:]]+${patch_id}([[:space:]:]|$)" "$inventory" 2>/dev/null
+}
+
+sqlpatch_targets_successful_for_all_databases() {
+  local sid running source database_count=0
+  while IFS='|' read -r sid running; do
+    database_count=$((database_count + 1))
+    [[ "$running" == true ]] || return 1
+    if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then
+      source="${RUN_DIR}/registry_inventory_${sid}.log"
+    else
+      source="${RUN_DIR}/inventory_${sid}.txt"
+    fi
+    [[ -r "$source" ]] || return 1
+    awk -F'|' -v db="$DB_PATCH" -v ojvm="$OJVM_PATCH" '
+      $1=="SQLPATCH" && $2==db   { db_rows++;   if ($3=="APPLY" && $4=="SUCCESS") db_ok++ }
+      $1=="SQLPATCH" && $2==ojvm { ojvm_rows++; if ($3=="APPLY" && $4=="SUCCESS") ojvm_ok++ }
+      END { exit !(db_rows==1 && db_ok==1 && ojvm_rows==1 && ojvm_ok==1) }
+    ' "$source" || return 1
+    awk -F'|' -v sid="$sid" -v db="$DB_PATCH" -v ojvm="$OJVM_PATCH" '
+      $1=="SQLPATCH" && ($2==db || $2==ojvm) {
+        printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n", sid, $2, $3, $4, $5
+      }
+    ' "$source" >>"${RUN_DIR}/sqlpatch_before.csv"
+  done < <(awk -F, 'NR>1 { sid=$1; running=$4; gsub(/"/, "", sid); gsub(/"/, "", running); print sid "|" running }' "${RUN_DIR}/database_state_before.csv")
+  (( database_count > 0 ))
+}
+
+evaluate_installed_target_patchlevel() {
+  local assessment_mode=$1 db_installed=false ojvm_installed=false
+  inventory_contains_patch "${RUN_DIR}/inventory_before.txt" "$DB_PATCH" && db_installed=true
+  inventory_contains_patch "${RUN_DIR}/inventory_before.txt" "$OJVM_PATCH" && ojvm_installed=true
+
+  if [[ "$db_installed" == false && "$ojvm_installed" == false ]]; then
+    return 0
+  fi
+  if [[ "$db_installed" != "$ojvm_installed" ]]; then
+    opg_add_finding BLOCKED TARGET_PATCHLEVEL_PARTIALLY_INSTALLED \
+      "De actieve cycle is slechts gedeeltelijk in de Oracle binary inventory aanwezig; automatisch verder plannen is niet veilig." \
+      "${RUN_DIR}/inventory_before.txt"
+    return 0
+  fi
+  if ! sqlpatch_targets_successful_for_all_databases; then
+    opg_add_finding BLOCKED TARGET_PATCHLEVEL_SQL_INCOMPLETE \
+      "DB-RU en OJVM staan in de binary inventory, maar APPLY/SUCCESS is niet voor iedere database aantoonbaar." \
+      "${RUN_DIR}/inventory_before.txt;${RUN_DIR}/sqlpatch_before.csv"
+    return 0
+  fi
+  if [[ "$assessment_mode" == precheck ]]; then
+    opg_add_finding READY TARGET_PATCHLEVEL_ALREADY_APPLIED \
+      "De verwachte DB-RU en OJVM zijn al geïnstalleerd en staan voor iedere database op APPLY/SUCCESS." \
+      "${RUN_DIR}/inventory_before.txt"
+  else
+    opg_add_finding BLOCKED TARGET_PATCHLEVEL_ALREADY_APPLIED \
+      "De verwachte DB-RU en OJVM zijn al volledig geïnstalleerd; een nieuw muterend patchplan is niet toegestaan." \
+      "${RUN_DIR}/inventory_before.txt"
+  fi
 }
 
 record_registry_baseline() {
@@ -576,7 +649,7 @@ inventory_databases() {
   awk -F'|' -v home="$TARGET_ORACLE_HOME" '$2==home' "$all" >"$parsed"
   printf 'SID,ORACLE_HOME,oratab_autostart,instance_running,database_role,open_mode,CDB,PDB_status,listener,services\n' >"${RUN_DIR}/database_state_before.csv"
   printf 'SID,invalid_objects\n' >"${RUN_DIR}/invalid_objects_before.csv"
-  printf 'SID,patch_id,status,action_time\n' >"${RUN_DIR}/sqlpatch_before.csv"
+  printf 'SID,patch_id,action,status,action_time\n' >"${RUN_DIR}/sqlpatch_before.csv"
   : >"${RUN_DIR}/registry_components_before.psv"
 
   if [[ ${OPG_TEST_MODE:-0} != 1 && "$MANAGE_LISTENERS" == true ]]; then
@@ -901,6 +974,14 @@ write_precheck_summary() {
   precheck_summary_add REGISTRY_SQLPATCH_READINESS "$success" "${RUN_DIR}/registry_components_before.psv" \
     'REGISTRY_QUERY_FAILED REGISTRY_COMPONENT_UNHEALTHY REGISTRY_COMPONENT_UNKNOWN REGISTRY_BASELINE_UNAVAILABLE INVALID_COMPONENTS SQLPATCH_ERROR DATABASE_QUERY_FAILED'
 
+  if grep -Eq '\|TARGET_PATCHLEVEL_(ALREADY_APPLIED|PARTIALLY_INSTALLED|SQL_INCOMPLETE)\|' "${RUN_DIR}/findings.psv"; then
+    success=false
+    grep -Fq 'READY|TARGET_PATCHLEVEL_ALREADY_APPLIED|' "${RUN_DIR}/findings.psv" && success=true
+    precheck_summary_add TARGET_PATCHLEVEL_READINESS "$success" "${RUN_DIR}/inventory_before.txt" \
+      'TARGET_PATCHLEVEL_ALREADY_APPLIED TARGET_PATCHLEVEL_PARTIALLY_INSTALLED TARGET_PATCHLEVEL_SQL_INCOMPLETE' \
+      'De geïnstalleerde target-patchlevel is onvolledig of niet betrouwbaar als APPLY/SUCCESS bevestigd.'
+  fi
+
   success=false
   if [[ -s "${RUN_DIR}/invalid_objects_before.csv" ]] && awk -F, '
     NR>1 { value=$2; gsub(/"/, "", value); rows++; if (value !~ /^[0-9]+$/ || value != 0) bad=1 }
@@ -963,7 +1044,7 @@ emit_precheck_result() {
   while IFS='|' read -r severity id message _; do
     [[ -n "$severity" && -n "$id" ]] || continue
     case "$id" in
-      WINDOW_INVALID|MAINTENANCE_WINDOW_READINESS)
+      WINDOW_INVALID|MAINTENANCE_WINDOW_READINESS|TARGET_PATCHLEVEL_ALREADY_APPLIED|TARGET_PATCHLEVEL_READINESS)
         printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s|message=%s\n' "$RUN_ID" "$severity" "$id" "$message"
         ;;
       *) printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s\n' "$RUN_ID" "$severity" "$id" ;;
@@ -972,7 +1053,7 @@ emit_precheck_result() {
   while IFS='|' read -r severity id message _; do
     [[ -n "$severity" && -n "$id" ]] || continue
     case "$id" in
-      WINDOW_INVALID|MAINTENANCE_WINDOW_READINESS)
+      WINDOW_INVALID|MAINTENANCE_WINDOW_READINESS|TARGET_PATCHLEVEL_ALREADY_APPLIED|TARGET_PATCHLEVEL_READINESS)
         printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s|message=%s\n' "$RUN_ID" "$severity" "$id" "$message"
         ;;
       *) printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s\n' "$RUN_ID" "$severity" "$id" ;;
@@ -1161,6 +1242,7 @@ perform_assessment() {
 
   detect_unsupported_topology
   inventory_databases || opg_add_finding BLOCKED DATABASE_INVENTORY_FAILED "Database-manifest kon niet worden gemaakt." "$ORATAB_FILE"
+  evaluate_installed_target_patchlevel "$assessment_mode"
   detect_home_processes
   detect_prior_runs
   check_path_space "$TARGET_ORACLE_HOME" "$MIN_HOME_FREE_MB" HOME_SPACE "Oracle Home"
@@ -1538,6 +1620,11 @@ perform_preapply_recheck() {
   opg_run_capture preapply_lsinventory "${RUN_DIR}/preapply_inventory.txt" "$TARGET_ORACLE_HOME/OPatch/opatch" lsinventory -detail; rc=$?
   if (( rc != 0 )) || ! opg_verify_command_success_text "${RUN_DIR}/preapply_inventory.txt"; then
     preapply_add BLOCKED INVENTORY_RECHECK_FAILED "Inventorycontrole faalt direct vóór apply." "${RUN_DIR}/preapply_inventory.txt"
+  elif inventory_contains_patch "${RUN_DIR}/preapply_inventory.txt" "$DB_PATCH" ||
+       inventory_contains_patch "${RUN_DIR}/preapply_inventory.txt" "$OJVM_PATCH"; then
+    preapply_add BLOCKED TARGET_PATCH_ALREADY_INSTALLED \
+      "Minstens één geplande targetpatch is direct vóór apply al geïnstalleerd; herhaalde muterende apply is niet toegestaan." \
+      "${RUN_DIR}/preapply_inventory.txt"
   fi
   opg_run_capture opatch_version "${RUN_DIR}/preapply_opatch_version.txt" "$TARGET_ORACLE_HOME/OPatch/opatch" version; rc=$?
   opatch_actual=$(awk '/OPatch Version/{print $3; exit}' "${RUN_DIR}/preapply_opatch_version.txt")

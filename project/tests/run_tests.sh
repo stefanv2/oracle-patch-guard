@@ -567,6 +567,36 @@ for summary_id in PATCH_CONFLICT_READINESS TOPOLOGY_READINESS DATABASE_RUNTIME_R
 done
 record 'succesvolle PRECHECK-controles tonen compacte READY-summary' 0 "$summary_rc"
 
+setup_case precheckalreadypatched
+cat >>"$FIXTURE_ENV" <<'EOF'
+MOCK_INVENTORY_BEFORE=BOTH
+MOCK_SQLPATCH_BEFORE='SQLPATCH|39472050|APPLY|SUCCESS|20260901090000000000;SQLPATCH|39222882|APPLY|SUCCESS|20260901090100000000'
+EOF
+precheck PA1; rc=$?
+grep -Fq 'READY|TARGET_PATCHLEVEL_ALREADY_APPLIED|De verwachte DB-RU en OJVM zijn al geïnstalleerd en staan voor iedere database op APPLY/SUCCESS.|' "$RUN_ROOT/PA1/findings.psv" || rc=99
+grep -Fq 'OPG_PRECHECK_FINDING|run_id=PA1|severity=READY|id=TARGET_PATCHLEVEL_ALREADY_APPLIED|message=De verwachte DB-RU en OJVM zijn al geïnstalleerd en staan voor iedere database op APPLY/SUCCESS.' "$CASE_DIR/PA1.out" || rc=98
+grep -Fq 'OPG_PRECHECK_FINDING|run_id=PA1|severity=READY|id=TARGET_PATCHLEVEL_READINESS' "$CASE_DIR/PA1.out" || rc=97
+[[ ! -e "$RUN_ROOT/PA1/execution_state.json" && ! -e "$RUN_ROOT/PA1/patch_manifest.json" ]] || rc=96
+record_precheck 'PRECHECK rapporteert volledig actieve cycle expliciet als reeds toegepast' 10 "$rc" "$CASE_DIR/PA1.out"
+
+setup_case planalreadypatched
+cat >>"$FIXTURE_ENV" <<'EOF'
+MOCK_INVENTORY_BEFORE=BOTH
+MOCK_SQLPATCH_BEFORE='SQLPATCH|39472050|APPLY|SUCCESS|20260901090000000000;SQLPATCH|39222882|APPLY|SUCCESS|20260901090100000000'
+EOF
+guard plan --non-interactive --target-oracle-home "$HOME_DIR" --run-id PA2 39472050 39222882 JUL2026 12.2.0.1.52 p6880880_190000_Linux-x86-64.zip >"$CASE_DIR/PA2.out" 2>&1; rc=$?
+grep -Fq 'BLOCKED|TARGET_PATCHLEVEL_ALREADY_APPLIED|De verwachte DB-RU en OJVM zijn al volledig geïnstalleerd; een nieuw muterend patchplan is niet toegestaan.|' "$RUN_ROOT/PA2/findings.psv" || rc=99
+[[ ! -e "$RUN_ROOT/PA2/proposed_runbook.sh" ]] || rc=98
+record 'PLAN blokkeert een nieuw muterend plan voor reeds toegepaste targetpatches' 20 "$rc" "$CASE_DIR/PA2.out"
+
+setup_case applybecamepatched; assess PA3 >/dev/null; plan PA3 >/dev/null; token=$(approval PA3)
+printf '\nMOCK_PREAPPLY_INVENTORY=BOTH\n' >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id PA3 --approved-manifest "$RUN_ROOT/PA3/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/PA3.apply.out" 2>&1; rc=$?
+grep -Fq 'BLOCKED|TARGET_PATCH_ALREADY_INSTALLED|' "$RUN_ROOT/PA3/preapply_findings.psv" || rc=99
+[[ ! -e "$RUN_ROOT/PA3/apply_db_ru.log" && ! -e "$RUN_ROOT/PA3/apply_ojvm.log" ]] || rc=98
+record 'APPLY blokkeert vóór downtime als targetpatches inmiddels al geïnstalleerd zijn' 20 "$rc" "$CASE_DIR/PA3.apply.out"
+assert_no_downtime_started 'reeds geïnstalleerde targetpatches starten geen downtime' PA3
+
 setup_case precheckwindowinvalid; printf '\nMOCK_CHECK_MAINTENANCE_WINDOW=BLOCKED\n' >>"$FIXTURE_ENV"; precheck PWI; rc=$?
 grep -Fq 'CONDITIONAL|WINDOW_INVALID|Maintenance window ontbreekt of is nog niet geldig; vereist vóór PLAN/APPLY.|' "$RUN_ROOT/PWI/findings.psv" || rc=99
 grep -Fq 'CONDITIONAL|MAINTENANCE_WINDOW_READINESS|Maintenance window readiness is nog niet voldaan; vereist vóór PLAN/APPLY.|' "$RUN_ROOT/PWI/precheck_summary.psv" || rc=98
