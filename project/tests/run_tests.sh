@@ -307,13 +307,13 @@ grep -Fq 'BLOCKED|WINDOW_CHANGED|' "$RUN_ROOT/R33A/preapply_findings.psv" || app
 record 'ongeldig onderhoudsvenster direct voor APPLY blijft BLOCKED' 20 "$apply_window_rc" "$CASE_DIR/apply.out"
 assert_no_downtime_started 'ongeldig onderhoudsvenster start geen patchmutatie' R33A
 
-# 34-35. Regressies: RAC OPTION OFF is geen componentfout en alleen de laatste
-# status per patch_id+action telt in DBA_REGISTRY_SQLPATCH.
+# 34-35. Regressies: RAC OPTION OFF is geen componentfout en readiness selecteert
+# de laatste toestand per patch-ID over alle actions/statussen, met behoud van ties.
 setup_case sqlregression; assess R34 >/dev/null
 # De enkele quotes zoeken bewust naar de letterlijke SQL-tekst v$option.
 # shellcheck disable=SC2016
 if grep -Fq "status in ('INVALID','LOADING','UPGRADING','DOWNGRADING','REMOVING')" "$RUN_ROOT/R34/inventory.sql" && ! grep -Fq 'v$option' "$RUN_ROOT/R34/inventory.sql"; then record 'RAC OPTION OFF is geen componentfout' 0 0; else record 'RAC OPTION OFF is geen componentfout' 0 1; fi
-if grep -Fq 'partition by patch_id, action order by action_time desc' "$RUN_ROOT/R34/inventory.sql"; then record 'historische WITH ERRORS gevolgd door SUCCESS blokkeert niet' 0 0; else record 'historische WITH ERRORS gevolgd door SUCCESS blokkeert niet' 0 1; fi
+if grep -Fq 'where x.patch_id=r.patch_id' "$RUN_ROOT/R34/inventory.sql" && ! grep -Fq 'partition by patch_id, action' "$RUN_ROOT/R34/inventory.sql"; then record 'SQLPATCH-readiness selecteert laatste toestand per patch-ID' 0 0; else record 'SQLPATCH-readiness selecteert laatste toestand per patch-ID' 0 1; fi
 
 # 36. Dry-run onderdrukt de read-only assessmentcontroles niet.
 setup_case dryrunassess
@@ -570,14 +570,39 @@ record 'succesvolle PRECHECK-controles tonen compacte READY-summary' 0 "$summary
 setup_case precheckalreadypatched
 cat >>"$FIXTURE_ENV" <<'EOF'
 MOCK_INVENTORY_BEFORE=BOTH
-MOCK_SQLPATCH_BEFORE='SQLPATCH|39472050|APPLY|SUCCESS|20260901090000000000;SQLPATCH|39222882|APPLY|SUCCESS|20260901090100000000'
+MOCK_SQLPATCH_BEFORE='SQLPATCH|37960098|APPLY|WITH ERRORS|20200101120000000000;SQLPATCH|39472050|APPLY|SUCCESS|20260901090000000000;SQLPATCH|39222882|APPLY|SUCCESS|20260901090100000000'
 EOF
 precheck PA1; rc=$?
 grep -Fq 'READY|TARGET_PATCHLEVEL_ALREADY_APPLIED|De verwachte DB-RU en OJVM zijn al geïnstalleerd en staan voor iedere database op APPLY/SUCCESS.|' "$RUN_ROOT/PA1/findings.psv" || rc=99
 grep -Fq 'OPG_PRECHECK_FINDING|run_id=PA1|severity=READY|id=TARGET_PATCHLEVEL_ALREADY_APPLIED|message=De verwachte DB-RU en OJVM zijn al geïnstalleerd en staan voor iedere database op APPLY/SUCCESS.' "$CASE_DIR/PA1.out" || rc=98
 grep -Fq 'OPG_PRECHECK_FINDING|run_id=PA1|severity=READY|id=TARGET_PATCHLEVEL_READINESS' "$CASE_DIR/PA1.out" || rc=97
+grep -Fq 'READY|REGISTRY_SQLPATCH_READINESS|' "$RUN_ROOT/PA1/precheck_summary.psv" || rc=95
+grep -Fq 'BLOCKED|SQLPATCH_ERROR|' "$RUN_ROOT/PA1/findings.psv" && rc=94
 [[ ! -e "$RUN_ROOT/PA1/execution_state.json" && ! -e "$RUN_ROOT/PA1/patch_manifest.json" ]] || rc=96
 record_precheck 'PRECHECK rapporteert volledig actieve cycle expliciet als reeds toegepast' 10 "$rc" "$CASE_DIR/PA1.out"
+
+setup_case prechecksupersededhistory
+cat >>"$FIXTURE_ENV" <<'EOF'
+MOCK_INVENTORY_BEFORE_ROWS='Patch 39034528 : applied;Patch 38906621 : applied'
+MOCK_SQLPATCH_BEFORE='SQLPATCH|37960098|APPLY|WITH ERRORS|20200101120000000000;SQLPATCH|39034528|APPLY|SUCCESS|20260901090000000000;SQLPATCH|38906621|APPLY|SUCCESS|20260901090100000000'
+EOF
+precheck PA-FUTURE; rc=$?
+grep -Fq 'READY|REGISTRY_SQLPATCH_READINESS|' "$RUN_ROOT/PA-FUTURE/precheck_summary.psv" || rc=99
+grep -Fq 'BLOCKED|SQLPATCH_ERROR|' "$RUN_ROOT/PA-FUTURE/findings.psv" && rc=98
+grep -Fq '|TARGET_PATCHLEVEL_ALREADY_APPLIED|' "$RUN_ROOT/PA-FUTURE/findings.psv" && rc=97
+record_precheck 'superseded SQLPATCH-errors blokkeren een toekomstige targetcycle niet' 10 "$rc" "$CASE_DIR/PA-FUTURE.out"
+
+setup_case precheckcurrenterror
+printf "\nMOCK_SQLPATCH_BEFORE='SQLPATCH|39472050|APPLY|WITH ERRORS|20260901090000000000'\n" >>"$FIXTURE_ENV"
+precheck PA-ERROR; rc=$?
+grep -Fq 'BLOCKED|SQLPATCH_ERROR|' "$RUN_ROOT/PA-ERROR/findings.psv" || rc=99
+record_precheck 'actuele APPLY WITH ERRORS blijft BLOCKED' 20 "$rc" "$CASE_DIR/PA-ERROR.out"
+
+setup_case prechecksqlpatchtie
+printf "\nMOCK_SQLPATCH_BEFORE='SQLPATCH|39472050|APPLY|SUCCESS|20260901090000000000;SQLPATCH|39472050|ROLLBACK|WITH ERRORS|20260901090000000000'\n" >>"$FIXTURE_ENV"
+precheck PA-TIE; rc=$?
+grep -Fq 'BLOCKED|reason=ambiguous_latest_state|' "$RUN_ROOT/PA-TIE/sqlpatch_readiness_DB1.psv" || rc=99
+record_precheck 'conflicterende SQLPATCH-records op laatste timestamp falen gesloten' 20 "$rc" "$CASE_DIR/PA-TIE.out"
 
 setup_case planalreadypatched
 cat >>"$FIXTURE_ENV" <<'EOF'

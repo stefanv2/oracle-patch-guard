@@ -307,15 +307,19 @@ select 'INVALID|'||count(*) from dba_objects where status='INVALID';
 select 'COMPONENT_INVALID|'||count(*) from dba_registry where status in ('INVALID','LOADING','UPGRADING','DOWNGRADING','REMOVING');
 select 'REGISTRY|'||comp_id||'|'||status from dba_registry order by comp_id;
 select 'CDB_REGISTRY|'||con_id||'|'||comp_id||'|'||status from cdb_registry order by con_id, comp_id;
-select 'SQLPATCH_ERRORS|'||count(*) from (select patch_id, action, status, row_number() over (partition by patch_id, action order by action_time desc) rn from dba_registry_sqlpatch) where rn = 1 and status <> 'SUCCESS';
+select 'SQLPATCH_ERRORS|'||count(*) from (
+  select r.patch_id, r.action, r.status, r.action_time
+  from dba_registry_sqlpatch r
+  where r.action_time = (
+    select max(x.action_time) from dba_registry_sqlpatch x where x.patch_id=r.patch_id
+  )
+) where action <> 'APPLY' or status <> 'SUCCESS';
 select 'SQLPATCH|'||patch_id||'|'||action||'|'||status||'|'||to_char(action_time,'YYYYMMDDHH24MISSFF6')
-from (
-  select patch_id, action, status, action_time,
-         row_number() over (partition by patch_id order by action_time desc) rn
-  from dba_registry_sqlpatch
+from dba_registry_sqlpatch r
+where r.action_time = (
+  select max(x.action_time) from dba_registry_sqlpatch x where x.patch_id=r.patch_id
 )
-where rn = 1
-order by patch_id;
+order by patch_id, action, status;
 select 'DATAPUMP|'||count(*) from dba_datapump_jobs where state not in ('NOT RUNNING','COMPLETED');
 select 'DATAPUMP_JOB|'||owner_name||'|'||job_name||'|'||operation||'|'||job_mode||'|'||state
 from dba_datapump_jobs where state not in ('NOT RUNNING','COMPLETED') order by owner_name, job_name;
@@ -555,6 +559,72 @@ inventory_contains_patch() {
   grep -Eq "(^|[[:space:]])Patch[[:space:]]+${patch_id}([[:space:]:]|$)" "$inventory" 2>/dev/null
 }
 
+validate_sqlpatch_readiness_output() {
+  local source=$1 evidence=$2 inventory=${3:-${RUN_DIR}/inventory_before.txt}
+  local line tag patch_id action status action_time extra record is_target
+  local blocked=0 unknown=0 relevant=0 target_relevant=0
+  local -A seen=()
+  : >"$evidence"
+  [[ -r "$source" ]] || { printf 'UNKNOWN|reason=registry_output_unreadable\n' >"$evidence"; return 3; }
+  while IFS= read -r line; do
+    [[ "$line" == SQLPATCH\|* ]] || continue
+    if [[ ! "$line" =~ ^SQLPATCH\|[0-9]+\|[A-Z]+\|[A-Z\ ]+\|[0-9]{20}$ ]]; then
+      printf 'UNKNOWN|reason=unparseable_record|record=%s\n' "$line" >>"$evidence"
+      unknown=1
+      continue
+    fi
+    IFS='|' read -r tag patch_id action status action_time extra <<<"$line"
+    is_target=false
+    [[ "$patch_id" == "$DB_PATCH" || "$patch_id" == "$OJVM_PATCH" ]] && is_target=true
+    if [[ "$is_target" == false ]] && ! inventory_contains_patch "$inventory" "$patch_id"; then
+      [[ "$action" == APPLY && "$status" == SUCCESS ]] ||
+        printf 'HISTORICAL|patch_id=%s|action=%s|status=%s|action_time=%s\n' "$patch_id" "$action" "$status" "$action_time" >>"$evidence"
+      continue
+    fi
+    relevant=$((relevant + 1))
+    [[ "$is_target" == true ]] && target_relevant=$((target_relevant + 1))
+    record="${action}|${status}|${action_time}"
+    if [[ -n ${seen[$patch_id]+x} && ${seen[$patch_id]} != "$record" ]]; then
+      printf 'BLOCKED|reason=ambiguous_latest_state|patch_id=%s|first=%s|second=%s\n' "$patch_id" "${seen[$patch_id]}" "$record" >>"$evidence"
+      blocked=1
+      continue
+    fi
+    seen[$patch_id]=$record
+    if [[ "$action" == APPLY && "$status" == SUCCESS ]]; then
+      printf 'READY|patch_id=%s|action=APPLY|status=SUCCESS|action_time=%s\n' "$patch_id" "$action_time" >>"$evidence"
+    else
+      printf 'BLOCKED|reason=current_state_not_apply_success|patch_id=%s|action=%s|status=%s|action_time=%s\n' "$patch_id" "$action" "$status" "$action_time" >>"$evidence"
+      blocked=1
+    fi
+  done <"$source"
+  [[ -z "$line" ]] || { printf 'UNKNOWN|reason=unterminated_registry_output\n' >>"$evidence"; unknown=1; }
+  (( relevant > 0 )) || printf 'READY|reason=no_relevant_patch_history\n' >>"$evidence"
+  if (( target_relevant > 0 )); then
+    if [[ -z ${seen[$DB_PATCH]+x} ]]; then
+      printf 'BLOCKED|reason=missing_target_status|patch_id=%s\n' "$DB_PATCH" >>"$evidence"
+      blocked=1
+    fi
+    if [[ -n "$OJVM_PATCH" && -z ${seen[$OJVM_PATCH]+x} ]]; then
+      printf 'BLOCKED|reason=missing_target_status|patch_id=%s\n' "$OJVM_PATCH" >>"$evidence"
+      blocked=1
+    fi
+  fi
+  (( blocked == 0 )) || return 2
+  (( unknown == 0 )) || return 3
+  return 0
+}
+
+assess_sqlpatch_readiness() {
+  local sid=$1 source=$2 evidence="${RUN_DIR}/sqlpatch_readiness_${sid}.psv" rc
+  validate_sqlpatch_readiness_output "$source" "$evidence"; rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2) opg_add_finding BLOCKED SQLPATCH_ERROR "De laatste relevante SQL patchtoestand is niet eenduidig APPLY/SUCCESS." "$evidence" ;;
+    *) opg_add_finding UNKNOWN SQLPATCH_STATE_UNKNOWN "De actuele SQL patchtoestand kon niet betrouwbaar worden geïnterpreteerd." "$evidence" ;;
+  esac
+  return "$rc"
+}
+
 sqlpatch_targets_successful_for_all_databases() {
   local sid running source database_count=0
   while IFS='|' read -r sid running; do
@@ -644,7 +714,7 @@ compare_registry_with_baseline() {
 
 inventory_databases() {
   local parsed="${RUN_DIR}/oratab_selected.psv" all="${RUN_DIR}/oratab_all.psv"
-  local sid home autostart count=0 running role mode cdb pdb listener services invalid component_invalid sqlpatch_errors asm_files output detected_listeners='' listener_name pmon_pid pmon_exe
+  local sid home autostart count=0 running role mode cdb pdb listener services invalid component_invalid asm_files output detected_listeners='' listener_name pmon_pid pmon_exe
   opg_parse_oratab "$all" || return 1
   awk -F'|' -v home="$TARGET_ORACLE_HOME" '$2==home' "$all" >"$parsed"
   printf 'SID,ORACLE_HOME,oratab_autostart,instance_running,database_role,open_mode,CDB,PDB_status,listener,services\n' >"${RUN_DIR}/database_state_before.csv"
@@ -676,6 +746,7 @@ inventory_databases() {
       output="${RUN_DIR}/registry_inventory_${sid}.log"
       if write_mock_registry_inventory "$cdb" "$output"; then
         record_registry_baseline "$sid" "$cdb" "$output" || true
+        assess_sqlpatch_readiness "$sid" "$output" || true
       else
         opg_add_finding UNKNOWN REGISTRY_QUERY_FAILED "Oracle-componentinventarisatie kon niet veilig worden uitgevoerd." "$sid"
       fi
@@ -701,14 +772,13 @@ inventory_databases() {
           services=$(grep '^SERVICES|' "$output" | tail -1 | cut -d'|' -f2-)
           invalid=$(grep '^INVALID|' "$output" | tail -1 | cut -d'|' -f2)
           component_invalid=$(grep '^COMPONENT_INVALID|' "$output" | tail -1 | cut -d'|' -f2)
-          sqlpatch_errors=$(grep '^SQLPATCH_ERRORS|' "$output" | tail -1 | cut -d'|' -f2)
           asm_files=$(grep '^ASM_FILES|' "$output" | tail -1 | cut -d'|' -f2)
           [[ ${component_invalid:-UNKNOWN} =~ ^[1-9] ]] && opg_add_finding BLOCKED INVALID_COMPONENTS "Databasecomponent heeft niet-VALID status." "$sid"
-          [[ ${sqlpatch_errors:-UNKNOWN} =~ ^[1-9] ]] && opg_add_finding BLOCKED SQLPATCH_ERROR "Onverklaarde SQL patchfout gevonden." "$sid"
           [[ ${asm_files:-UNKNOWN} =~ ^[1-9] ]] && opg_add_finding BLOCKED ASM_STORAGE_DETECTED "Database gebruikt ASM-bestanden; deze MVP ondersteunt dat niet." "$sid"
           [[ ${invalid:-0} =~ ^[1-9] ]] && opg_add_finding CONDITIONAL PREEXISTING_INVALIDS "Vooraf bestaande invalid objects vereisen acceptatie." "${sid}:${invalid}"
           [[ "$role" != PRIMARY ]] && opg_add_finding BLOCKED DATA_GUARD_UNSUPPORTED "Data Guard-role ${role} is niet ondersteund in deze MVP." "$sid"
           record_registry_baseline "$sid" "$cdb" "$output" || true
+          assess_sqlpatch_readiness "$sid" "$output" || true
         else
           opg_add_finding UNKNOWN DATABASE_QUERY_FAILED "Database-inventarisatie kon niet veilig worden uitgevoerd." "$sid"
         fi
@@ -965,14 +1035,15 @@ write_precheck_summary() {
     success=true
     while IFS='|' read -r sid running; do
       [[ "$running" == true ]] || continue
-      if [[ ! -s "${RUN_DIR}/inventory_${sid}.txt" ]] || ! grep -Fqx 'SQLPATCH_ERRORS|0' "${RUN_DIR}/inventory_${sid}.txt"; then
+      if [[ ! -s "${RUN_DIR}/sqlpatch_readiness_${sid}.psv" ]] ||
+         grep -Eq '^(BLOCKED|UNKNOWN)\|' "${RUN_DIR}/sqlpatch_readiness_${sid}.psv"; then
         success=false
         break
       fi
     done < <(awk -F, 'NR>1 { sid=$1; running=$4; gsub(/"/, "", sid); gsub(/"/, "", running); print sid "|" running }' "${RUN_DIR}/database_state_before.csv")
   fi
   precheck_summary_add REGISTRY_SQLPATCH_READINESS "$success" "${RUN_DIR}/registry_components_before.psv" \
-    'REGISTRY_QUERY_FAILED REGISTRY_COMPONENT_UNHEALTHY REGISTRY_COMPONENT_UNKNOWN REGISTRY_BASELINE_UNAVAILABLE INVALID_COMPONENTS SQLPATCH_ERROR DATABASE_QUERY_FAILED'
+    'REGISTRY_QUERY_FAILED REGISTRY_COMPONENT_UNHEALTHY REGISTRY_COMPONENT_UNKNOWN REGISTRY_BASELINE_UNAVAILABLE INVALID_COMPONENTS SQLPATCH_ERROR SQLPATCH_STATE_UNKNOWN DATABASE_QUERY_FAILED'
 
   if grep -Eq '\|TARGET_PATCHLEVEL_(ALREADY_APPLIED|PARTIALLY_INSTALLED|SQL_INCOMPLETE)\|' "${RUN_DIR}/findings.psv"; then
     success=false
@@ -1389,7 +1460,7 @@ report_approval_blocked() {
 
 verify_database_state_unchanged() {
   local sid expected_running current_running output expected_role expected_mode expected_pdb expected_services current_role current_mode current_pdb current_services
-  local pmon_pid pmon_exe sqlpatch_errors component_invalid asm_files baseline
+  local pmon_pid pmon_exe component_invalid asm_files baseline
   if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then
     [[ ${MOCK_ENVIRONMENT_CHANGED:-false} != true && ${MOCK_PREAPPLY_DATAPUMP:-false} != true && ${MOCK_PREAPPLY_SQLPATCH_ERROR:-false} != true && ${MOCK_UNEXPECTED_DATABASE:-false} != true && ${MOCK_REGISTRY_PREAPPLY_CHANGED:-false} != true ]]
     return $?
@@ -1414,10 +1485,10 @@ verify_database_state_unchanged() {
     current_pdb=$(grep '^PDB|' "$output" | tail -1 | cut -d'|' -f2-)
     current_services=$(grep '^SERVICES|' "$output" | tail -1 | cut -d'|' -f2-)
     [[ "$expected_role" == "$current_role" && "$expected_mode" == "$current_mode" && "$expected_pdb" == "$current_pdb" && "$expected_services" == "$current_services" ]] || return 1
-    sqlpatch_errors=$(grep '^SQLPATCH_ERRORS|' "$output" | tail -1 | cut -d'|' -f2)
     component_invalid=$(grep '^COMPONENT_INVALID|' "$output" | tail -1 | cut -d'|' -f2)
     asm_files=$(grep '^ASM_FILES|' "$output" | tail -1 | cut -d'|' -f2)
-    [[ "$sqlpatch_errors" == 0 && "$component_invalid" == 0 && "$asm_files" == 0 && "$current_role" == PRIMARY ]] || return 1
+    validate_sqlpatch_readiness_output "$output" "${RUN_DIR}/sqlpatch_readiness_preapply_${sid}.psv" "${RUN_DIR}/preapply_inventory.txt" || return 1
+    [[ "$component_invalid" == 0 && "$asm_files" == 0 && "$current_role" == PRIMARY ]] || return 1
     compare_registry_with_baseline "$sid" "$(opg_read_original_state "$sid" cdb)" "$output" preapply || return 1
   done < <(opg_manifest_sids)
   verify_no_unexpected_home_processes

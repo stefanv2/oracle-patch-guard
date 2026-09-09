@@ -14,7 +14,9 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "patchGD_guard.sh").read_text()
-FUNCTIONS = ("write_sql_files", "validate_datapatch_sqlpatch_output",
+FUNCTIONS = ("write_sql_files", "inventory_contains_patch",
+             "validate_sqlpatch_readiness_output",
+             "validate_datapatch_sqlpatch_output",
              "validate_datapatch_sqlpatch", "run_datapatch_all", "validate_all")
 CODE = "\n".join(re.search(r"^" + name + r"\(\) \{\n.*?^\}", SOURCE,
                            re.M | re.S).group() for name in FUNCTIONS)
@@ -65,6 +67,90 @@ def select_rows(work, cdb, containers, history):
         return "".join(row[0] + "\n" for row in db.execute(query))
     finally:
         db.close()
+
+
+def select_readiness_rows(work, history):
+    sql = (work / "inventory.sql").read_text()
+    query = re.search(r"select 'SQLPATCH\|'.*?;", sql, re.S).group()
+    db = sqlite3.connect(":memory:")
+    db.create_function("to_char", 2, lambda value, _format: value)
+    db.execute("create table dba_registry_sqlpatch(patch_id,action,status,action_time)")
+    db.executemany("insert into dba_registry_sqlpatch values (?,?,?,?)", history)
+    try:
+        return "".join(row[0] + "\n" for row in db.execute(query))
+    finally:
+        db.close()
+
+
+def check_readiness(scenario):
+    with tempfile.TemporaryDirectory(prefix="opg-readiness-action.") as directory:
+        work = Path(directory)
+        (work / "home").mkdir()
+        generated = shell(work, "NO", "write_sql_files")
+        assert generated.returncode == 0, generated.stderr
+        db_patch, ojvm_patch = PATCHES
+        histories = {
+            "apply_error_then_success": [
+                (db_patch, "APPLY", "WITH ERRORS", OLD),
+                (db_patch, "APPLY", "SUCCESS", NEW),
+                (ojvm_patch, "APPLY", "SUCCESS", NEW)],
+            "rollback_error_then_apply": [
+                (db_patch, "ROLLBACK", "WITH ERRORS", OLD),
+                (db_patch, "APPLY", "SUCCESS", NEW),
+                (ojvm_patch, "APPLY", "SUCCESS", NEW)],
+            "latest_apply_error": [
+                (db_patch, "APPLY", "SUCCESS", OLD),
+                (db_patch, "APPLY", "WITH ERRORS", NEW),
+                (ojvm_patch, "APPLY", "SUCCESS", NEW)],
+            "latest_rollback_error": [
+                (db_patch, "APPLY", "SUCCESS", OLD),
+                (db_patch, "ROLLBACK", "WITH ERRORS", NEW),
+                (ojvm_patch, "APPLY", "SUCCESS", NEW)],
+            "superseded_error": [
+                (37960098, "APPLY", "WITH ERRORS", NEW),
+                (39034528, "APPLY", "SUCCESS", NEW),
+                (38906621, "APPLY", "SUCCESS", NEW)],
+            "current_inventory_error": [
+                (37960098, "APPLY", "WITH ERRORS", NEW),
+                (39034528, "APPLY", "WITH ERRORS", NEW),
+                (38906621, "APPLY", "SUCCESS", NEW)],
+            "multiple_historical_errors": [
+                (db_patch, "APPLY", "WITH ERRORS", OLD),
+                (db_patch, "ROLLBACK", "WITH ERRORS", OLD),
+                (db_patch, "APPLY", "SUCCESS", NEW),
+                (ojvm_patch, "APPLY", "WITH ERRORS", OLD),
+                (ojvm_patch, "APPLY", "SUCCESS", NEW)],
+            "conflicting_latest_tie": [
+                (db_patch, "APPLY", "SUCCESS", NEW),
+                (db_patch, "ROLLBACK", "WITH ERRORS", NEW),
+                (ojvm_patch, "APPLY", "SUCCESS", NEW)],
+            "missing_target_status": [
+                (db_patch, "APPLY", "SUCCESS", NEW)],
+        }
+        rows = select_readiness_rows(work, histories[scenario])
+        (work / "readiness_rows").write_text(rows)
+        if scenario in ("superseded_error", "current_inventory_error"):
+            (work / "inventory_before.txt").write_text(
+                "Patch 39034528 : applied\nPatch 38906621 : applied\n")
+        else:
+            (work / "inventory_before.txt").write_text("No target patches installed.\n")
+        result = shell(
+            work, "NO",
+            'validate_sqlpatch_readiness_output "$RUN_DIR/readiness_rows" '
+            '"$RUN_DIR/readiness_evidence"')
+        expected = scenario in ("apply_error_then_success", "rollback_error_then_apply",
+                                "superseded_error", "multiple_historical_errors")
+        actual = result.returncode == 0
+        if actual != expected:
+            print("FAIL readiness {} expected={} rc={} rows={!r}".format(
+                scenario, expected, result.returncode, rows))
+            return False
+        if scenario == "conflicting_latest_tie":
+            evidence = (work / "readiness_evidence").read_text()
+            if "reason=ambiguous_latest_state" not in evidence:
+                print("FAIL readiness tie missing ambiguity evidence")
+                return False
+        return True
 
 
 def check(scope, route, scenario):
@@ -155,6 +241,12 @@ def main():
                              "extra_field", "partial_extra", "truncated"):
                 if check(scope, route, scenario): passed += 1
                 else: failed += 1
+    for scenario in ("apply_error_then_success", "rollback_error_then_apply",
+                     "latest_apply_error", "latest_rollback_error", "superseded_error",
+                     "current_inventory_error", "multiple_historical_errors", "conflicting_latest_tie",
+                     "missing_target_status"):
+        if check_readiness(scenario): passed += 1
+        else: failed += 1
     print("SQLPATCH ACTION results: {} passed, {} failed".format(passed, failed))
     return int(failed != 0)
 

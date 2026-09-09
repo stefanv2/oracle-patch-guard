@@ -307,7 +307,10 @@ opg_mock_command() {
         done < <(printf '%s\n' "$listener_services" | tr ';' '\n')
       done < <(opg_manifest_sids) ;;
     opatch_lsinventory_before)
-      if [[ ${MOCK_INVENTORY_BEFORE:-NONE} == BOTH ]]; then
+      if [[ -n ${MOCK_INVENTORY_BEFORE_ROWS:-} ]]; then
+        printf 'Oracle Database 19c\n' >>"$output_file"
+        printf '%s\n' "$MOCK_INVENTORY_BEFORE_ROWS" | tr ';' '\n' >>"$output_file"
+      elif [[ ${MOCK_INVENTORY_BEFORE:-NONE} == BOTH ]]; then
         printf 'Oracle Database 19c\nPatch %s : applied\nPatch %s : applied\n' "${DB_PATCH:-0}" "${OJVM_PATCH:-0}" >>"$output_file"
       elif [[ ${MOCK_INVENTORY_BEFORE:-NONE} == DB_ONLY ]]; then
         printf 'Oracle Database 19c\nPatch %s : applied\n' "${DB_PATCH:-0}" >>"$output_file"
