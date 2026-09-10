@@ -254,8 +254,8 @@ stage-policy.
   ondertekenen, activeren en stagen;
 - [RELEASE_NOTES_20260831.md](RELEASE_NOTES_20260831.md) — stable wijzigingen
   en live validatie;
-- [TREE_HASH_V2_SPEC.md](TREE_HASH_V2_SPEC.md) — normatieve tree-hashdefinitie;
+- [TREE_HASH_V2_SPEC.md](docs/pilot07/TREE_HASH_V2_SPEC.md) — normatieve tree-hashdefinitie;
 - [COMPLETION_PUBLICATION_VALIDATION_REPORT.md](COMPLETION_PUBLICATION_VALIDATION_REPORT.md)
   — completion-publicatie en signerclassificatie;
-- `PILOT07_*.md` — uitsluitend historische ontwerp- en pilotevidence; controleer
-  altijd de banner bovenaan voordat u deze documenten gebruikt.
+- `docs/pilot07/` — uitsluitend historische ontwerp- en pilotevidence; gebruik
+  deze map niet als huidig deploymentrunbook.
