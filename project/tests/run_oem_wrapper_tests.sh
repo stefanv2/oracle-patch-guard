@@ -259,6 +259,33 @@ export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z
 grep -q "OPG_NEW_RUN_RESULT|status=REUSED|run_id=${reused_run}|cycle=JUL2026" "$OUT" || rc=97
 record 'new-run hergebruikt dezelfde target/cycle-context zonder rotatie' 0 "$rc"
 
+setup_case newrunsamecyclecomplete; enable_pilot07_media; run_wrapper new-run; completed_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$completed_run" 12_COMPLETE COMPLETE
+completed_state_hash=$(sha256sum "$RUN_ROOT/$completed_run/execution_state.json" | awk '{print $1}')
+export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z; run_wrapper new-run; rc=$?; new_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id)
+archive_file=$(find "$CONTEXT_ROOT/archive" -maxdepth 1 -type f -name "${completed_run}.*.json" -print -quit)
+[[ "$new_run" != "$completed_run" && -n "$archive_file" && ! -e "$RUN_ROOT/$new_run/execution_state.json" ]] || rc=99
+[[ "$completed_state_hash" == "$(sha256sum "$RUN_ROOT/$completed_run/execution_state.json" | awk '{print $1}')" ]] || rc=98
+grep -q "run_id=${completed_run}|state=12_COMPLETE|reason=Previous same-cycle run is COMPLETE: new lifecycle created" "$CONTEXT_ROOT/context_history.log" || rc=97
+grep -Fq "OPG_NEW_RUN_RESULT|status=CREATED|run_id=${new_run}|cycle=JUL2026|reason=Previous same-cycle run is COMPLETE: new lifecycle created" "$OUT" || rc=96
+run_wrapper create-window; [[ $? -eq 0 ]] || rc=95
+record 'new-run maakt na verifieerbare same-cycle COMPLETE een nieuwe NONE-run' 0 "$rc"
+
+setup_case newrunsamecyclenonterminal; run_wrapper new-run; active_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$active_run" 02_ASSESS_OK ASSESS; context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')
+export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z; run_wrapper new-run; rc=$?
+[[ "$active_run" == "$(json_get "$CONTEXT_ROOT/current_run.json" run_id)" && "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" ]] || rc=99
+grep -q "OPG_NEW_RUN_RESULT|status=REUSED|run_id=${active_run}|cycle=JUL2026" "$OUT" || rc=98
+run_wrapper create-window; [[ $? -eq 20 ]] || rc=97
+record 'new-run vervangt same-cycle niet-terminale run niet' 0 "$rc"
+
+setup_case newrunsamecycleunverified; enable_pilot07_media; run_wrapper new-run; completed_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$completed_run" 12_COMPLETE COMPLETE; printf '20\n' >"$CASE/completion-validation.rc"; context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')
+export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z; run_wrapper new-run; rc=$?
+[[ "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" && ! -e "$CONTEXT_ROOT/archive" ]] || rc=99
+record 'new-run blokkeert onverifieerbare same-cycle COMPLETE' 20 "$rc"
+
+setup_case newruncorruptcontext; run_wrapper new-run; printf '{\n' >"$CONTEXT_ROOT/current_run.json"; chmod 0640 "$CONTEXT_ROOT/current_run.json"; run_wrapper new-run; rc=$?
+[[ ! -e "$CONTEXT_ROOT/archive" ]] || rc=99
+record 'new-run blokkeert corrupte context' 20 "$rc"
+
 # PREPARE gebruikt exact dezelfde vijf veilige contextbeslissingen als new-run.
 setup_case preparecontextcreate; run_wrapper prepare; rc=$?
 grep -q 'OPG_NEW_RUN_RESULT|status=CREATED|' "$OUT" || rc=99

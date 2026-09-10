@@ -586,7 +586,7 @@ valid_new_run_reason() {
 }
 
 archive_context_for_new_run() {
-  local reason=${OPG_NEW_RUN_REASON:-} state old_run old_cycle
+  local reason=${OPG_NEW_RUN_REASON:-} state old_run old_cycle result_status=ROTATED
   load_local_paths
   discover_all
   if [[ ! -e "$CONTEXT_FILE" && ! -L "$CONTEXT_FILE" ]]; then
@@ -604,17 +604,26 @@ archive_context_for_new_run() {
         "$CTX_CYCLE" == "$PATCH_CYCLE" && "$CTX_DB" == "$DB_RU_PATCH_ID" &&
         "$CTX_OJVM" == "$OJVM_PATCH_ID" && "$CTX_OPATCH_VERSION" == "$OPATCH_VERSION" &&
         "$CTX_OPATCH_ZIP" == "$OPATCH_ZIP" && "$CTX_CONFIG" == "$CONFIG_FILE" ]]; then
-    [[ -n "$reason" ]] || reason="Existing OEM run context for ${PATCH_CYCLE} reused"
-    valid_new_run_reason "$reason" || fail "$EXIT_USAGE" CONTEXT 'new-run reden is onveilig (maximaal 160 tekens).'
-    printf 'OPG_NEW_RUN_RESULT|status=REUSED|run_id=%s|cycle=%s|reason=%s\n' "$RUN_ID" "$PATCH_CYCLE" "$reason"
-    return 0
+    state=$(run_state) || fail "$EXIT_UNKNOWN" CONTEXT 'Run-state kon niet worden gelezen.'
+    if [[ "$state" != 12_COMPLETE ]]; then
+      [[ -n "$reason" ]] || reason="Existing OEM run context for ${PATCH_CYCLE} reused"
+      valid_new_run_reason "$reason" || fail "$EXIT_USAGE" CONTEXT 'new-run reden is onveilig (maximaal 160 tekens).'
+      printf 'OPG_NEW_RUN_RESULT|status=REUSED|run_id=%s|cycle=%s|reason=%s\n' "$RUN_ID" "$PATCH_CYCLE" "$reason"
+      return 0
+    fi
+    validate_lifecycle_neutral_context
+    [[ "$LIFECYCLE_CONTEXT_SCOPE" == SAME_CYCLE_COMPLETE ]] ||
+      fail "$EXIT_BLOCKED" CONTEXT 'Same-cycle COMPLETE-context kon niet eenduidig worden gevalideerd.'
+    [[ -n "$reason" ]] || reason='Previous same-cycle run is COMPLETE: new lifecycle created'
+    result_status=CREATED
+  else
+    if [[ "$CTX_CYCLE" == "$PATCH_CYCLE" ]]; then
+      fail "$EXIT_BLOCKED" CONTEXT 'Bestaande context gebruikt dezelfde cycle maar wijkt af in target- of patchmetadata; rotatie is geweigerd.'
+    fi
+    state=$(run_state) || fail "$EXIT_UNKNOWN" CONTEXT 'Run-state kon niet worden gelezen.'
+    case "$state" in 12_COMPLETE|BLOCKED|UNKNOWN|MANUAL_INTERVENTION_REQUIRED) ;; *) fail "$EXIT_BLOCKED" CONTEXT "Context kan niet worden vernieuwd vanuit niet-terminale state ${state}." ;; esac
+    [[ -n "$reason" ]] || reason="Automatic OEM run rotation: ${old_cycle} -> ${PATCH_CYCLE}"
   fi
-  if [[ "$CTX_CYCLE" == "$PATCH_CYCLE" ]]; then
-    fail "$EXIT_BLOCKED" CONTEXT 'Bestaande context gebruikt dezelfde cycle maar wijkt af in target- of patchmetadata; rotatie is geweigerd.'
-  fi
-  state=$(run_state) || fail "$EXIT_UNKNOWN" CONTEXT 'Run-state kon niet worden gelezen.'
-  case "$state" in 12_COMPLETE|BLOCKED|UNKNOWN|MANUAL_INTERVENTION_REQUIRED) ;; *) fail "$EXIT_BLOCKED" CONTEXT "Context kan niet worden vernieuwd vanuit niet-terminale state ${state}." ;; esac
-  [[ -n "$reason" ]] || reason="Automatic OEM run rotation: ${old_cycle} -> ${PATCH_CYCLE}"
   valid_new_run_reason "$reason" || fail "$EXIT_USAGE" CONTEXT 'new-run reden is onveilig (maximaal 160 tekens).'
   derive_new_context
   [[ "$RUN_ID" != "$old_run" ]] || fail "$EXIT_BLOCKED" CONTEXT 'Nieuwe RUN_ID is gelijk aan de terminale oude RUN_ID.'
@@ -622,7 +631,7 @@ archive_context_for_new_run() {
   if ! emit_context_json | sudo_context_helper rotate "$reason"; then fail "$EXIT_UNKNOWN" CONTEXT 'Terminale context kon niet via de begrensde sudo-helper worden geroteerd.'; fi
   read_context_file
   printf 'OPG_CONTEXT_CREATED|run_id=%s|sid=%s|home=%s|cycle=%s\n' "$RUN_ID" "$ORACLE_SID" "$ORACLE_HOME" "$PATCH_CYCLE"
-  printf 'OPG_NEW_RUN_RESULT|status=ROTATED|run_id=%s|cycle=%s|reason=%s\n' "$RUN_ID" "$PATCH_CYCLE" "$reason"
+  printf 'OPG_NEW_RUN_RESULT|status=%s|run_id=%s|cycle=%s|reason=%s\n' "$result_status" "$RUN_ID" "$PATCH_CYCLE" "$reason"
 }
 
 case "$COMMAND" in
