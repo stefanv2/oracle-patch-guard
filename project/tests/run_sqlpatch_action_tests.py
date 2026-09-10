@@ -90,6 +90,13 @@ def check_readiness(scenario):
         assert generated.returncode == 0, generated.stderr
         db_patch, ojvm_patch = PATCHES
         histories = {
+            "target_no_history": [],
+            "target_rollback_success": [
+                (db_patch, "ROLLBACK", "SUCCESS", NEW),
+                (ojvm_patch, "ROLLBACK", "SUCCESS", NEW)],
+            "target_apply_success_binary_absent": [
+                (db_patch, "APPLY", "SUCCESS", NEW),
+                (ojvm_patch, "APPLY", "SUCCESS", NEW)],
             "apply_error_then_success": [
                 (db_patch, "APPLY", "WITH ERRORS", OLD),
                 (db_patch, "APPLY", "SUCCESS", NEW),
@@ -126,10 +133,17 @@ def check_readiness(scenario):
                 (ojvm_patch, "APPLY", "SUCCESS", NEW)],
             "missing_target_status": [
                 (db_patch, "APPLY", "SUCCESS", NEW)],
+            "installed_rollback_success": [
+                (db_patch, "ROLLBACK", "SUCCESS", NEW),
+                (ojvm_patch, "APPLY", "SUCCESS", NEW)],
         }
         rows = select_readiness_rows(work, histories[scenario])
         (work / "readiness_rows").write_text(rows)
-        if scenario in ("superseded_error", "current_inventory_error"):
+        if scenario in ("apply_error_then_success", "rollback_error_then_apply",
+                        "multiple_historical_errors", "installed_rollback_success"):
+            (work / "inventory_before.txt").write_text(
+                "Patch {} : applied\nPatch {} : applied\n".format(db_patch, ojvm_patch))
+        elif scenario in ("superseded_error", "current_inventory_error"):
             (work / "inventory_before.txt").write_text(
                 "Patch 39034528 : applied\nPatch 38906621 : applied\n")
         else:
@@ -138,7 +152,8 @@ def check_readiness(scenario):
             work, "NO",
             'validate_sqlpatch_readiness_output "$RUN_DIR/readiness_rows" '
             '"$RUN_DIR/readiness_evidence"')
-        expected = scenario in ("apply_error_then_success", "rollback_error_then_apply",
+        expected = scenario in ("target_no_history", "target_rollback_success",
+                                "apply_error_then_success", "rollback_error_then_apply",
                                 "superseded_error", "multiple_historical_errors")
         actual = result.returncode == 0
         if actual != expected:
@@ -241,10 +256,12 @@ def main():
                              "extra_field", "partial_extra", "truncated"):
                 if check(scope, route, scenario): passed += 1
                 else: failed += 1
-    for scenario in ("apply_error_then_success", "rollback_error_then_apply",
+    for scenario in ("target_no_history", "target_rollback_success",
+                     "target_apply_success_binary_absent",
+                     "apply_error_then_success", "rollback_error_then_apply",
                      "latest_apply_error", "latest_rollback_error", "superseded_error",
                      "current_inventory_error", "multiple_historical_errors", "conflicting_latest_tie",
-                     "missing_target_status"):
+                     "missing_target_status", "installed_rollback_success"):
         if check_readiness(scenario): passed += 1
         else: failed += 1
     print("SQLPATCH ACTION results: {} passed, {} failed".format(passed, failed))

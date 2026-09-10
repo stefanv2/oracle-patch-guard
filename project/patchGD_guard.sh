@@ -561,8 +561,8 @@ inventory_contains_patch() {
 
 validate_sqlpatch_readiness_output() {
   local source=$1 evidence=$2 inventory=${3:-${RUN_DIR}/inventory_before.txt}
-  local line tag patch_id action status action_time extra record is_target
-  local blocked=0 unknown=0 relevant=0 target_relevant=0
+  local line tag patch_id action status action_time extra record is_target is_installed
+  local blocked=0 unknown=0 relevant=0
   local -A seen=()
   : >"$evidence"
   [[ -r "$source" ]] || { printf 'UNKNOWN|reason=registry_output_unreadable\n' >"$evidence"; return 3; }
@@ -576,13 +576,14 @@ validate_sqlpatch_readiness_output() {
     IFS='|' read -r tag patch_id action status action_time extra <<<"$line"
     is_target=false
     [[ "$patch_id" == "$DB_PATCH" || "$patch_id" == "$OJVM_PATCH" ]] && is_target=true
-    if [[ "$is_target" == false ]] && ! inventory_contains_patch "$inventory" "$patch_id"; then
+    is_installed=false
+    inventory_contains_patch "$inventory" "$patch_id" && is_installed=true
+    if [[ "$is_target" == false && "$is_installed" == false ]]; then
       [[ "$action" == APPLY && "$status" == SUCCESS ]] ||
         printf 'HISTORICAL|patch_id=%s|action=%s|status=%s|action_time=%s\n' "$patch_id" "$action" "$status" "$action_time" >>"$evidence"
       continue
     fi
     relevant=$((relevant + 1))
-    [[ "$is_target" == true ]] && target_relevant=$((target_relevant + 1))
     record="${action}|${status}|${action_time}"
     if [[ -n ${seen[$patch_id]+x} && ${seen[$patch_id]} != "$record" ]]; then
       printf 'BLOCKED|reason=ambiguous_latest_state|patch_id=%s|first=%s|second=%s\n' "$patch_id" "${seen[$patch_id]}" "$record" >>"$evidence"
@@ -590,25 +591,20 @@ validate_sqlpatch_readiness_output() {
       continue
     fi
     seen[$patch_id]=$record
-    if [[ "$action" == APPLY && "$status" == SUCCESS ]]; then
+    if [[ "$is_installed" == true && "$action" == APPLY && "$status" == SUCCESS ]]; then
       printf 'READY|patch_id=%s|action=APPLY|status=SUCCESS|action_time=%s\n' "$patch_id" "$action_time" >>"$evidence"
+    elif [[ "$is_installed" == false && "$is_target" == true && "$action" == ROLLBACK && "$status" == SUCCESS ]]; then
+      printf 'READY|reason=target_not_installed|patch_id=%s|action=ROLLBACK|status=SUCCESS|action_time=%s\n' "$patch_id" "$action_time" >>"$evidence"
+    elif [[ "$is_installed" == false && "$is_target" == true && "$action" == APPLY && "$status" == SUCCESS ]]; then
+      printf 'BLOCKED|reason=binary_sql_mismatch|patch_id=%s|action=APPLY|status=SUCCESS|action_time=%s\n' "$patch_id" "$action_time" >>"$evidence"
+      blocked=1
     else
-      printf 'BLOCKED|reason=current_state_not_apply_success|patch_id=%s|action=%s|status=%s|action_time=%s\n' "$patch_id" "$action" "$status" "$action_time" >>"$evidence"
+      printf 'BLOCKED|reason=current_state_inconsistent|patch_id=%s|binary_installed=%s|action=%s|status=%s|action_time=%s\n' "$patch_id" "$is_installed" "$action" "$status" "$action_time" >>"$evidence"
       blocked=1
     fi
   done <"$source"
   [[ -z "$line" ]] || { printf 'UNKNOWN|reason=unterminated_registry_output\n' >>"$evidence"; unknown=1; }
   (( relevant > 0 )) || printf 'READY|reason=no_relevant_patch_history\n' >>"$evidence"
-  if (( target_relevant > 0 )); then
-    if [[ -z ${seen[$DB_PATCH]+x} ]]; then
-      printf 'BLOCKED|reason=missing_target_status|patch_id=%s\n' "$DB_PATCH" >>"$evidence"
-      blocked=1
-    fi
-    if [[ -n "$OJVM_PATCH" && -z ${seen[$OJVM_PATCH]+x} ]]; then
-      printf 'BLOCKED|reason=missing_target_status|patch_id=%s\n' "$OJVM_PATCH" >>"$evidence"
-      blocked=1
-    fi
-  fi
   (( blocked == 0 )) || return 2
   (( unknown == 0 )) || return 3
   return 0
@@ -619,7 +615,7 @@ assess_sqlpatch_readiness() {
   validate_sqlpatch_readiness_output "$source" "$evidence"; rc=$?
   case "$rc" in
     0) return 0 ;;
-    2) opg_add_finding BLOCKED SQLPATCH_ERROR "De laatste relevante SQL patchtoestand is niet eenduidig APPLY/SUCCESS." "$evidence" ;;
+    2) opg_add_finding BLOCKED SQLPATCH_ERROR "De laatste relevante SQL patchtoestand is niet consistent met de binary inventory en targetstatus." "$evidence" ;;
     *) opg_add_finding UNKNOWN SQLPATCH_STATE_UNKNOWN "De actuele SQL patchtoestand kon niet betrouwbaar worden geïnterpreteerd." "$evidence" ;;
   esac
   return "$rc"
