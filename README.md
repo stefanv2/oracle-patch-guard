@@ -38,8 +38,12 @@ PRECHECK is functioneel een vroege veiligheidscontrole, maar bij
 PRECHECK vóór staging mag fail-closed blokkeren met `MEDIA_STAGE_UNAVAILABLE`.
 `stage-media` en PRECHECK maken of wijzigen geen formele runcontext. `new-run`
 is de idempotente eerste formele OEM-stap: hij maakt de initiële
-context, hergebruikt een exact gelijke context of roteert uitsluitend een
-conflicterende terminale context met een auditreden.
+context, hergebruikt een passende actieve context of roteert een toegestane
+terminale context met een auditreden.
+Een cryptografisch bewezen `12_COMPLETE`-context van dezelfde actieve cycle
+blijft voor `stage-media` en PRECHECK byte-identiek, maar wordt bij een
+expliciete nieuwe PLAN-lifecycle niet hergebruikt. `new-run` archiveert hem en
+maakt een unieke nieuwe context die effectief op state `NONE` begint.
 PRECHECK kan later opnieuw worden uitgevoerd als last-minute readiness-check
 vóór APPLY. Hij maakt geen formeel manifest, wijzigt de actieve runcontext niet,
 autoriseert APPLY niet en vervangt de pre-apply-hercontrole binnen APPLY niet.
@@ -113,6 +117,15 @@ descriptorfix eindigde de automatische lokale media-cleanup aantoonbaar op
 `PURGED`; een tweede JUL2026-prepare hergebruikte dezelfde context als
 `REUSED`.
 
+### First successful parallel multi-host OEM patch run - 2026-09-10
+
+Een parallelle OEM-run is succesvol afgerond op `SV2210205 / d000084p`
+(non-CDB) en `sv2210620 / d001pcdb` (CDB met PDB). Beide doorliepen PLAN,
+centrale APPROVE, APPLY, VALIDATE en COMPLETE en eindigden op `12_COMPLETE`,
+exitcode 0 en OEM-status `Succeeded`. De doorlooptijden waren 22m04s en 22m20s.
+Iedere target gebruikte zijn eigen RUN_ID, state en logdirectory; de centrale
+approvaltaak verwerkte de onafhankelijke READY-runs gezamenlijk.
+
 ## Repository-indeling
 
 - `project/` — Patch Guard-core, controles, OEM-wrappers, fixtures en tests;
@@ -175,6 +188,18 @@ De gedeployde `current`-link moet verwijzen naar een immutable, gevalideerde
 release-directory. Plaats geen ad-hocfixes in `current`. Bereid toekomstige
 wijzigingen voor en test ze in een afzonderlijke RC/release-directory, leg de
 evidence vast en verplaats `current` pas daarna naar die immutable release.
+
+Controleer op een target welke wrapper werkelijk actief is zonder config of
+Oracle-discovery te starten:
+
+```bash
+/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh version
+```
+
+`OPG_VERSION|release=...|wrapper_sha256=...` toont de opgeloste immutable
+release-directory en de SHA256 van het werkelijk uitgevoerde script. Een
+commit-ID wordt niet geraden: daarvoor is betrouwbare build-time
+releasemetadata nodig; productie gebruikt nooit `.git` als runtimebron.
 
 ## Belangrijke beperkingen
 

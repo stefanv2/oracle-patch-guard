@@ -199,6 +199,15 @@ Tussen `prepare` en de eerste formele core-state kan een geldige context bewust
 kort zonder run-directory bestaan. Daarom ruimt OPG een ontbrekende of corrupte
 run-directory nooit automatisch op; cross-cycle gebruik blijft fail-closed.
 
+Voor exact dezelfde actieve cycle geldt één aanvullende grens. Een context met
+state `NONE` of een niet-terminale state behoudt het bestaande hergebruik;
+vervolgstappen blijven zelf hun exacte state eisen. Een `12_COMPLETE`-context
+wordt bij een expliciete nieuwe PLAN-lifecycle eerst via de bestaande
+cryptografische completionvalidator gecontroleerd, daarna gearchiveerd en
+atomisch vervangen door een unieke context die effectief op `NONE` begint. De
+oude run-state en history blijven intact. `create-window` blijft uitsluitend
+`NONE` accepteren en accepteert nooit de oude COMPLETE-state.
+
 ## OEM-tasks
 
 Voor een volledig nieuwe cycle is de lifecycle-neutrale readinessvolgorde:
@@ -291,9 +300,30 @@ Optionele diagnose, niet automatisch onderdeel van APPLY:
 ```bash
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh approval-check
 /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh show-context
+/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh version
 ```
 
+`version` leest geen configuratie of Oracle-state en toont
+`OPG_VERSION|release=<release-directory>|wrapper_sha256=<sha256>`. De release
+wordt afgeleid van het volledig opgeloste scriptpad, zodat een aanroep via
+`current` de werkelijk gebruikte immutable release benoemt. Er is geen runtime
+afhankelijkheid van `.git`.
+
 `plan` bewaart de core-exitcode en gebruikt de bestaande result-summary wanneer die aanwezig is. `apply` leidt manifest en token af als `approvals/<RUN_ID>/patch_manifest.json` en `approval.json`; de bestaande apply/core blijft fail-closed verantwoordelijk voor leesbaarheid, signatures, binding en preapply. Completion-publicatie gebeurt pas na core-exit 0 en veroorzaakt nooit automatische patchrollback.
+
+Zonder een geldige PLAN-context voor de actieve cycle blokkeert APPLY met
+exitcode 20 en deze actiegerichte output:
+
+```text
+OPG OEM BLOCKED: APPLY vereist eerst een geldige PLAN-run voor de actieve patchcycle.
+OPG_OEM_RESULT|status=BLOCKED|phase=CONTEXT|reason=PLAN_CONTEXT_MISSING|exit_code=20
+```
+
+Een aanwezige context met een echte target-, cycle- of
+configuratiemetadata-afwijking krijgt
+`reason=CONTEXT_METADATA_MISMATCH`; corrupte of onleesbare context blijft via
+het afzonderlijke fail-closed pad geblokkeerd. APPLY start nooit automatisch
+PLAN.
 
 ## Meerdere targets en signing
 
@@ -312,6 +342,10 @@ uitsluitend de interactieve bevestiging; de bestaande selectie, per-run
 hercontrole, single-run signer en cryptografische post-verificatie blijven
 actief. De task verwerkt geldige READY-runs onafhankelijk en toont de compacte
 `OPG_APPROVAL_RESULT`-eindregel naast de bestaande menselijk leesbare output.
+Approval ondertekent de centrale artifacts, maar verandert de lokale
+`execution_state.json` niet van `03_PLAN_GENERATED`. APPLY consumeert en
+verifieert de signed approval later en voert daarna pas de bestaande
+pre-apply-hercontrole uit.
 
 ## Migratie en rollback
 

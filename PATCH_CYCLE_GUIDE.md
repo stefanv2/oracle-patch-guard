@@ -196,12 +196,23 @@ PRECHECK start de formele lifecycle met `new-run` en `prepare`. `new-run`
 ontdekt de actieve SID en exacte Oracle Home. Als nog geen context
 bestaat, maakt deze stap de formele RUN_ID/context in
 `/var/lib/oracle-patch-guard/current_run.json`. Een exact passende context
-wordt ongewijzigd hergebruikt. Alleen een terminale context van een andere
-cycle wordt veilig gearchiveerd en vervangen. Zonder expliciete
+wordt hergebruikt zolang deze niet `12_COMPLETE` is; niet-terminale stateguards
+blijven ongewijzigd. Een aantoonbaar geldige `12_COMPLETE`-context van dezelfde
+cycle wordt voor een expliciete nieuwe PLAN-lifecycle veilig gearchiveerd en
+door een unieke context op state `NONE` vervangen. Daarmee wordt de oude
+COMPLETE-run nooit aan `create-window` aangeboden, dat strikt `NONE` blijft
+eisen. Ook een terminale context van een andere cycle wordt volgens de
+bestaande regels veilig gearchiveerd en vervangen. Zonder expliciete
 `OPG_NEW_RUN_REASON` gebruikt OPG bijvoorbeeld:
 
 ```text
 Automatic OEM run rotation: APR2026 -> JUL2026
+```
+
+Voor een nieuwe lifecycle na dezelfde COMPLETE cycle is de automatische reden:
+
+```text
+Previous same-cycle run is COMPLETE: new lifecycle created
 ```
 
 `prepare` voert vervolgens de hostvoorbereiding uit en hergebruikt exact die
@@ -333,6 +344,10 @@ Oracle Home en cyclemetadata. `prepare` en alle vervolgfases moeten exact
 dezelfde context hergebruiken.
 PRECHECK gebruikt een afzonderlijke tijdelijke RUN_ID en wijzigt
 `current_run.json` niet.
+Dat geldt ook bij een cryptografisch bewezen same-cycle `12_COMPLETE`-context:
+PRECHECK en `stage-media` blijven lifecycle-neutraal en laten de context
+byte-identiek. Alleen de expliciete `new-run` voor een nieuwe formele lifecycle
+roteert deze context.
 
 ### Manifest en signing
 
