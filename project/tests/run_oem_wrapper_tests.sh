@@ -152,6 +152,14 @@ EOF
   export OPG_TEST_MEDIA_STAGE_HELPER="$MEDIA_HELPER" OPG_TEST_MEDIA_STAGE_HELPER_OWNER OPG_TEST_MEDIA_STAGE_HELPER_GROUP OPG_TEST_MEDIA_STAGE_HELPER_PARENT_STOP="$LOCAL_SBIN"
 }
 
+# Read-only versie-identificatie werkt vóór config en discovery.
+setup_case version; rm "$CONFIG"; run_wrapper version; rc=$?; expected_wrapper_hash=$(sha256sum "$WRAPPER" | awk '{print $1}')
+grep -Fxq "OPG_VERSION|release=$(basename "$ROOT")|wrapper_sha256=${expected_wrapper_hash}" "$OUT" || rc=99
+ln -s "$ROOT" "$CASE/release-current"; /bin/bash "$CASE/release-current/oem-tasks/opg_oem.sh" version >"$OUT" 2>&1 || rc=97
+grep -Fxq "OPG_VERSION|release=$(basename "$ROOT")|wrapper_sha256=${expected_wrapper_hash}" "$OUT" || rc=96
+[[ ! -e "$CONTEXT_ROOT/current_run.json" ]] || rc=98
+record 'version toont werkelijk wrapperhash en release zonder contextmutatie' 0 "$rc"
+
 # 1. Correcte cycle discovery.
 setup_case cycleok; run_wrapper prepare; rc=$?; context="$CONTEXT_ROOT/current_run.json"
 [[ "$(json_get "$context" patch_cycle)" == JUL2026 && "$(json_get "$context" db_ru_patch_id)" == 39472050 && "$(json_get "$context" opatch_zip)" == p6880880_190000_Linux-x86-64.zip ]] || rc=99

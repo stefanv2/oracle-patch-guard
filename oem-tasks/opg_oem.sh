@@ -32,14 +32,31 @@ fail() {
 }
 
 usage() {
-  printf 'Gebruik: %s {precheck|prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run|cleanup-stage --run-id RUN_ID}\n' "$SCRIPT_NAME" >&2
+  printf 'Gebruik: %s {version|precheck|prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run|cleanup-stage --run-id RUN_ID}\n' "$SCRIPT_NAME" >&2
   exit "$EXIT_USAGE"
 }
 
 case "$COMMAND" in
-  precheck|prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run|cleanup-stage) ;;
+  version|precheck|prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run|cleanup-stage) ;;
   *) usage ;;
 esac
+
+emit_version() {
+  local script_path release_root release_id wrapper_sha256
+  script_path=$(readlink -f -- "$0" 2>/dev/null) || fail "$EXIT_UNKNOWN" VERSION 'Wrapperpad kon niet betrouwbaar worden opgelost.'
+  [[ -f "$script_path" && -r "$script_path" && ! -L "$script_path" ]] || fail "$EXIT_UNKNOWN" VERSION 'Uitgevoerde wrapper is niet veilig leesbaar.'
+  wrapper_sha256=$(sha256sum -- "$script_path" 2>/dev/null | awk '{print $1}') || fail "$EXIT_UNKNOWN" VERSION 'Wrapper-SHA256 kon niet worden berekend.'
+  [[ "$wrapper_sha256" =~ ^[a-f0-9]{64}$ ]] || fail "$EXIT_UNKNOWN" VERSION 'Wrapper-SHA256 is ongeldig.'
+  release_root=$(cd -P -- "${script_path%/*}/.." 2>/dev/null && pwd -P) || fail "$EXIT_UNKNOWN" VERSION 'Release-root kon niet betrouwbaar worden opgelost.'
+  release_id=${release_root##*/}
+  [[ "$release_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || fail "$EXIT_UNKNOWN" VERSION 'Release-identificatie is ongeldig.'
+  printf 'OPG_VERSION|release=%s|wrapper_sha256=%s\n' "$release_id" "$wrapper_sha256"
+}
+
+if [[ "$COMMAND" == version ]]; then
+  emit_version
+  exit 0
+fi
 
 trim() {
   local value=$1
