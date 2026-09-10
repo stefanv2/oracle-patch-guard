@@ -190,6 +190,26 @@ setup_case planroute; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current
 setup_case stageroute; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; run_wrapper stage; rc=$?; grep -q "^stage|${run}$" "$CASE/routes.log" || rc=99; record 'stage routing' 0 "$rc"
 setup_case applyroute; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; prepare_approval_run "$run"; run_wrapper apply; rc=$?; grep -q "^apply|sid=DB1|home=${HOME_DIR}|args=${run} ${OPG_ROOT}/approvals/${run}/patch_manifest.json ${OPG_ROOT}/approvals/${run}/approval.json ${CONFIG}$" "$CASE/routes.log" || rc=99; [[ -f "$OPG_ROOT/approvals/$run/completion.json" && $(json_get "$OPG_ROOT/approvals/$run/completion.json" run_id) == "$run" ]] || rc=98; grep -q "OPG_COMPLETION_PUBLISH|run_id=${run}|status=SUCCESS" "$OUT" || rc=97; record 'succesvolle apply publiceert rungebonden completion' 0 "$rc"
 
+setup_case applywithoutplan; run_wrapper apply; rc=$?
+grep -Fq 'OPG OEM BLOCKED: APPLY vereist eerst een geldige PLAN-run voor de actieve patchcycle.' "$OUT" || rc=99
+grep -Fq 'OPG_OEM_RESULT|status=BLOCKED|phase=CONTEXT|reason=PLAN_CONTEXT_MISSING|exit_code=20' "$OUT" || rc=98
+record 'APPLY zonder context meldt ontbrekende PLAN-context' 20 "$rc"
+
+setup_case applyhistoricalcontext; activate_cycle APR2026 39034528 38906621; run_wrapper prepare; historical_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$historical_run" 12_COMPLETE COMPLETE; activate_cycle JUL2026 39472050 39222882; run_wrapper apply; rc=$?
+grep -Fq 'OPG OEM BLOCKED: APPLY vereist eerst een geldige PLAN-run voor de actieve patchcycle.' "$OUT" || rc=99
+grep -Fq 'reason=PLAN_CONTEXT_MISSING' "$OUT" || rc=98
+record 'APPLY met historische cycle meldt ontbrekende actieve PLAN-context' 20 "$rc"
+
+setup_case applymetadatamismatch; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; sed -i 's/39472050/39472051/' "$CONTEXT_ROOT/current_run.json"; run_wrapper apply; rc=$?
+grep -Fq 'reason=CONTEXT_METADATA_MISMATCH' "$OUT" || rc=99
+if grep -Fq 'reason=PLAN_CONTEXT_MISSING' "$OUT"; then rc=98; fi
+record 'APPLY classificeert echte metadata-afwijking afzonderlijk' 20 "$rc"
+
+setup_case applycorruptcontext; run_wrapper prepare; printf '{\n' >"$CONTEXT_ROOT/current_run.json"; chmod 0640 "$CONTEXT_ROOT/current_run.json"; run_wrapper apply; rc=$?
+if grep -Fq 'reason=PLAN_CONTEXT_MISSING' "$OUT"; then rc=99; fi
+grep -Fq 'RUN_ID ontbreekt in current_run.json.' "$OUT" || rc=98
+record 'APPLY met corrupte context blijft afzonderlijk fail-closed' 20 "$rc"
+
 setup_case applycleanup; enable_pilot07_media; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; prepare_approval_run "$run"; run_wrapper apply; rc=$?; grep -q "media-stage|purge-run ${run}" "$CASE/routes.log" || rc=99; grep -q 'completion=PUBLISHED|cleanup=PURGED' "$OUT" || rc=98; record 'succesvolle completion start automatisch gedeelde stage-cleanup' 0 "$rc"
 run_wrapper_args cleanup-stage --run-id "$run"; rc=$?; grep -q "media-stage|purge-run ${run}" "$CASE/routes.log" || rc=99; record 'handmatige cleanup-stage gebruikt dezelfde begrensde purge-engine' 0 "$rc"
 

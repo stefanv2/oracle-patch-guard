@@ -20,10 +20,14 @@ elif [[ $# -ne 1 ]]; then
 fi
 
 fail() {
-  local code=$1 phase=$2 message=$3 status=BLOCKED
+  local code=$1 phase=$2 message=$3 reason=${4:-} status=BLOCKED
   (( code == EXIT_UNKNOWN )) && status=UNKNOWN
   printf 'OPG OEM %s: %s\n' "$status" "$message" >&2
-  printf 'OPG_OEM_RESULT|status=%s|phase=%s|exit_code=%s\n' "$status" "$phase" "$code"
+  if [[ -n "$reason" ]]; then
+    printf 'OPG_OEM_RESULT|status=%s|phase=%s|reason=%s|exit_code=%s\n' "$status" "$phase" "$reason" "$code"
+  else
+    printf 'OPG_OEM_RESULT|status=%s|phase=%s|exit_code=%s\n' "$status" "$phase" "$code"
+  fi
   exit "$code"
 }
 
@@ -317,11 +321,19 @@ read_context_file() {
   [[ "$RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] || fail "$EXIT_BLOCKED" CONTEXT 'RUN_ID in context is ongeldig.'
 }
 
+fail_context_metadata_mismatch() {
+  local message=$1
+  if [[ "$COMMAND" == apply ]]; then
+    fail "$EXIT_BLOCKED" CONTEXT "$message" CONTEXT_METADATA_MISMATCH
+  fi
+  fail "$EXIT_BLOCKED" CONTEXT "$message"
+}
+
 validate_context_file() {
   read_context_file
-  [[ "$CTX_SHORT_HOST" == "$SHORT_HOST" && "$CTX_FQDN" == "$FQDN" && "$CTX_SID" == "$ORACLE_SID" && "$CTX_HOME" == "$ORACLE_HOME" ]] || fail "$EXIT_BLOCKED" CONTEXT 'Opgeslagen targetcontext wijkt af van verse discovery.'
-  [[ "$CTX_CYCLE" == "$PATCH_CYCLE" && "$CTX_DB" == "$DB_RU_PATCH_ID" && "$CTX_OJVM" == "$OJVM_PATCH_ID" && "$CTX_OPATCH_VERSION" == "$OPATCH_VERSION" && "$CTX_OPATCH_ZIP" == "$OPATCH_ZIP" ]] || fail "$EXIT_BLOCKED" CONTEXT 'Opgeslagen patchcyclecontext wijkt af van centrale metadata.'
-  [[ "$CTX_CONFIG" == "$CONFIG_FILE" ]] || fail "$EXIT_BLOCKED" CONTEXT 'Opgeslagen configpad wijkt af.'
+  [[ "$CTX_SHORT_HOST" == "$SHORT_HOST" && "$CTX_FQDN" == "$FQDN" && "$CTX_SID" == "$ORACLE_SID" && "$CTX_HOME" == "$ORACLE_HOME" ]] || fail_context_metadata_mismatch 'Opgeslagen targetcontext wijkt af van verse discovery.'
+  [[ "$CTX_CYCLE" == "$PATCH_CYCLE" && "$CTX_DB" == "$DB_RU_PATCH_ID" && "$CTX_OJVM" == "$OJVM_PATCH_ID" && "$CTX_OPATCH_VERSION" == "$OPATCH_VERSION" && "$CTX_OPATCH_ZIP" == "$OPATCH_ZIP" ]] || fail_context_metadata_mismatch 'Opgeslagen patchcyclecontext wijkt af van centrale metadata.'
+  [[ "$CTX_CONFIG" == "$CONFIG_FILE" ]] || fail_context_metadata_mismatch 'Opgeslagen configpad wijkt af.'
 }
 
 ensure_context_root() {
@@ -419,6 +431,24 @@ load_or_create_context() {
   if [[ -e "$CONTEXT_FILE" ]]; then validate_context_file
   else fail "$EXIT_BLOCKED" CONTEXT "Geen actieve run-context; start eerst prepare, create-window of assess."
   fi
+}
+
+load_apply_plan_context() {
+  local actual
+  discover_all
+  if [[ ! -e "$CONTEXT_FILE" && ! -L "$CONTEXT_FILE" ]]; then
+    fail "$EXIT_BLOCKED" CONTEXT 'APPLY vereist eerst een geldige PLAN-run voor de actieve patchcycle.' PLAN_CONTEXT_MISSING
+  fi
+  read_context_file
+  if [[ "$CTX_SHORT_HOST" == "$SHORT_HOST" && "$CTX_FQDN" == "$FQDN" &&
+        "$CTX_SID" == "$ORACLE_SID" && "$CTX_HOME" == "$ORACLE_HOME" &&
+        "$CTX_CYCLE" != "$PATCH_CYCLE" ]]; then
+    fail "$EXIT_BLOCKED" CONTEXT 'APPLY vereist eerst een geldige PLAN-run voor de actieve patchcycle.' PLAN_CONTEXT_MISSING
+  fi
+  validate_context_file
+  actual=$(run_state) || fail "$EXIT_UNKNOWN" CONTEXT 'Run-state kon niet betrouwbaar worden gelezen.'
+  [[ "$actual" == 03_PLAN_GENERATED ]] ||
+    fail "$EXIT_BLOCKED" CONTEXT 'APPLY vereist eerst een geldige PLAN-run voor de actieve patchcycle.' PLAN_CONTEXT_MISSING
 }
 
 require_script() {
@@ -640,7 +670,7 @@ case "$COMMAND" in
     OPG_STAGE_APPROVAL_ROOT="$APPROVAL_ROOT" /bin/bash "$STAGE_SCRIPT" "$RUN_ID"
     ;;
   apply)
-    load_or_create_context false; require_state 03_PLAN_GENERATED; require_script "$APPLY_SCRIPT" apply
+    load_apply_plan_context; require_script "$APPLY_SCRIPT" apply
     rc=0
     clean_oracle_env /bin/bash "$APPLY_SCRIPT" "$RUN_ID" "${APPROVAL_ROOT}/${RUN_ID}/patch_manifest.json" "${APPROVAL_ROOT}/${RUN_ID}/approval.json" "$CONFIG_FILE" || rc=$?
     (( rc == 0 )) || exit "$rc"
