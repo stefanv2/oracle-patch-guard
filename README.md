@@ -136,8 +136,7 @@ approvaltaak verwerkte de onafhankelijke READY-runs gezamenlijk.
   patchcycle;
 - `TEST_ROADMAP.md` — praktijkgerichte acceptatietest voor DBA's;
 - `tools/` — standalone benchmark voor hashing;
-- `PILOT07_*.md`, `TREE_HASH_V2_SPEC.md` — documentatie over ontwerp, security
-  en validatie.
+- `docs/` — afbeeldingen en gearchiveerde ontwerp- en validatie-evidence.
 
 Site-specifieke waarden horen thuis in een beveiligde lokale configuratie die
 is gekopieerd van `project/patchGD_guard.conf.example`. De repository bevat
@@ -174,9 +173,7 @@ sudo bash tests/run_bootstrap_tests.sh
 
 De op 2026-09-07 gevalideerde kandidaat heeft 637/637 geslaagde regressietests,
 inclusief de gerichte bootstrap-, contextrotatie- en media-lock-FD-tests. De
-oorspronkelijke evidence van de publieke Pilot07-release blijft beschikbaar in
-`PILOT07_VALIDATION_REPORT.md` en `PUBLIC_RELEASE_AUDIT.md`; de validatie van
-completion-publicatie is gedocumenteerd in
+validatie van completion-publicatie is gedocumenteerd in
 `COMPLETION_PUBLICATION_VALIDATION_REPORT.md` en de validatie van
 configgedreven deploymentpaden in `DEPLOYMENT_PATH_VALIDATION_REPORT.md`.
 De automatische verwijdering van uitsluitend lokale execution-media na een
