@@ -259,3 +259,9 @@ stage-policy.
   — completion-publicatie en signerclassificatie;
 - `docs/pilot07/` — uitsluitend historische ontwerp- en pilotevidence; gebruik
   deze map niet als huidig deploymentrunbook.
+
+## Optionele OEM-blackoutintegratie
+
+De bestaande Host-based flow blijft standaard ongewijzigd (`disabled`).
+Voor installatie, configuratie en de vijfminutentest zonder APPLY, zie
+[OEM blackout orchestration](docs/BLACKOUT_ORCHESTRATION.md).

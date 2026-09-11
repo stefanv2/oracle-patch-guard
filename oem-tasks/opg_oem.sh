@@ -13,8 +13,17 @@ export PATH=$SAFE_PATH
 SCRIPT_NAME=${0##*/}
 COMMAND=${1:-}
 CLEANUP_RUN_ID=
+BLACKOUT_RUN_ID=
+BLACKOUT_DURATION=
+EXPECTED_RUN_ID=
 if [[ "$COMMAND" == cleanup-stage && $# -eq 3 && ${2:-} == --run-id ]]; then
   CLEANUP_RUN_ID=$3
+elif [[ "$COMMAND" == blackout-stop && $# -eq 3 && ${2:-} == --run-id ]]; then
+  BLACKOUT_RUN_ID=$3
+elif [[ "$COMMAND" == blackout-start && $# -eq 3 && ${2:-} == --duration ]]; then
+  BLACKOUT_DURATION=$3
+elif [[ "$COMMAND" == apply && $# -eq 3 && ${2:-} == --run-id ]]; then
+  EXPECTED_RUN_ID=$3
 elif [[ $# -ne 1 ]]; then
   COMMAND=
 fi
@@ -32,12 +41,12 @@ fail() {
 }
 
 usage() {
-  printf 'Gebruik: %s {version|precheck|prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run|cleanup-stage --run-id RUN_ID}\n' "$SCRIPT_NAME" >&2
+  printf 'Gebruik: %s {version|precheck|prepare|stage-media|create-window|assess|plan|stage|apply [--run-id RUN_ID]|blackout-start [--duration HH:MM]|blackout-stop --run-id RUN_ID|publish-completion|approval-check|show-context|new-run|cleanup-stage --run-id RUN_ID}\n' "$SCRIPT_NAME" >&2
   exit "$EXIT_USAGE"
 }
 
 case "$COMMAND" in
-  version|precheck|prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run|cleanup-stage) ;;
+  version|precheck|prepare|stage-media|create-window|assess|plan|stage|apply|publish-completion|approval-check|show-context|new-run|cleanup-stage|blackout-start|blackout-stop) ;;
   *) usage ;;
 esac
 
@@ -145,6 +154,7 @@ CORE_SCRIPT=${PROJECT_ROOT}/patchGD_guard.sh
 APPLY_SCRIPT=${PROJECT_ROOT}/oem_apply.sh
 APPROVAL_CHECK_SCRIPT=${PROJECT_ROOT}/oem_approval_check.sh
 SUMMARY_SCRIPT=${PROJECT_ROOT}/lib/opg_result_summary_v1.1.sh
+BLACKOUT_SCRIPT=${TASK_ROOT}/opg_blackout.py
 
 PATCH_ROOT=
 OPATCH_ROOT=
@@ -162,7 +172,7 @@ require_safe_file() {
 }
 
 load_local_paths() {
-  local raw key value line_no=0
+  local raw key value line_no=0 scope=${1:-all}
   declare -A seen=()
   [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] || fail "$EXIT_BLOCKED" CONFIG "Centrale Patch Guard-config ontbreekt of is onveilig: ${CONFIG_FILE}"
   while IFS= read -r raw || [[ -n "$raw" ]]; do
@@ -171,6 +181,7 @@ load_local_paths() {
     [[ -n "$raw" && ${raw:0:1} != '#' ]] || continue
     [[ "$raw" == *=* ]] || continue
     key=$(trim "${raw%%=*}"); value=$(trim "${raw#*=}")
+    [[ "$scope" != cleanup || "$key" == RUN_ROOT ]] || continue
     if [[ "$value" == '"'*'"' && ${#value} -ge 2 ]]; then value=${value:1:${#value}-2}; fi
     case "$key" in
       PATCH_ROOT|OPATCH_ROOT|RUN_ROOT|ORATAB_FILE)
@@ -186,6 +197,10 @@ load_local_paths() {
       *) ;;
     esac
   done <"$CONFIG_FILE"
+  if [[ "$scope" == cleanup ]]; then
+    [[ -n ${seen[RUN_ROOT]+x} ]] || fail "$EXIT_BLOCKED" CONFIG 'Verplichte configsleutel ontbreekt: RUN_ROOT.'
+    return
+  fi
   for key in PATCH_ROOT OPATCH_ROOT RUN_ROOT; do
     [[ -n ${seen[$key]+x} ]] || fail "$EXIT_BLOCKED" CONFIG "Verplichte configsleutel ontbreekt: ${key}."
   done
@@ -651,7 +666,23 @@ archive_context_for_new_run() {
   printf 'OPG_NEW_RUN_RESULT|status=%s|run_id=%s|cycle=%s|reason=%s\n' "$result_status" "$RUN_ID" "$PATCH_CYCLE" "$reason"
 }
 
+blackout_call() {
+  require_script "$BLACKOUT_SCRIPT" blackout
+  python3 -B "$BLACKOUT_SCRIPT" "$@" --config "$CONFIG_FILE"
+}
+
 case "$COMMAND" in
+  blackout-start)
+    load_apply_plan_context
+    blackout_args=(start --run-id "$RUN_ID" --run-root "$RUN_ROOT" --host "$FQDN" --sid "$ORACLE_SID" --home "$ORACLE_HOME")
+    [[ -z "$BLACKOUT_DURATION" ]] || blackout_args+=(--duration "$BLACKOUT_DURATION")
+    blackout_call "${blackout_args[@]}"
+    ;;
+  blackout-stop)
+    [[ -n "$BLACKOUT_RUN_ID" ]] || fail "$EXIT_USAGE" BLACKOUT 'blackout-stop vereist --run-id van de START-uitvoering.'
+    load_local_paths cleanup
+    blackout_call stop --run-id "$BLACKOUT_RUN_ID" --run-root "$RUN_ROOT"
+    ;;
   precheck)
     run_precheck
     ;;
@@ -697,6 +728,15 @@ case "$COMMAND" in
     ;;
   apply)
     load_apply_plan_context; require_script "$APPLY_SCRIPT" apply
+    # Missing mode preserves old deployments, including old task bundles.
+    [[ -z "$EXPECTED_RUN_ID" || "$EXPECTED_RUN_ID" == "$RUN_ID" ]] || fail "$EXIT_BLOCKED" BLACKOUT 'Verwachte APPLY-run wijkt af van actieve context.' BLACKOUT_RUN_MISMATCH
+    if grep -Eq '^[[:space:]]*OEM_BLACKOUT_MODE[[:space:]]*=' "$CONFIG_FILE"; then
+      blackout_mode=$(blackout_call mode) || exit $?
+      if [[ "$blackout_mode" == required ]]; then
+        [[ "$EXPECTED_RUN_ID" == "$RUN_ID" ]] || fail "$EXIT_BLOCKED" BLACKOUT 'Blackout-required APPLY vereist de vastgepinde --run-id van START.' BLACKOUT_RUN_ID_REQUIRED
+        blackout_call guard --run-id "$RUN_ID" --run-root "$RUN_ROOT" --host "$FQDN" --sid "$ORACLE_SID" --home "$ORACLE_HOME" || exit $?
+      fi
+    fi
     rc=0
     clean_oracle_env /bin/bash "$APPLY_SCRIPT" "$RUN_ID" "${APPROVAL_ROOT}/${RUN_ID}/patch_manifest.json" "${APPROVAL_ROOT}/${RUN_ID}/approval.json" "$CONFIG_FILE" || rc=$?
     (( rc == 0 )) || exit "$rc"

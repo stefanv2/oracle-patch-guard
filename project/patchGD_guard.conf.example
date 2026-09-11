@@ -14,6 +14,15 @@ ORATAB_FILE=/etc/oratab
 ORAINST_LOC=/etc/oraInst.loc
 # Leeg betekent: de eigenaar van de canonieke Oracle Home.
 EXPECTED_ORACLE_OWNER=
+# OEM blackout orchestration (Host-based jobs; no substitutions, EMCLI or sudo).
+OEM_BLACKOUT_MODE=disabled
+# Explicit local Agent instance binary; adapt to the installed Agent.
+OEM_AGENT_EMCTL=/u01/app/oracle/product/13.4.0/agent13c/agent_inst/bin/emctl
+# Choose from measured full APPLY runtime plus queue/cleanup margin.
+# No production default: start requires this value or --duration HH:MM.
+OEM_BLACKOUT_DURATION=
+# Required minimum coverage at START retry / APPLY admission; site must size it.
+OEM_BLACKOUT_MIN_REMAINING_SECONDS=300
 ASSESSMENT_MAX_AGE_MINUTES=60
 MIN_HOME_FREE_MB=10240
 MIN_INVENTORY_FREE_MB=2048
