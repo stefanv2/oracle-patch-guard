@@ -285,6 +285,28 @@ grep -Fq "OPG_NEW_RUN_RESULT|status=CREATED|run_id=${new_run}|cycle=JUL2026|reas
 run_wrapper create-window; [[ $? -eq 0 ]] || rc=95
 record 'new-run maakt na verifieerbare same-cycle COMPLETE een nieuwe NONE-run' 0 "$rc"
 
+setup_case newrunsamecycleblockedorphan; enable_pilot07_media; blocked_run=svtest-DB1-JUL2026-OEM-20260824T102900Z; write_state "$blocked_run" BLOCKED ASSESS; printf 'BLOCKED|TARGET_PATCHLEVEL_ALREADY_APPLIED|target bereikt|evidence\n' >"$RUN_ROOT/$blocked_run/findings.psv"
+blocked_state_hash=$(sha256sum "$RUN_ROOT/$blocked_run/execution_state.json" | awk '{print $1}'); blocked_findings_hash=$(sha256sum "$RUN_ROOT/$blocked_run/findings.psv" | awk '{print $1}')
+rc=0
+[[ ! -e "$CONTEXT_ROOT/current_run.json" ]] || rc=99
+export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z; run_wrapper new-run; new_run_rc=$?; fresh_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id)
+[[ "$fresh_run" != "$blocked_run" && ! -e "$RUN_ROOT/$fresh_run/execution_state.json" ]] || rc=98
+[[ "$blocked_state_hash" == "$(sha256sum "$RUN_ROOT/$blocked_run/execution_state.json" | awk '{print $1}')" && "$blocked_findings_hash" == "$(sha256sum "$RUN_ROOT/$blocked_run/findings.psv" | awk '{print $1}')" ]] || rc=97
+run_wrapper stage-media; stage_rc=$?; grep -q "OPG_OEM_RESULT|status=READY|phase=STAGE_MEDIA|exit_code=0|run_id=${fresh_run}" "$OUT" || stage_rc=96
+[[ $rc -eq 0 && $new_run_rc -eq 0 && $stage_rc -eq 0 ]] || rc=95
+record 'same-cycle BLOCKED/ASSESS evidence zonder current context blijft historisch bij verse lifecycle' 0 "$rc"
+
+setup_case newrunsamecycleblockedcontext; enable_pilot07_media; run_wrapper new-run; blocked_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$blocked_run" BLOCKED ASSESS; printf 'BLOCKED|TARGET_PATCHLEVEL_ALREADY_APPLIED|target bereikt|evidence\n' >"$RUN_ROOT/$blocked_run/findings.psv"
+blocked_state_hash=$(sha256sum "$RUN_ROOT/$blocked_run/execution_state.json" | awk '{print $1}'); blocked_findings_hash=$(sha256sum "$RUN_ROOT/$blocked_run/findings.psv" | awk '{print $1}')
+export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z; run_wrapper prepare; rc=$?; fresh_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id)
+archive_file=$(find "$CONTEXT_ROOT/archive" -maxdepth 1 -type f -name "${blocked_run}.*.json" -print -quit)
+[[ "$fresh_run" != "$blocked_run" && ! -e "$RUN_ROOT/$fresh_run/execution_state.json" && -n "$archive_file" ]] || rc=99
+[[ "$blocked_state_hash" == "$(sha256sum "$RUN_ROOT/$blocked_run/execution_state.json" | awk '{print $1}')" && "$blocked_findings_hash" == "$(sha256sum "$RUN_ROOT/$blocked_run/findings.psv" | awk '{print $1}')" ]] || rc=98
+grep -q "OPG_NEW_RUN_RESULT|status=CREATED|run_id=${fresh_run}|cycle=JUL2026|reason=Previous same-cycle ASSESS run is BLOCKED: new lifecycle created" "$OUT" || rc=97
+run_wrapper stage-media; stage_rc=$?; grep -q "OPG_OEM_RESULT|status=READY|phase=STAGE_MEDIA|exit_code=0|run_id=${fresh_run}" "$OUT" || stage_rc=96
+[[ $stage_rc -eq 0 ]] || rc=95
+record 'prepare roteert same-cycle BLOCKED/ASSESS naar fresh NONE en behoudt oude evidence' 0 "$rc"
+
 setup_case newrunsamecyclenonterminal; run_wrapper new-run; active_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$active_run" 02_ASSESS_OK ASSESS; context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')
 export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z; run_wrapper new-run; rc=$?
 [[ "$active_run" == "$(json_get "$CONTEXT_ROOT/current_run.json" run_id)" && "$context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" ]] || rc=99

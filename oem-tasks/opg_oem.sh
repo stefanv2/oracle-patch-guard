@@ -417,6 +417,19 @@ print(state)
 PY
 }
 
+run_phase() {
+  local state_file=${RUN_ROOT}/${RUN_ID}/execution_state.json
+  [[ -f "$state_file" && -r "$state_file" && ! -L "$state_file" ]] || return 1
+  python3 - "$state_file" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    phase = json.load(handle).get("phase")
+if not isinstance(phase, str) or not phase:
+    raise SystemExit(1)
+print(phase)
+PY
+}
+
 require_state() {
   local expected=$1 actual
   actual=$(run_state) || fail "$EXIT_UNKNOWN" CONTEXT 'Run-state kon niet betrouwbaar worden gelezen.'
@@ -644,7 +657,7 @@ valid_new_run_reason() {
 }
 
 archive_context_for_new_run() {
-  local reason=${OPG_NEW_RUN_REASON:-} state old_run old_cycle result_status=ROTATED
+  local reason=${OPG_NEW_RUN_REASON:-} state phase old_run old_cycle result_status=ROTATED
   load_local_paths
   discover_all
   if [[ ! -e "$CONTEXT_FILE" && ! -L "$CONTEXT_FILE" ]]; then
@@ -663,17 +676,33 @@ archive_context_for_new_run() {
         "$CTX_OJVM" == "$OJVM_PATCH_ID" && "$CTX_OPATCH_VERSION" == "$OPATCH_VERSION" &&
         "$CTX_OPATCH_ZIP" == "$OPATCH_ZIP" && "$CTX_CONFIG" == "$CONFIG_FILE" ]]; then
     state=$(run_state) || fail "$EXIT_UNKNOWN" CONTEXT 'Run-state kon niet worden gelezen.'
-    if [[ "$state" != 12_COMPLETE ]]; then
-      [[ -n "$reason" ]] || reason="Existing OEM run context for ${PATCH_CYCLE} reused"
-      valid_new_run_reason "$reason" || fail "$EXIT_USAGE" CONTEXT 'new-run reden is onveilig (maximaal 160 tekens).'
-      printf 'OPG_NEW_RUN_RESULT|status=REUSED|run_id=%s|cycle=%s|reason=%s\n' "$RUN_ID" "$PATCH_CYCLE" "$reason"
-      return 0
-    fi
-    validate_lifecycle_neutral_context
-    [[ "$LIFECYCLE_CONTEXT_SCOPE" == SAME_CYCLE_COMPLETE ]] ||
-      fail "$EXIT_BLOCKED" CONTEXT 'Same-cycle COMPLETE-context kon niet eenduidig worden gevalideerd.'
-    [[ -n "$reason" ]] || reason='Previous same-cycle run is COMPLETE: new lifecycle created'
-    result_status=CREATED
+    case "$state" in
+      12_COMPLETE)
+        validate_lifecycle_neutral_context
+        [[ "$LIFECYCLE_CONTEXT_SCOPE" == SAME_CYCLE_COMPLETE ]] ||
+          fail "$EXIT_BLOCKED" CONTEXT 'Same-cycle COMPLETE-context kon niet eenduidig worden gevalideerd.'
+        [[ -n "$reason" ]] || reason='Previous same-cycle run is COMPLETE: new lifecycle created'
+        result_status=CREATED
+        ;;
+      BLOCKED)
+        phase=$(run_phase) || fail "$EXIT_UNKNOWN" CONTEXT 'Run-phase kon niet worden gelezen.'
+        if [[ "$phase" == ASSESS ]]; then
+          [[ -n "$reason" ]] || reason='Previous same-cycle ASSESS run is BLOCKED: new lifecycle created'
+          result_status=CREATED
+        else
+          [[ -n "$reason" ]] || reason="Existing OEM run context for ${PATCH_CYCLE} reused"
+          valid_new_run_reason "$reason" || fail "$EXIT_USAGE" CONTEXT 'new-run reden is onveilig (maximaal 160 tekens).'
+          printf 'OPG_NEW_RUN_RESULT|status=REUSED|run_id=%s|cycle=%s|reason=%s\n' "$RUN_ID" "$PATCH_CYCLE" "$reason"
+          return 0
+        fi
+        ;;
+      *)
+        [[ -n "$reason" ]] || reason="Existing OEM run context for ${PATCH_CYCLE} reused"
+        valid_new_run_reason "$reason" || fail "$EXIT_USAGE" CONTEXT 'new-run reden is onveilig (maximaal 160 tekens).'
+        printf 'OPG_NEW_RUN_RESULT|status=REUSED|run_id=%s|cycle=%s|reason=%s\n' "$RUN_ID" "$PATCH_CYCLE" "$reason"
+        return 0
+        ;;
+    esac
   else
     if [[ "$CTX_CYCLE" == "$PATCH_CYCLE" ]]; then
       fail "$EXIT_BLOCKED" CONTEXT 'Bestaande context gebruikt dezelfde cycle maar wijkt af in target- of patchmetadata; rotatie is geweigerd.'
