@@ -621,8 +621,54 @@ assess_sqlpatch_readiness() {
   return "$rc"
 }
 
+prepare_assessment_cdb_containers() {
+  local sid=$1 states entry pdb expected_mode tag con_id name open_mode extra
+  local output="${RUN_DIR}/datapatch_containers_before_${sid}.log"
+  local expected_file="${RUN_DIR}/datapatch_expected_containers_${sid}.psv"
+  local oracle_name_regex='^[A-Za-z][A-Za-z0-9_$#]{0,29}$'
+  local expected_count=0 actual_count=0
+  local -a entries=()
+  local -A expected_modes=() current_modes=() container_ids=() seen_ids=()
+
+  states=$(opg_read_original_state "$sid" pdb_status) || return 1
+  if [[ -n "$states" ]]; then
+    IFS=';' read -ra entries <<<"$states"
+    for entry in "${entries[@]}"; do
+      pdb=${entry%%=*}; expected_mode=${entry#*=}
+      [[ "$pdb" =~ $oracle_name_regex && "$pdb" != "PDB\$SEED" ]] || return 1
+      [[ -z ${expected_modes[$pdb]+x} ]] || return 1
+      case "$expected_mode" in 'READ WRITE'|'READ ONLY') ;; *) return 1 ;; esac
+      expected_modes[$pdb]=$expected_mode
+      expected_count=$((expected_count + 1))
+    done
+  fi
+
+  opg_sqlplus "$sid" "datapatch_containers_before_${sid}" "${RUN_DIR}/datapatch_containers.sql" "$output" &&
+    opg_verify_command_success_text "$output" || return 1
+  while IFS='|' read -r tag con_id name open_mode extra; do
+    [[ "$tag" == DATAPATCH_CONTAINER && -z "$extra" ]] || return 1
+    [[ "$con_id" =~ ^[0-9]+$ && "$name" =~ $oracle_name_regex ]] || return 1
+    [[ "$open_mode" == 'READ WRITE' || "$open_mode" == 'READ ONLY' ]] || return 1
+    [[ -z ${seen_ids[$con_id]+x} && -z ${current_modes[$name]+x} ]] || return 1
+    if [[ "$con_id" == 1 ]]; then
+      [[ "$name" == "CDB\$ROOT" && "$open_mode" == 'READ WRITE' ]] || return 1
+    else
+      [[ "$con_id" -gt 2 && ${expected_modes[$name]:-} == "$open_mode" ]] || return 1
+    fi
+    seen_ids[$con_id]=$name; current_modes[$name]=$open_mode; container_ids[$name]=$con_id
+    actual_count=$((actual_count + 1))
+  done < <(grep '^DATAPATCH_CONTAINER|' "$output")
+  [[ $actual_count -eq $((expected_count + 1)) && ${seen_ids[1]:-} == "CDB\$ROOT" ]] || return 1
+  for pdb in "${!expected_modes[@]}"; do [[ -n ${current_modes[$pdb]+x} ]] || return 1; done
+
+  {
+    printf "1|CDB\$ROOT\n"
+    for pdb in "${!expected_modes[@]}"; do printf '%s|%s\n' "${container_ids[$pdb]}" "$pdb"; done | sort -t'|' -k1,1n
+  } | opg_atomic_write "$expected_file"
+}
+
 sqlpatch_targets_successful_for_all_databases() {
-  local sid running source database_count=0
+  local sid running cdb source database_count=0
   while IFS='|' read -r sid running; do
     database_count=$((database_count + 1))
     [[ "$running" == true ]] || return 1
@@ -632,11 +678,21 @@ sqlpatch_targets_successful_for_all_databases() {
       source="${RUN_DIR}/inventory_${sid}.txt"
     fi
     [[ -r "$source" ]] || return 1
-    awk -F'|' -v db="$DB_PATCH" -v ojvm="$OJVM_PATCH" '
-      $1=="SQLPATCH" && $2==db   { db_rows++;   if ($3=="APPLY" && $4=="SUCCESS") db_ok++ }
-      $1=="SQLPATCH" && $2==ojvm { ojvm_rows++; if ($3=="APPLY" && $4=="SUCCESS") ojvm_ok++ }
-      END { exit !(db_rows==1 && db_ok==1 && ojvm_rows==1 && ojvm_ok==1) }
-    ' "$source" || return 1
+    cdb=$(opg_read_original_state "$sid" cdb) || return 1
+    case "$cdb" in
+      NO)
+        awk -F'|' -v db="$DB_PATCH" -v ojvm="$OJVM_PATCH" '
+          $1=="SQLPATCH" && $2==db   { db_rows++;   if ($3=="APPLY" && $4=="SUCCESS") db_ok++ }
+          $1=="SQLPATCH" && $2==ojvm { ojvm_rows++; if ($3=="APPLY" && $4=="SUCCESS") ojvm_ok++ }
+          END { exit !(db_rows==1 && db_ok==1 && ojvm_rows==1 && ojvm_ok==1) }
+        ' "$source" || return 1
+        ;;
+      YES)
+        prepare_assessment_cdb_containers "$sid" || return 1
+        validate_datapatch_sqlpatch "$sid" || return 1
+        ;;
+      *) return 1 ;;
+    esac
     awk -F'|' -v sid="$sid" -v db="$DB_PATCH" -v ojvm="$OJVM_PATCH" '
       $1=="SQLPATCH" && ($2==db || $2==ojvm) {
         printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n", sid, $2, $3, $4, $5
