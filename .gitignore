@@ -6,7 +6,7 @@
 *.orig
 *.before-*
 test-output/
-reports/
+/reports/
 runs/
 approvals/
 evidence/
@@ -25,7 +25,7 @@ Thumbs.db
 
 # Local build/workspace material
 archive/
-releases/
+/releases/
 cleanup/
 dist/
 build/

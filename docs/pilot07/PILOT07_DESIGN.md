@@ -3,7 +3,7 @@
 > **PARTIALLY STALE — historisch Pilot07-ontwerp.** Dit document is de
 > ontwerpvoorganger van stable-20260831 en geen volledig huidig runbook. Zie
 > [README.md](../../README.md) en
-> [RELEASE_NOTES_20260831.md](../../RELEASE_NOTES_20260831.md) voor de actuele
+> [RELEASE_NOTES_20260831.md](../releases/RELEASE_NOTES_20260831.md) voor de actuele
 > baseline.
 
 ## Besluit

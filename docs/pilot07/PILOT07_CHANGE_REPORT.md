@@ -3,7 +3,7 @@
 > **HISTORICAL — Pilot07 wijzigingsevidence.** Dit report beschrijft de
 > oorspronkelijke Pilot07-wijzigingen en is geen volledig current runbook. Zie
 > [README.md](../../README.md) en
-> [RELEASE_NOTES_20260831.md](../../RELEASE_NOTES_20260831.md) voor stable-20260831.
+> [RELEASE_NOTES_20260831.md](../releases/RELEASE_NOTES_20260831.md) voor stable-20260831.
 
 ## Functionele wijziging
 

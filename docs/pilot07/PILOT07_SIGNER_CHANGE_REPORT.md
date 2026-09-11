@@ -4,8 +4,8 @@
 > oorspronkelijke COMPLETE-classificatie is vervangen door hash-bound
 > `completion.json`-evidence. Gebruik voor de huidige stable baseline
 > [README.md](../../README.md),
-> [RELEASE_NOTES_20260831.md](../../RELEASE_NOTES_20260831.md) en
-> [COMPLETION_PUBLICATION_VALIDATION_REPORT.md](../../COMPLETION_PUBLICATION_VALIDATION_REPORT.md).
+> [RELEASE_NOTES_20260831.md](../releases/RELEASE_NOTES_20260831.md) en
+> [COMPLETION_PUBLICATION_VALIDATION_REPORT.md](../reports/COMPLETION_PUBLICATION_VALIDATION_REPORT.md).
 
 ## Scope
 

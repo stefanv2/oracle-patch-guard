@@ -3,7 +3,7 @@
 > **HISTORICAL — Pilot07 security-evidence.** De manifest-, V2-, TOCTOU- en
 > failure-analyse blijft als pilotevidence behouden. Gebruik voor de huidige
 > stable baseline [README.md](../../README.md) en
-> [RELEASE_NOTES_20260831.md](../../RELEASE_NOTES_20260831.md).
+> [RELEASE_NOTES_20260831.md](../releases/RELEASE_NOTES_20260831.md).
 
 ## Dreigingen en controles
 

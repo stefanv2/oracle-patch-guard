@@ -6,7 +6,8 @@ HEAD gecontroleerd: `b686525e8db97768b18a1dc95ff88ae398b713b3`; werkboom vooraf 
 De afzonderlijke OPG-01 ACTION-commit staat in HEAD en blijft intact.
 Vastgelegd bewijs: ACTION 153/153, kern 118/118, bestaande regressies 405/405.
 Geen tests herhaald. Historisch APPLY/SUCCESS blijft toegestaan; pogingbinding blijft open.
-Bronnen: eerdere reviewcontext, OPG01_ACTION_VALIDATION.md en TEST_ROADMAP.md.
+Bronnen: eerdere reviewcontext, [OPG01 ACTION-validatie](OPG01_ACTION_VALIDATION.md)
+en de actuele [test-roadmap](../../TEST_ROADMAP.md).
 Onderstaande P0/P1/P2/P3 zijn uitvoeringsprioriteiten: P0 kritiek, P1 hoog, P2 middel, P3 laag.
 Kleine fixes verdringen P0/P1 niet. Optimalisatie en Rust-hashing wachten tot veiligheidsbevindingen gesloten zijn.
 
