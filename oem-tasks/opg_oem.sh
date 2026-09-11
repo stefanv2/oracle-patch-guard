@@ -612,6 +612,32 @@ run_precheck() {
   return "$oem_rc"
 }
 
+run_assess() {
+  local output rc=0 core_result core_status core_phase core_exit reason='' line
+  output=$(clean_oracle_env /bin/bash "$ASSESS_SCRIPT" "$ORACLE_HOME" "$RUN_ID" "$DB_RU_PATCH_ID" "$OJVM_PATCH_ID" "$PATCH_CYCLE" "$OPATCH_VERSION" "$OPATCH_ZIP" "$CONFIG_FILE") || rc=$?
+  core_result=$(printf '%s\n' "$output" | awk '/^OPG_RESULT\|/{line=$0} END{print line}')
+  core_status=$(printf '%s\n' "$core_result" | awk -F'|' '{for(i=1;i<=NF;i++)if($i~/^status=/){sub(/^status=/,"",$i);print $i;exit}}')
+  core_phase=$(printf '%s\n' "$core_result" | awk -F'|' '{for(i=1;i<=NF;i++)if($i~/^phase=/){sub(/^phase=/,"",$i);print $i;exit}}')
+  core_exit=$(printf '%s\n' "$core_result" | awk -F'|' '{for(i=1;i<=NF;i++)if($i~/^exit_code=/){sub(/^exit_code=/,"",$i);print $i;exit}}')
+  if (( rc == EXIT_BLOCKED )) && [[ "$core_status" == BLOCKED && "$core_phase" == ASSESS && "$core_exit" == "$EXIT_BLOCKED" ]]; then
+    reason=$(printf '%s\n' "$core_result" | awk -F'|' '{for(i=1;i<=NF;i++)if($i~/^reason=/){sub(/^reason=/,"",$i);print $i;exit}}')
+    if [[ -z "$reason" && -r "${RUN_ROOT}/${RUN_ID}/findings.psv" ]]; then
+      reason=$(awk -F'|' '$1=="BLOCKED" && $2~/^[A-Z][A-Z0-9_]{1,79}$/ {print $2; exit}' "${RUN_ROOT}/${RUN_ID}/findings.psv")
+    fi
+    [[ -z "$reason" || "$reason" =~ ^[A-Z][A-Z0-9_]{1,79}$ ]] || reason=
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ "$line" == OPG_OEM_ASSESS_RESULT\|* ]] && continue
+      printf '%s\n' "$line"
+    done <<<"$output"
+    printf 'OPG_OEM_ASSESS_RESULT|status=BLOCKED|patch_guard_exit_code=20|oem_exit_code=20'
+    [[ -z "$reason" ]] || printf '|reason=%s' "$reason"
+    printf '\n'
+    return "$rc"
+  fi
+  printf '%s\n' "$output"
+  return "$rc"
+}
+
 valid_new_run_reason() {
   local value=$1 pattern='^[A-Za-z0-9][A-Za-z0-9_.:,/@+>-]*( [A-Za-z0-9_.:,/@+>-]+)*$'
   [[ -n "$value" && ${#value} -le 160 && "$value" =~ $pattern ]]
@@ -714,7 +740,7 @@ case "$COMMAND" in
     ;;
   assess)
     load_or_create_context true; require_state NONE; require_script "$ASSESS_SCRIPT" assess
-    clean_oracle_env /bin/bash "$ASSESS_SCRIPT" "$ORACLE_HOME" "$RUN_ID" "$DB_RU_PATCH_ID" "$OJVM_PATCH_ID" "$PATCH_CYCLE" "$OPATCH_VERSION" "$OPATCH_ZIP" "$CONFIG_FILE"
+    run_assess
     ;;
   plan)
     load_or_create_context false; require_state 02_ASSESS_OK; require_script "$CORE_SCRIPT" core
