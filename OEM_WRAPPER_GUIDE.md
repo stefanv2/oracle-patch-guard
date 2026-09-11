@@ -90,6 +90,14 @@ chown root:oinstall active_cycle opg_cycle.conf
 chmod 0640 active_cycle opg_cycle.conf
 ```
 
+## OEM Agent blackouts
+
+De optionele `blackout-start` / `blackout-stop --run-id RUN_ID` acties blijven
+Host-based orchestration. Default blijft `OEM_BLACKOUT_MODE=disabled`.
+Zie [installatie, runbinding, cleanup en praktijktest](docs/BLACKOUT_ORCHESTRATION.md).
+Bij `required` gebruikt APPLY expliciet `apply --run-id RUN_ID` en controleert
+de eigen blackout voordat de bestaande patchflow wordt aangeroepen.
+
 ## Target discovery
 
 Productiediscovery gebruikt `/etc/oratab` of het daarin via de vertrouwde lokale config aangewezen bestand. Een entry telt alleen mee wanneer:

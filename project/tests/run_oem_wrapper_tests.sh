@@ -457,5 +457,134 @@ runtime_path_hits=0
 grep -F '/mnt/patch-share/oracle-patch-guard' "$ROOT/oem-tasks/opg_context_root.sh" "$ROOT/oem-tasks/opg_oem.sh" "$ROOT/oem-tasks/opg_stage_approval.sh" "$ROOT/oem-tasks/opg_media_stage_root.py" "$ROOT/project/oem_approval_check.sh" "$ROOT/signer/opg_list_pending.sh" >/dev/null 2>&1 && runtime_path_hits=1
 record 'actieve runtime bevat geen generieke Oracle Patch Guard-sharefallback' 0 "$runtime_path_hits"
 
+# Blackout admission routing uses a stub module; lifecycle/parser tests exercise
+# the actual module separately without live Agent calls.
+for guard_rc in 0 20 30; do
+  setup_case "blackoutguard${guard_rc}"
+  run_wrapper prepare
+  run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id)
+  write_state "$run" 03_PLAN_GENERATED PLAN
+  prepare_approval_run "$run"
+  printf 'OEM_BLACKOUT_MODE=required\n' >>"$CONFIG"
+  cat >"$TASK_ROOT/opg_blackout.py" <<PY
+import sys
+if sys.argv[1] == 'mode':
+    print('required')
+    sys.exit(0)
+sys.exit($guard_rc)
+PY
+  run_wrapper_args apply --run-id "$run"; rc=$?
+  routed=0; grep -q '^apply|' "$CASE/routes.log" && routed=1
+  record "blackout guard exit ${guard_rc}" "$guard_rc" "$rc"
+  expected=0; [[ "$guard_rc" == 0 ]] && expected=1
+  record "blackout guard mutation boundary ${guard_rc}" "$expected" "$routed"
+done
+setup_case blackoutpin
+run_wrapper prepare
+run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id)
+write_state "$run" 03_PLAN_GENERATED PLAN
+run_wrapper_args apply --run-id WRONG; rc=$?
+record 'APPLY explicit run mismatch blocks before dispatch' 20 "$rc"
+run_wrapper blackout-stop; rc=$?
+record 'STOP requires explicit run and does not discover database' 70 "$rc"
+
+# Use the real blackout module and a filesystem-only fake Agent. The launcher
+# adapts fixture host/root ownership, never production behavior.
+install_blackout_fixture() {
+  export BLACKOUT_FIXTURE_ROOT="$CASE" BLACKOUT_FIXTURE_RUNROOT="$RUN_ROOT"
+  export BLACKOUT_REAL_MODULE="$ROOT/oem-tasks/opg_blackout.py"
+  mkdir -p "$CASE/agent/bin"
+  cat >"$TASK_ROOT/opg_blackout.py" <<'PY'
+import importlib.util, os, pathlib
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('blackout', os.environ['BLACKOUT_REAL_MODULE'])
+b = importlib.util.module_from_spec(spec); spec.loader.exec_module(b)
+b.socket.getfqdn = lambda: 'svtest.example'
+original = pathlib.Path.stat
+def fixture_stat(path, *args, **kwargs):
+    info = original(path, *args, **kwargs)
+    if str(path) == os.environ['OPG_TEST_CONFIG']:
+        values = list(info); values[4] = 0
+        return os.stat_result(values)
+    return info
+try:
+    with patch.object(pathlib.Path, 'stat', fixture_stat): b.main()
+except b.Failure as error:
+    print(error.reason)
+    raise SystemExit(error.code)
+PY
+  cat >"$CASE/agent/bin/emctl" <<'PY'
+#!/usr/bin/env python3
+import json, os, pathlib, pwd, sys, time
+root = pathlib.Path(os.environ['BLACKOUT_FIXTURE_ROOT'])
+args = sys.argv[1:]
+with (root / 'agent-calls').open('a') as f: f.write(' '.join(args) + '\n')
+record = root / 'agent-record.json'
+if args == ['status','agent']:
+    print('Agent Home : ' + str(root / 'agent'))
+    print('Started by user : ' + pwd.getpwuid(os.geteuid()).pw_name)
+    print('Agent is Running and Ready')
+elif args == ['config','agent','listtargets']:
+    print('[svtest.example, host]\n[DB1, oracle_database]')
+elif args[:2] == ['start','blackout']:
+    assert args[3] == 'DB1:oracle_database' and args[4] == '-d'
+    run = args[2][4:]
+    state = json.loads((pathlib.Path(os.environ['BLACKOUT_FIXTURE_RUNROOT']) / run / 'blackout_state.json').read_text())
+    assert state['status'] == 'PREPARED'
+    record.write_text(json.dumps({'name':args[2], 'time':int(time.time()), 'minutes':int(args[5][:2])*60+int(args[5][3:])}))
+elif args == ['status','blackout','DB1:oracle_database']:
+    if record.exists():
+        r = json.loads(record.read_text())
+        print('Blackoutname = ' + r['name'])
+        print('Targets = (DB1:oracle_database,)')
+        print('Time = ({' + time.strftime('%Y-%m-%d|%H:%M:%S', time.localtime(r['time'])) + '|' + str(r['minutes']) + ' Min,|} )')
+        print('Expired = False')
+    else: print('No Blackout registered.')
+elif args[:2] == ['stop','blackout']:
+    assert json.loads(record.read_text())['name'] == args[2]
+    record.unlink()
+else: sys.exit(99)
+PY
+  chmod 0700 "$CASE/agent/bin/emctl"
+  printf 'OEM_AGENT_EMCTL=%s/agent/bin/emctl\n' "$CASE" >>"$CONFIG"
+}
+
+setup_case blackoutexplicitdisabled
+run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id)
+write_state "$run" 03_PLAN_GENERATED PLAN; prepare_approval_run "$run"
+install_blackout_fixture
+printf 'OEM_BLACKOUT_MODE=disabled\n' >>"$CONFIG"
+run_wrapper apply; rc=$?
+record 'explicit disabled real module allows unchanged APPLY' 0 "$rc"
+rc=0
+[[ ! -e "$CASE/agent-calls" && ! -e "$RUN_ROOT/$run/blackout_state.json" && ! -e "$RUN_ROOT/$run/.blackout.lock" ]] || rc=99
+grep -q "^apply|sid=DB1|home=${HOME_DIR}|args=${run} " "$CASE/routes.log" || rc=98
+record 'explicit disabled needs no blackout state and never calls Agent' 0 "$rc"
+
+for context_variant in missing corrupt; do
+  setup_case "blackoutcleanup${context_variant}"
+  run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id)
+  write_state "$run" 03_PLAN_GENERATED PLAN
+  chmod 0700 "$RUN_ROOT/$run"
+  install_blackout_fixture
+  printf 'OEM_BLACKOUT_MODE=disabled\nOEM_BLACKOUT_MIN_REMAINING_SECONDS=60\n' >>"$CONFIG"
+  run_wrapper_args blackout-start --duration 00:05; rc=$?
+  [[ -f "$RUN_ROOT/$run/blackout_state.json" ]] || rc=99
+  record "START uses configured nondefault RUN_ROOT (${context_variant})" 0 "$rc"
+  if [[ "$context_variant" == missing ]]; then rm "$CONTEXT_ROOT/current_run.json"
+  else printf '{corrupt\n' >"$CONTEXT_ROOT/current_run.json"; fi
+  rm "$CASE/discovery.psv" "$OPG_ROOT/config/active_cycle" "$RUN_ROOT/$run/execution_state.json"
+  # Invalid and duplicate start-only config must not prevent cleanup.
+  printf 'OEM_BLACKOUT_MODE=INVALID\nOEM_BLACKOUT_DURATION=INVALID\nOEM_BLACKOUT_MIN_REMAINING_SECONDS=INVALID\n' >>"$CONFIG"
+  run_wrapper_args blackout-stop --run-id "$run"; rc=$?
+  record "STOP works with ${context_variant} context, no discovery/cycle/state" 0 "$rc"
+  rc=0
+  [[ "$(json_get "$RUN_ROOT/$run/blackout_state.json" status)" == STOPPED && ! -e "$CASE/agent-record.json" ]] || rc=99
+  [[ $(grep -c '^config agent listtargets$' "$CASE/agent-calls") == 1 ]] || rc=98
+  grep -q "^stop blackout OPG_${run}$" "$CASE/agent-calls" || rc=97
+  record "STOP uses START root and own binding; no target rediscovery (${context_variant})" 0 "$rc"
+done
+unset BLACKOUT_FIXTURE_ROOT BLACKOUT_FIXTURE_RUNROOT BLACKOUT_REAL_MODULE
+
 printf '\nOEM wrapper results: %s passed, %s failed\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))
