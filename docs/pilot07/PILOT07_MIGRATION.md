@@ -4,7 +4,7 @@
 > niet als deployment- of runbookinstructie voor de huidige stable baseline.
 > De fresh-host bootstrap installeert inmiddels de root-helpers, sudoers,
 > runtimeconfiguratie en stage anchors. Zie [README.md](../../README.md) en
-> [RELEASE_NOTES_20260831.md](../../RELEASE_NOTES_20260831.md).
+> [RELEASE_NOTES_20260831.md](../releases/RELEASE_NOTES_20260831.md).
 
 Pilot06c blijft immutable en bestaande Pilot06c-runs worden niet geconverteerd.
 Pilot07 vereist altijd een nieuwe RUN_ID, nieuwe context, nieuw plan en nieuwe

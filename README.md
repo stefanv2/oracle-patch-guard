@@ -103,8 +103,8 @@ PLAN → APPROVE → APPLY-contract:
 
 De baseline is in non-productie gevalideerd op Oracle Database 19.32 met een
 CDB en user-PDB, DB RU 39472050 en OJVM RU 39222882. De volledige live flow is
-succesvol afgerond, inclusief completion-publicatie. Zie
-[`RELEASE_NOTES_20260831.md`](RELEASE_NOTES_20260831.md).
+succesvol afgerond, inclusief completion-publicatie. Technische release- en
+validatie-evidence staat gegroepeerd onder `docs/`.
 
 ### Live acceptatie 2026-09-07
 
@@ -173,9 +173,8 @@ sudo bash tests/run_bootstrap_tests.sh
 
 De op 2026-09-07 gevalideerde kandidaat heeft 637/637 geslaagde regressietests,
 inclusief de gerichte bootstrap-, contextrotatie- en media-lock-FD-tests. De
-validatie van completion-publicatie is gedocumenteerd in
-`COMPLETION_PUBLICATION_VALIDATION_REPORT.md` en de validatie van
-configgedreven deploymentpaden in `DEPLOYMENT_PATH_VALIDATION_REPORT.md`.
+technische wijzigings- en validatie-evidence staat gegroepeerd onder
+`docs/reports/`.
 De automatische verwijdering van uitsluitend lokale execution-media na een
 bewezen completion is beschreven in [Lokale stage-cleanup](STAGE_CLEANUP.md).
 
