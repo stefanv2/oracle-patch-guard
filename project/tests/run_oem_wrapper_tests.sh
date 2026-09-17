@@ -433,13 +433,37 @@ grep -q 'PRECHECK-20260824T090004Z' "$CASE/routes.log" || same_cycle_precheck_rc
 [[ "$same_cycle_context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" ]] || same_cycle_precheck_rc=98
 record 'PRECHECK na same-cycle COMPLETE gebruikt eigen RUN_ID en behoudt context byte-identiek' 0 "$same_cycle_precheck_rc"
 
+setup_case precheckblockedassessneutral; enable_pilot07_media; run_wrapper new-run; blocked_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$blocked_run" BLOCKED ASSESS
+printf 'BLOCKED|TARGET_PATCHLEVEL_ALREADY_APPLIED|target bereikt|evidence\n' >"$RUN_ROOT/$blocked_run/findings.psv"
+blocked_context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')
+blocked_evidence_hash=$(find "$RUN_ROOT/$blocked_run" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)
+run_wrapper stage-media; blocked_stage_rc=$?
+grep -Fq 'OPG_OEM_RESULT|status=READY|phase=STAGE_MEDIA|exit_code=0|cycle=JUL2026' "$OUT" || blocked_stage_rc=99
+if grep -Fq 'stage-media vereist state NONE' "$OUT"; then blocked_stage_rc=98; fi
+export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090030Z; run_wrapper precheck; blocked_precheck_rc=$?
+grep -Fq 'svtest-DB1-JUL2026-PRECHECK-20260824T090030Z' "$CASE/routes.log" || blocked_precheck_rc=97
+[[ "$blocked_context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" ]] || blocked_precheck_rc=96
+[[ "$blocked_evidence_hash" == "$(find "$RUN_ROOT/$blocked_run" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)" ]] || blocked_precheck_rc=95
+[[ $blocked_stage_rc -eq 0 ]] || blocked_precheck_rc=94
+record 'BLOCKED/ASSESS-context laat lifecycle-neutrale stage-media en eigen PRECHECK toe zonder mutatie' 0 "$blocked_precheck_rc"
+
+export OPG_TEST_NOW_ISO=2026-08-24T10:31:00Z OPG_TEST_RUN_STAMP=20260824T103100Z; run_wrapper new-run; blocked_rotate_rc=$?; fresh_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id)
+archive_file=$(find "$CONTEXT_ROOT/archive" -maxdepth 1 -type f -name "${blocked_run}.*.json" -print -quit)
+[[ "$fresh_run" != "$blocked_run" && -n "$archive_file" && ! -e "$RUN_ROOT/$fresh_run/execution_state.json" ]] || blocked_rotate_rc=99
+[[ "$blocked_evidence_hash" == "$(find "$RUN_ROOT/$blocked_run" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)" ]] || blocked_rotate_rc=98
+grep -Fq "OPG_NEW_RUN_RESULT|status=CREATED|run_id=${fresh_run}|cycle=JUL2026|reason=Previous same-cycle ASSESS run is BLOCKED: new lifecycle created" "$OUT" || blocked_rotate_rc=97
+record 'expliciete new-run roteert BLOCKED/ASSESS na PRECHECK en bewaart oude evidence' 0 "$blocked_rotate_rc"
+
 setup_case p07samecyclecorruptcomplete; enable_pilot07_media; run_wrapper prepare; same_cycle_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$same_cycle_run" 12_COMPLETE COMPLETE; printf '20\n' >"$CASE/completion-validation.rc"
 same_cycle_context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}'); run_wrapper stage-media; same_cycle_corrupt_rc=$?
 [[ "$same_cycle_context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" ]] || same_cycle_corrupt_rc=99
 record 'stage-media blokkeert onverifieerbare same-cycle COMPLETE' 20 "$same_cycle_corrupt_rc"
 
 setup_case p07samecyclenonterminal; enable_pilot07_media; run_wrapper prepare; same_cycle_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$same_cycle_run" 02_ASSESS_OK ASSESS
-run_wrapper stage-media; record 'stage-media blijft same-cycle niet-terminale state blokkeren' 20 $?
+nonterminal_context_hash=$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}'); nonterminal_state_hash=$(sha256sum "$RUN_ROOT/$same_cycle_run/execution_state.json" | awk '{print $1}')
+run_wrapper stage-media; nonterminal_rc=$?
+[[ "$nonterminal_context_hash" == "$(sha256sum "$CONTEXT_ROOT/current_run.json" | awk '{print $1}')" && "$nonterminal_state_hash" == "$(sha256sum "$RUN_ROOT/$same_cycle_run/execution_state.json" | awk '{print $1}')" ]] || nonterminal_rc=99
+record 'stage-media blijft same-cycle niet-terminale state blokkeren zonder mutatie' 20 "$nonterminal_rc"
 setup_case p07writable; enable_pilot07_media; chmod 0775 "$MEDIA_HELPER"; run_wrapper prepare >/dev/null; run_wrapper stage-media; record 'writable media-helper wordt geweigerd' 30 $?
 setup_case p07symlink; enable_pilot07_media; mv "$MEDIA_HELPER" "$LOCAL_SBIN/opg_media_stage_root.real"; ln -s opg_media_stage_root.real "$MEDIA_HELPER"; run_wrapper prepare >/dev/null; run_wrapper stage-media; record 'symlink media-helper wordt geweigerd' 30 $?
 setup_case p07missing; enable_pilot07_media; rm "$MEDIA_HELPER"; run_wrapper prepare >/dev/null; run_wrapper stage-media; record 'ontbrekende media-helper wordt fail-closed geweigerd' 30 $?
@@ -452,6 +476,7 @@ setup_case missingapprovalroot; sed -i '/^APPROVAL_ROOT=/d' "$CONFIG"; unset OPG
 setup_case precheckroute; export OPG_TEST_PRECHECK_RUN_STAMP=20260824T090000Z; run_wrapper precheck; rc=$?
 precheck_run=svtest-DB1-JUL2026-PRECHECK-20260824T090000Z
 grep -q "^core|precheck --non-interactive --target-oracle-home ${HOME_DIR} --run-id ${precheck_run} --config ${CONFIG} 39472050 39222882 JUL2026 12.2.0.1.52 p6880880_190000_Linux-x86-64.zip$" "$CASE/routes.log" || rc=99
+grep -Fq 'OPG_OEM_PRECHECK_RESULT|status=READY|patch_guard_exit_code=0|oem_exit_code=0' "$OUT" || rc=96
 [[ ! -e "$CONTEXT_ROOT/current_run.json" ]] || rc=98
 [[ -z "$(find "$OPG_ROOT/approvals" -mindepth 1 -print -quit)" ]] || rc=97
 record 'OEM PRECHECK route maakt geen formele current context' 0 "$rc"
