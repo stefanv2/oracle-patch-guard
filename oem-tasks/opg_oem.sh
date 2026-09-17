@@ -437,7 +437,7 @@ require_state() {
 }
 
 validate_lifecycle_neutral_context() {
-  local rc=0 result state same_cycle=false
+  local rc=0 result state phase same_cycle=false
   LIFECYCLE_CONTEXT_SCOPE=NONE
   [[ -e "$CONTEXT_FILE" || -L "$CONTEXT_FILE" ]] || return 0
   read_context_file
@@ -445,6 +445,13 @@ validate_lifecycle_neutral_context() {
     validate_context_file
     state=$(run_state) || fail "$EXIT_UNKNOWN" CONTEXT 'Run-state kon niet betrouwbaar worden gelezen.'
     if [[ "$state" != 12_COMPLETE ]]; then
+      if [[ "$state" == BLOCKED ]]; then
+        phase=$(run_phase) || fail "$EXIT_UNKNOWN" CONTEXT 'Run-phase kon niet betrouwbaar worden gelezen.'
+        if [[ "$phase" == ASSESS ]]; then
+          LIFECYCLE_CONTEXT_SCOPE=SAME_CYCLE_BLOCKED_ASSESS
+          return 0
+        fi
+      fi
       LIFECYCLE_CONTEXT_SCOPE=SAME_CYCLE
       return 0
     fi
@@ -752,6 +759,7 @@ case "$COMMAND" in
     validate_lifecycle_neutral_context
     case "$LIFECYCLE_CONTEXT_SCOPE" in
       SAME_CYCLE) require_state NONE; stage_subject="run_id=${RUN_ID}" ;;
+      SAME_CYCLE_BLOCKED_ASSESS) stage_subject="cycle=${PATCH_CYCLE}" ;;
       SAME_CYCLE_COMPLETE) stage_subject="run_id=${RUN_ID}" ;;
       *) stage_subject="cycle=${PATCH_CYCLE}" ;;
     esac
