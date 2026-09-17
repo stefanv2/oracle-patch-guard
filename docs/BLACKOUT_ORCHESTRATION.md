@@ -4,7 +4,7 @@
 
 Keep **Same targets for all tasks / Host**. The existing `oracle` Named
 Credential runs all steps. No substitutions, EMCLI, REST, root privileges or
-additional sudo are used. Deploy `oem-tasks/opg_blackout.py` together with
+additional sudo are used. Deploy `current/oem-tasks/opg_blackout.py` together with
 `opg_oem.sh`; Python 3 and Linux `flock` support are required. This is wrapper
 functionality, not a change to patchcore.
 
@@ -128,7 +128,7 @@ sized production threshold before enabling required mode. Resolve the existing
 foreign blackout separately. A valid PLAN-stage context is required.
 
 ```bash
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh blackout-start --duration 00:05
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh blackout-start --duration 00:05
 ```
 
 Record the returned run ID. In OEM verify only the database target was selected,
@@ -136,7 +136,7 @@ then run a new Host-based probe task (`id; date -u; echo OPG_PROBE`). Stop using
 the recorded ID, not a new context lookup:
 
 ```bash
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh blackout-stop --run-id <RECORDED_RUN_ID>
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh blackout-stop --run-id <RECORDED_RUN_ID>
 ```
 
 Check the own blackout disappeared and metric collection resumes. The supplied

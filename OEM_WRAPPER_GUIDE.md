@@ -4,7 +4,7 @@
 
 OEM kiest alleen de target(s) en de fase; Patch Guard bepaalt veilig de rest uit gevalideerde context.
 
-`oem-tasks/opg_oem.sh` bevat geen patch-, approval- of state-machinebeslissingen. Het script doet uitsluitend:
+`${OPG_ROOT}/current/oem-tasks/opg_oem.sh` bevat geen patch-, approval- of state-machinebeslissingen. Het script doet uitsluitend:
 
 1. centrale cyclemetadata defensief lezen;
 2. precies één actief database/SID/Oracle-Home-paar ontdekken;
@@ -13,16 +13,25 @@ OEM kiest alleen de target(s) en de fase; Patch Guard bepaalt veilig de rest uit
 
 De bestaande lange OEM-commands blijven bruikbaar als fallback.
 
-De wrapper verwacht dat deze bestaande site-specifieke scripts op het target aanwezig blijven:
+De wrapper en alle OEM-runtimehelpers komen uit dezelfde actieve release:
 
-- `oem-tasks/opg_prepare_host.sh`
-- `oem-tasks/opg_create_window.sh`
-- `oem-tasks/opg_assess_task.sh`
-- `oem-tasks/opg_stage_approval.sh`
+- `current/oem-tasks/opg_prepare_host.sh`
+- `current/oem-tasks/opg_create_window.sh`
+- `current/oem-tasks/opg_assess_task.sh`
+- `current/oem-tasks/opg_stage_approval.sh`
+- `current/oem-tasks/opg_blackout.py`
 - `current/project/patchGD_guard.sh`
 - `current/project/oem_apply.sh`
 
-De eerste drie zijn niet in de aangeleverde Pilot05g/OEM14-bronset opgenomen en zijn daarom niet gewijzigd of opnieuw geïmplementeerd. Ontbreken geeft fail-closed `BLOCKED|ROUTING`.
+De release bevat deze helpers zelf. Ontbreken geeft fail-closed
+`BLOCKED|ROUTING`; er is geen fallback naar `${OPG_ROOT}/oem-tasks`.
+
+`current` wijst naar één immutable release-directory. Hostconfig staat in
+`/etc/oracle-patch-guard`, centrale operationele configuratie in
+`${OPG_ROOT}/config`, approvals en centrale evidence in de gelijknamige
+persistente directories buiten `current`. Lokale context staat in
+`/var/lib/oracle-patch-guard` en run-evidence in
+`/var/log/oracle-patch-guard/<RUN_ID>`.
 
 ## Centrale metadata
 
@@ -142,7 +151,7 @@ Installeer de helper en de meegeleverde sudoersregel als root:
 
 ```bash
 install -o root -g root -m 0755 \
-  oem-tasks/opg_context_root.sh \
+  current/oem-tasks/opg_context_root.sh \
   /usr/local/sbin/opg_context_root.sh
 
 install -o root -g root -m 0440 \
@@ -184,7 +193,7 @@ Een reden mag expliciet worden meegegeven:
 
 ```bash
 OPG_NEW_RUN_REASON='Nieuwe OCT2026 wave na afgeronde JUL2026 run' \
-  /bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh new-run
+  /bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh new-run
 ```
 
 Zonder `OPG_NEW_RUN_REASON` maakt OPG zelf een auditreden, bijvoorbeeld:
@@ -222,10 +231,10 @@ Voor een volledig nieuwe cycle is de lifecycle-neutrale readinessvolgorde:
 
 ```bash
 # Eenmalig op een fresh host via de daarvoor ingerichte privileged OEM-taak:
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_bootstrap_host.sh
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_bootstrap_host.sh
 
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh stage-media
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh precheck
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh stage-media
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh precheck
 ```
 
 PRECHECK is functioneel een vroege veiligheidscontrole, maar bij
@@ -237,7 +246,7 @@ Een herhaalbare readinesscontrole kan daarna opnieuw los van de formele
 lifecycle worden gestart:
 
 ```bash
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh precheck
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh precheck
 ```
 
 Richt hiervoor in OEM de keten `00_BOOTSTRAP`, `OPG_STAGE_MEDIA`,
@@ -257,24 +266,24 @@ Na de eerste PRECHECK volgt de formele lifecycle. Gebruik op iedere geselecteerd
 host exact dezelfde commands:
 
 ```bash
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh new-run
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh prepare
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh create-window
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh assess
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh plan
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh stage
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh new-run
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh prepare
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh create-window
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh assess
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh plan
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh stage
 ```
 
 Na signing:
 
 ```bash
 # Controleer de gepubliceerde approval afzonderlijk
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh approval-check
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh approval-check
 
 # Optioneel: read-only last-minute readinesscheck
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh precheck
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh precheck
 
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh apply
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh apply
 ```
 
 In de normale happy path voert een succesvolle `apply` automatisch
@@ -288,7 +297,7 @@ publicatie faalde, blijft de patchstate intact en retourneert de wrapper
 publicatieoorzaak en herhaal daarna zonder APPLY opnieuw uit te voeren:
 
 ```bash
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh publish-completion
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh publish-completion
 ```
 
 Na succesvolle completion-publicatie start de wrapper automatisch de
@@ -297,7 +306,7 @@ maar wordt zichtbaar als `cleanup=FAILED_RETAINED`. De DBA kan dezelfde
 gedeelde cleanup-engine idempotent opnieuw aanroepen:
 
 ```bash
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh cleanup-stage --run-id <RUN_ID>
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh cleanup-stage --run-id <RUN_ID>
 ```
 
 Zie [Lokale stage-cleanup](STAGE_CLEANUP.md) voor de statussen, behouden
@@ -306,9 +315,9 @@ evidence en exacte verwijdergrens.
 Optionele diagnose, niet automatisch onderdeel van APPLY:
 
 ```bash
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh approval-check
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh show-context
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh version
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh approval-check
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh show-context
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh version
 ```
 
 `version` leest geen configuratie of Oracle-state en toont

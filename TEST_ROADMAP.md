@@ -35,7 +35,7 @@ voorbeelden hieronder gaan uit van:
 
 ```bash
 OPG_ROOT=/mnt/patch-share/oracle-patch-guard
-OPG_OEM="$OPG_ROOT/oem-tasks/opg_oem.sh"
+OPG_OEM="$OPG_ROOT/current/oem-tasks/opg_oem.sh"
 ```
 
 ## 2. Voorbereiding
@@ -50,7 +50,7 @@ SHA256 en lokale media technisch verifiëren.
 | Cyclemetadata | `sed -n '1,200p' "$PATCH_ROOT/<cycle>/opg_cycle.conf"` | Juiste cycle, DB RU, OJVM, ZIP-namen, OPatch-versie en SHA256's | Waarde is leeg, onverwacht of wijkt af van de goedgekeurde change |
 | Artifactmanifest | `stat "$PATCH_ROOT/<cycle>/artifact_manifest.json" "$PATCH_ROOT/<cycle>/artifact_manifest.sig"` | Beide reguliere bestanden zijn aanwezig onder de bedoelde cycle | Bestand ontbreekt, is een symlink of is ongewenst schrijfbaar |
 | Patch-ZIP's | `sha256sum <DB-RU.zip> <OJVM.zip> <OPatch.zip>` | Iedere hash is exact gelijk aan `opg_cycle.conf` en `artifact_manifest.json` | Hash, bestandsnaam of patch-ID wijkt af |
-| Bootstrap | `/bin/bash "$OPG_ROOT/oem-tasks/opg_bootstrap_host.sh"` | `OPG_BOOTSTRAP_RESULT|status=READY|exit_code=0` | Status is niet READY, exitcode is niet 0 of slechts een deel is geïnstalleerd |
+| Bootstrap | `/bin/bash "$OPG_ROOT/current/oem-tasks/opg_bootstrap_host.sh"` | `OPG_BOOTSTRAP_RESULT|status=READY|exit_code=0` | Status is niet READY, exitcode is niet 0 of slechts een deel is geïnstalleerd |
 | Target discovery | `/bin/bash "$OPG_OEM" new-run`, daarna `/bin/bash "$OPG_OEM" show-context` | Context toont exact de bedoelde host, SID, Oracle Home en cycle | Geen of meerdere targets worden gevonden, of context wijkt af |
 | Vrije ruimte | `df -Pm /u01/stage "$ORACLE_HOME"` | Waarden voldoen aan de beveiligde OPG-configuratie | Alleen de afgeronde `df -h`-waarde lijkt voldoende of PRECHECK blokkeert capaciteit |
 | Signer beschikbaar | Op de signer: `/secure/oracle-patch-guard/bin/opg_list_pending.sh --list` | Een leesbaar overzicht, eventueel nog zonder pending run | Configuratie-, key-, signature- of filesystemvalidatie geeft UNKNOWN/fout |
@@ -73,7 +73,7 @@ vóór de volledige PRECHECK, zodat ook de maintenance-window-readiness geldig
 kan worden beoordeeld.
 
 ```bash
-/bin/bash "$OPG_ROOT/oem-tasks/opg_bootstrap_host.sh"
+/bin/bash "$OPG_ROOT/current/oem-tasks/opg_bootstrap_host.sh"
 /bin/bash "$OPG_OEM" new-run
 /bin/bash "$OPG_OEM" prepare
 /bin/bash "$OPG_OEM" stage-media

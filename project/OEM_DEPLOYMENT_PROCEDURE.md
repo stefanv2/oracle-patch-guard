@@ -1,5 +1,12 @@
 # OEM 24ai deploymentprocedure
 
+> **Historische low-level procedure.** De actuele OEM-flow gebruikt de
+> immutable release onder `${OPG_ROOT}/current`, met wrapper en helpers uit
+> `current/oem-tasks` en core uit `current/project`. Gebruik voor nieuwe
+> deployments [OEM_WRAPPER_GUIDE.md](../OEM_WRAPPER_GUIDE.md) en
+> [RELEASE_LAYOUT.md](../docs/RELEASE_LAYOUT.md). De `/opt`-commando's hieronder
+> beschrijven de oudere rechtstreekse core-integratie.
+
 ## 1. Targetvoorbereiding
 
 Plaats root-owned, niet door het OEM-agentaccount wijzigbare kopieën onder bijvoorbeeld `/opt/oracle-patch-guard/`:

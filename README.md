@@ -129,7 +129,8 @@ approvaltaak verwerkte de onafhankelijke READY-runs gezamenlijk.
 ## Repository-indeling
 
 - `project/` — Patch Guard-core, controles, OEM-wrappers, fixtures en tests;
-- `oem-tasks/` — target-orchestratie, approval staging en mediahelpers;
+- `oem-tasks/` — bronset voor de releasegebonden target-orchestratie,
+  approval staging en mediahelpers;
 - `signer/` — read-only runstatus en orchestratie van multi-target-goedkeuring;
 - `config/examples/` — generieke voorbeelden voor cycles en sudoers;
 - `PATCH_CYCLE_GUIDE.md` — actuele operationele handleiding voor een nieuwe
@@ -149,6 +150,28 @@ daarnaast expliciet het huidige operationele `active_cycle`-pad van de bewezen
 omgeving. Controleer vóór deployment ieder pad, iedere owner en group, iedere
 sudo-regel, recovery-hook en het beleid voor het onderhoudsvenster.
 
+## Gedeployde runtime-indeling
+
+Een release bevat minimaal `project/` en de volledige map `oem-tasks/`. De
+immutable release-directory wordt uitsluitend via `${OPG_ROOT}/current`
+geactiveerd. Daardoor komen wrapper, OEM-helpers en core altijd uit dezelfde
+release:
+
+```text
+${OPG_ROOT}/current/oem-tasks/   releasegebonden OEM-code
+${OPG_ROOT}/current/project/     releasegebonden core
+${OPG_ROOT}/config/              persistente centrale configuratie
+${OPG_ROOT}/approvals/           persistente approvals
+${OPG_ROOT}/evidence/            persistente centrale evidence
+/etc/oracle-patch-guard/         hostconfig
+/var/lib/oracle-patch-guard/     actieve en gearchiveerde OEM-context
+/var/log/oracle-patch-guard/     run-evidence per RUN_ID
+```
+
+De actieve runtime gebruikt geen helpers uit `${OPG_ROOT}/oem-tasks`. Zie
+[Release-layout](docs/RELEASE_LAYOUT.md) voor de complete inhoud en de veilige
+wissel van `current`.
+
 ## Validatie
 
 Voer dit uit op Linux, waarbij Bash, Python 3.6.8 of nieuwer, OpenSSL en
@@ -162,6 +185,7 @@ bash tests/run_open_checks_tests.sh
 bash tests/run_pilot05b_tests.sh
 bash tests/run_oem14_approval_tests.sh
 bash tests/run_oem_wrapper_tests.sh
+bash tests/run_release_layout_tests.sh
 bash tests/run_media_lock_fd_tests.sh
 bash tests/run_pilot07_tests.sh
 bash tests/run_signer_pending_tests.sh
@@ -189,7 +213,7 @@ Controleer op een target welke wrapper werkelijk actief is zonder config of
 Oracle-discovery te starten:
 
 ```bash
-/bin/bash /mnt/patch-share/oracle-patch-guard/oem-tasks/opg_oem.sh version
+/bin/bash /mnt/patch-share/oracle-patch-guard/current/oem-tasks/opg_oem.sh version
 ```
 
 `OPG_VERSION|release=...|wrapper_sha256=...` toont de opgeloste immutable

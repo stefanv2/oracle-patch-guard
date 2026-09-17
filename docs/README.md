@@ -9,6 +9,8 @@ Begin voor actueel gebruik bij de documenten in de repository-root:
 - [Signer Pending Guide](../SIGNER_PENDING_GUIDE.md) — centrale approvalbediening;
 - [Test Roadmap](../TEST_ROADMAP.md) — acceptatie- en regressietesten;
 - [Stage Cleanup](../STAGE_CLEANUP.md) — begrensde cleanup na completion.
+- [Release-layout](RELEASE_LAYOUT.md) — complete immutable runtime-indeling en
+  activatie van `current`.
 
 De submappen bevatten technische traceerbaarheid en zijn geen primair
 operationeel runbook:
