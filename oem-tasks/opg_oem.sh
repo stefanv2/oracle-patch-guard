@@ -104,7 +104,7 @@ if [[ ${OPG_WRAPPER_TEST_MODE:-0} == 1 ]]; then
   if [[ -n ${OPG_TEST_OPG_ROOT:-} ]]; then OPG_ROOT=$OPG_TEST_OPG_ROOT; else OPG_ROOT=$(config_path_value "$CONFIG_FILE" OPG_ROOT) || exit $?; fi
   if [[ -n ${OPG_TEST_APPROVAL_ROOT:-} ]]; then APPROVAL_ROOT=$OPG_TEST_APPROVAL_ROOT; elif [[ -n ${OPG_TEST_OPG_ROOT:-} ]]; then APPROVAL_ROOT=${OPG_ROOT}/approvals; else APPROVAL_ROOT=$(config_path_value "$CONFIG_FILE" APPROVAL_ROOT) || exit $?; fi
   CONTEXT_ROOT=${OPG_TEST_CONTEXT_ROOT:-${OPG_TEST_ROOT}/var/lib/oracle-patch-guard}
-  TASK_ROOT=${OPG_TEST_TASK_ROOT:-${OPG_TEST_ROOT}/oem-tasks}
+  TASK_ROOT=${OPG_TEST_TASK_ROOT:-${OPG_ROOT}/current/oem-tasks}
   PROJECT_ROOT=${OPG_TEST_PROJECT_ROOT:-${OPG_TEST_ROOT}/current/project}
   DISCOVERY_FIXTURE=${OPG_TEST_DISCOVERY_FIXTURE:-${OPG_TEST_ROOT}/discovery.psv}
   CONTEXT_OWNER=${OPG_TEST_CONTEXT_OWNER:-$(id -un)}
@@ -123,7 +123,7 @@ else
   OPG_ROOT=$(config_path_value "$CONFIG_FILE" OPG_ROOT) || exit $?
   APPROVAL_ROOT=$(config_path_value "$CONFIG_FILE" APPROVAL_ROOT) || exit $?
   CONTEXT_ROOT=/var/lib/oracle-patch-guard
-  TASK_ROOT=${OPG_ROOT}/oem-tasks
+  TASK_ROOT=${OPG_ROOT}/current/oem-tasks
   PROJECT_ROOT=${OPG_ROOT}/current/project
   DISCOVERY_FIXTURE=
   CONTEXT_OWNER=root
