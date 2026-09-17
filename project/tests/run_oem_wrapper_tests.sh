@@ -161,6 +161,46 @@ grep -Fxq "OPG_VERSION|release=$(basename "$ROOT")|wrapper_sha256=${expected_wra
 [[ ! -e "$CONTEXT_ROOT/current_run.json" ]] || rc=98
 record 'version toont werkelijk wrapperhash en release zonder contextmutatie' 0 "$rc"
 
+# Zonder testoverride komen alle releasegebonden OEM-helpers uitsluitend uit current/oem-tasks.
+setup_case releasehelpers; RELEASE_TASK_ROOT="$OPG_ROOT/current/oem-tasks"; LEGACY_TASK_ROOT="$OPG_ROOT/oem-tasks"
+mkdir -p "$RELEASE_TASK_ROOT" "$LEGACY_TASK_ROOT"
+write_mock "$RELEASE_TASK_ROOT/opg_prepare_host.sh" "printf 'release|prepare\\n' >>'$CASE/routes.log'; exit 0"
+write_mock "$RELEASE_TASK_ROOT/opg_create_window.sh" "printf 'release|create-window\\n' >>'$CASE/routes.log'; exit 0"
+write_mock "$RELEASE_TASK_ROOT/opg_assess_task.sh" "printf 'release|assess\\n' >>'$CASE/routes.log'; exit 10"
+write_mock "$RELEASE_TASK_ROOT/opg_stage_approval.sh" "printf 'release|stage\\n' >>'$CASE/routes.log'; exit 0"
+cat >"$RELEASE_TASK_ROOT/opg_blackout.py" <<PY
+with open(r'$CASE/routes.log', 'a') as handle:
+    handle.write('release|blackout\\n')
+PY
+chmod 0750 "$RELEASE_TASK_ROOT/opg_blackout.py"
+for helper in opg_prepare_host.sh opg_create_window.sh opg_assess_task.sh opg_stage_approval.sh; do
+  write_mock "$LEGACY_TASK_ROOT/$helper" "printf 'legacy|%s\\n' '$helper' >>'$CASE/routes.log'; exit 99"
+done
+cat >"$LEGACY_TASK_ROOT/opg_blackout.py" <<PY
+with open(r'$CASE/routes.log', 'a') as handle:
+    handle.write('legacy|opg_blackout.py\\n')
+raise SystemExit(99)
+PY
+chmod 0750 "$LEGACY_TASK_ROOT/opg_blackout.py"
+unset OPG_TEST_TASK_ROOT
+run_wrapper prepare; release_helpers_rc=$?
+run_wrapper create-window; [[ $? -eq 0 ]] || release_helpers_rc=99
+run_wrapper assess; [[ $? -eq 10 ]] || release_helpers_rc=98
+release_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$release_run" 03_PLAN_GENERATED PLAN
+run_wrapper stage; [[ $? -eq 0 ]] || release_helpers_rc=97
+run_wrapper_args blackout-stop --run-id "$release_run"; [[ $? -eq 0 ]] || release_helpers_rc=96
+for route in prepare create-window assess stage blackout; do grep -Fxq "release|${route}" "$CASE/routes.log" || release_helpers_rc=95; done
+if grep -q '^legacy|' "$CASE/routes.log"; then release_helpers_rc=94; fi
+record 'runtimehelpers komen uitsluitend uit current/oem-tasks' 0 "$release_helpers_rc"
+
+setup_case releasehelpermissing; LEGACY_TASK_ROOT="$OPG_ROOT/oem-tasks"; mkdir -p "$LEGACY_TASK_ROOT"
+write_mock "$LEGACY_TASK_ROOT/opg_prepare_host.sh" "printf 'legacy|opg_prepare_host.sh\\n' >>'$CASE/routes.log'; exit 0"
+unset OPG_TEST_TASK_ROOT
+run_wrapper prepare; missing_release_helper_rc=$?
+[[ ! -s "$CASE/routes.log" ]] || missing_release_helper_rc=99
+grep -Fq "$OPG_ROOT/current/oem-tasks/opg_prepare_host.sh" "$OUT" || missing_release_helper_rc=98
+record 'ontbrekende current-helper valt niet terug op OPG_ROOT/oem-tasks' 20 "$missing_release_helper_rc"
+
 # 1. Correcte cycle discovery.
 setup_case cycleok; run_wrapper prepare; rc=$?; context="$CONTEXT_ROOT/current_run.json"
 [[ "$(json_get "$context" patch_cycle)" == JUL2026 && "$(json_get "$context" db_ru_patch_id)" == 39472050 && "$(json_get "$context" opatch_zip)" == p6880880_190000_Linux-x86-64.zip ]] || rc=99
