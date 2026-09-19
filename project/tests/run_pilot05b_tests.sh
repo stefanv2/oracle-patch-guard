@@ -124,7 +124,7 @@ run_listener_service_resume_case() {
   force_partial_listener_state "$run"
   printf '\nMOCK_LISTENER_REPORTED_SERVICE=%s\nMOCK_LISTENER_REPORTED_SID=%s\nMOCK_LISTENER_SERVICES_READY=%s\n' \
     "$reported_service" "$reported_sid" "$ready" >>"$FIXTURE_ENV"
-  guard resume --non-interactive --run-id "$run" >"$CASE_DIR/resume.out" 2>&1
+  guard resume --non-interactive --run-id "$run" --approved-manifest "$RUN_ROOT/$run/patch_manifest.json" --approval-token "$(approval "$run")" >"$CASE_DIR/resume.out" 2>&1
 }
 
 # P05-01: planning, happy path, idempotency, invalid/unknown media and dry-run.
@@ -161,7 +161,7 @@ for point in STAGING BACKUP PROMOTION; do
   printf '\nMOCK_OPATCH_INTERRUPT_AFTER=%s\n' "$point" >>"$FIXTURE_ENV"
   guard apply --non-interactive --run-id "$run" --approved-manifest "$RUN_ROOT/$run/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
   apply_rc=$?; printf '\nMOCK_OPATCH_INTERRUPT_AFTER=\n' >>"$FIXTURE_ENV"
-  guard resume --non-interactive --run-id "$run" >"$CASE_DIR/resume.out" 2>&1
+  guard resume --non-interactive --run-id "$run" --approved-manifest "$RUN_ROOT/$run/patch_manifest.json" --approval-token "$(approval "$run")" >"$CASE_DIR/resume.out" 2>&1
   rc=$?; [[ "$apply_rc" == 40 && "$(<"$HOME_DIR/OPatch/.opg-version")" == 12.2.0.1.52 ]] || rc=99
   [[ $(grep -Fc 'COMMAND_START|label=apply_db_ru|' "$RUN_ROOT/$run/commands.log") == 1 && $(grep -Fc 'COMMAND_START|label=apply_ojvm|' "$RUN_ROOT/$run/commands.log") == 1 ]] || rc=98
   record "P05-01 veilige resume na ${point,,}" 0 "$rc" "$CASE_DIR/resume.out"
@@ -191,17 +191,17 @@ record 'P05-03 listener-timeout blijft fail-closed' 40 "$rc" "$CASE_DIR/apply.ou
 
 # P05-04: echte PARTIAL:START_LISTENER-route en negatieve postconditions.
 setup_case listenerresume; assess P04A >/dev/null; plan P04A >/dev/null; force_partial_listener_state P04A
-guard resume --non-interactive --run-id P04A >"$CASE_DIR/resume.out" 2>&1
+guard resume --non-interactive --run-id P04A --approved-manifest "$RUN_ROOT/P04A/patch_manifest.json" --approval-token "$(approval P04A)" >"$CASE_DIR/resume.out" 2>&1
 rc=$?; grep -q 'COMMAND_START|label=listener_register_DB1|' "$RUN_ROOT/P04A/commands.log" || rc=99
 ! grep -q 'COMMAND_START|label=apply_db_ru\|COMMAND_START|label=apply_ojvm' "$RUN_ROOT/P04A/commands.log" || rc=98
 record 'P05-04 START_LISTENER resume gaat veilig naar datapatch' 0 "$rc" "$CASE_DIR/resume.out"
 
 setup_case listenerwronghome; assess P04B >/dev/null; plan P04B >/dev/null; force_partial_listener_state P04B; printf '\nMOCK_LISTENER_WRONG_HOME=true\n' >>"$FIXTURE_ENV"
-guard resume --non-interactive --run-id P04B >"$CASE_DIR/resume.out" 2>&1
+guard resume --non-interactive --run-id P04B --approved-manifest "$RUN_ROOT/P04B/patch_manifest.json" --approval-token "$(approval P04B)" >"$CASE_DIR/resume.out" 2>&1
 record 'P05-04 listener uit verkeerde home blokkeert' 50 $? "$CASE_DIR/resume.out"
 
 setup_case listenerservicebad; printf '\nLISTENER_READY_TIMEOUT_SECONDS=1\nLISTENER_POLL_SECONDS=1\n' >>"$CONFIG"; assess P04C >/dev/null; plan P04C >/dev/null; force_partial_listener_state P04C; printf '\nMOCK_LISTENER_SERVICES_READY=false\n' >>"$FIXTURE_ENV"
-guard resume --non-interactive --run-id P04C >"$CASE_DIR/resume.out" 2>&1
+guard resume --non-interactive --run-id P04C --approved-manifest "$RUN_ROOT/P04C/patch_manifest.json" --approval-token "$(approval P04C)" >"$CASE_DIR/resume.out" 2>&1
 record 'P05-04 niet-READY manifestservice blokkeert' 50 $? "$CASE_DIR/resume.out"
 
 # P05-05: alleen exact of unqualified + punt + domeinsuffix mag matchen.
@@ -321,7 +321,7 @@ assess P06M >/dev/null; plan P06M >/dev/null; token=$(approval P06M)
 guard apply --non-interactive --run-id P06M --approved-manifest "$RUN_ROOT/P06M/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1 || true
 before_mutations=$(grep -Ec 'label=(apply_db_ru|apply_ojvm|datapatch_DB1|utlrp_DB1)' "$RUN_ROOT/P06M/commands.log")
 printf "\nMOCK_REGISTRY_AFTER='REGISTRY|CATALOG|VALID;CDB_REGISTRY|1|CATALOG|VALID'\n" >>"$FIXTURE_ENV"
-guard resume --non-interactive --run-id P06M >"$CASE_DIR/resume.out" 2>&1
+guard resume --non-interactive --run-id P06M --approved-manifest "$RUN_ROOT/P06M/patch_manifest.json" --approval-token "$(approval P06M)" >"$CASE_DIR/resume.out" 2>&1
 rc=$?
 after_mutations=$(grep -Ec 'label=(apply_db_ru|apply_ojvm|datapatch_DB1|utlrp_DB1)' "$RUN_ROOT/P06M/commands.log")
 [[ "$before_mutations" == "$after_mutations" ]] || rc=99

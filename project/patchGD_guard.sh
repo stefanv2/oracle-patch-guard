@@ -1472,9 +1472,16 @@ EOF
 
 verify_approval() {
   local manifest=$1 token=$2 actual_hash token_hash token_host token_home approved expires now condition accepted manifest_signature approval_signature
+  local planned_key_hash current_key_hash
   APPROVAL_ERROR=
   [[ -r "$manifest" ]] || { APPROVAL_ERROR="approved manifest is not readable: ${manifest}"; return 1; }
   [[ -r "$token" ]] || { APPROVAL_ERROR="approval token is not readable: ${token}"; return 1; }
+  [[ "$(opg_get_json_string "$manifest" run_id)" == "$RUN_ID" ]] || { APPROVAL_ERROR="manifest RUN_ID mismatch"; return 1; }
+  [[ "$(opg_get_json_string "$manifest" hostname)" == "$HOST_NAME" ]] || { APPROVAL_ERROR="manifest hostname mismatch"; return 1; }
+  [[ "$(opg_get_json_string "$manifest" target_oracle_home)" == "$TARGET_ORACLE_HOME" ]] || { APPROVAL_ERROR="manifest Oracle Home mismatch"; return 1; }
+  planned_key_hash=$(opg_get_json_string "$manifest" approval_public_key_sha256)
+  current_key_hash=$(approval_public_key_sha256) || { APPROVAL_ERROR="approval public key is unavailable or invalid"; return 1; }
+  [[ "$planned_key_hash" =~ ^[0-9a-f]{64}$ && "$planned_key_hash" == "$current_key_hash" ]] || { APPROVAL_ERROR="approval public key differs from PLAN trust binding"; return 1; }
   actual_hash=$(opg_sha256 "$manifest") || { APPROVAL_ERROR="approved manifest hash could not be calculated"; return 1; }
   token_hash=$(opg_get_json_string "$token" manifest_sha256)
   token_host=$(opg_get_json_string "$token" hostname)
@@ -2878,6 +2885,28 @@ perform_resume() {
     opg_release_lock; trap - EXIT
     opg_result_line "$EXIT_OK" READY RESUME_DRY_RUN
     return 0
+  fi
+  # Recovery that can advance the run requires a CURRENT approval, just like
+  # APPLY. Never infer authorization from local state/checksums. Keep the
+  # existing read-only dry-run and historical COMPLETE routes above/below.
+  if [[ "$CURRENT_STATE" != 12_COMPLETE ]]; then
+    APPROVAL_ERROR=
+    if [[ -z "${APPROVED_MANIFEST:-}" || -z "${APPROVAL_TOKEN:-}" ]]; then
+      APPROVAL_ERROR="resume requires --approved-manifest and --approval-token"
+    elif ! opg_verify_manifest_hash "${RUN_DIR}/patch_manifest.json"; then
+      APPROVAL_ERROR="local manifest hash verification failed before resume"
+    elif [[ "$(opg_sha256 "$APPROVED_MANIFEST")" != "$(opg_sha256 "${RUN_DIR}/patch_manifest.json")" ]]; then
+      APPROVAL_ERROR="approved manifest differs from the run manifest before resume"
+    elif ! verify_approval "$APPROVED_MANIFEST" "$APPROVAL_TOKEN"; then
+      :
+    fi
+    if [[ -n "$APPROVAL_ERROR" ]]; then
+      report_approval_blocked "$APPROVAL_ERROR"
+      # Preserve the recoverable phase so corrected authorization can retry.
+      opg_release_lock; trap - EXIT
+      opg_result_line "$EXIT_BLOCKED" BLOCKED RESUME_APPROVAL
+      return "$EXIT_BLOCKED"
+    fi
   fi
   # Wordt indirect gelezen door opg_run_capture uit de ingeladen core-library.
   # shellcheck disable=SC2034
