@@ -234,7 +234,7 @@ guard apply --non-interactive --run-id R13 --approved-manifest "$RUN_ROOT/R13/pa
 
 # 14. Gewijzigde omgeving vóór resume.
 setup_case resumechange; assess R14 >/dev/null; plan R14 >/dev/null; token=$(approval R14); printf '\nMOCK_RC_apply_ojvm=1\n' >>"$FIXTURE_ENV"; guard apply --non-interactive --run-id R14 --approved-manifest "$RUN_ROOT/R14/patch_manifest.json" --approval-token "$token" >/dev/null 2>&1 || true
-printf '\nMOCK_ENVIRONMENT_CHANGED=true\n' >>"$FIXTURE_ENV"; guard resume --non-interactive --run-id R14 >"$CASE_DIR/resume.out" 2>&1; record 'gewijzigde omgeving voor resume' 50 $? "$CASE_DIR/resume.out"
+printf '\nMOCK_ENVIRONMENT_CHANGED=true\n' >>"$FIXTURE_ENV"; guard resume --non-interactive --run-id R14 --approved-manifest "$RUN_ROOT/R14/patch_manifest.json" --approval-token "$(approval R14)" >"$CASE_DIR/resume.out" 2>&1; record 'gewijzigde omgeving voor resume' 50 $? "$CASE_DIR/resume.out"
 
 # 15. Twee jobs voor dezelfde home: een bezette lock blokkeert apply.
 setup_case lock; assess R15 >/dev/null; plan R15 >/dev/null; token=$(approval R15); printf '\nMOCK_LOCK_BUSY=true\n' >>"$FIXTURE_ENV"
@@ -286,13 +286,13 @@ guard apply --non-interactive --run-id R26 --approved-manifest "$RUN_ROOT/R26/pa
 # 27. Veilige resume na een DB-RU-applyfout die in inventory toch volledig aanwezig blijkt.
 setup_case resumesafe; assess R27 >/dev/null; plan R27 >/dev/null; token=$(approval R27); printf '\nMOCK_RC_apply_db_ru=1\n' >>"$FIXTURE_ENV"
 guard apply --non-interactive --run-id R27 --approved-manifest "$RUN_ROOT/R27/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1 || true
-guard resume --non-interactive --run-id R27 >"$CASE_DIR/resume.out" 2>&1; record 'fasegebonden veilige resume' 0 $? "$CASE_DIR/resume.out"
+guard resume --non-interactive --run-id R27 --approved-manifest "$RUN_ROOT/R27/patch_manifest.json" --approval-token "$(approval R27)" >"$CASE_DIR/resume.out" 2>&1; record 'fasegebonden veilige resume' 0 $? "$CASE_DIR/resume.out"
 
 # 28. Een gemanipuleerd per-SID completion-marker blokkeert resume.
 setup_case resumemarker multiple_databases; printf 'DB1:%s:Y\nDB2:%s:Y\n' "$HOME_DIR" "$HOME_DIR" >"$ORATAB"; assess R28 >/dev/null; plan R28 >/dev/null; token=$(approval R28); printf '\nMOCK_RC_datapatch_DB2=1\n' >>"$FIXTURE_ENV"
 guard apply --non-interactive --run-id R28 --approved-manifest "$RUN_ROOT/R28/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1 || true
 sed -i '/^run_id=/d' "$RUN_ROOT/R28/datapatch_DB1.complete"
-guard resume --non-interactive --run-id R28 >"$CASE_DIR/resume.out" 2>&1; record 'ongeldig completion-marker blokkeert resume' 50 $? "$CASE_DIR/resume.out"
+guard resume --non-interactive --run-id R28 --approved-manifest "$RUN_ROOT/R28/patch_manifest.json" --approval-token "$(approval R28)" >"$CASE_DIR/resume.out" 2>&1; record 'ongeldig completion-marker blokkeert resume' 50 $? "$CASE_DIR/resume.out"
 
 # 29-33. Fail-closed resultaten voor de drie nieuw ingevulde controles.
 setup_case recoveryblocked; printf '\nMOCK_CHECK_ORACLE_HOME_RECOVERY=BLOCKED\n' >>"$FIXTURE_ENV"; assess R29; record 'ongeldige rebuild-route blokkeert' 20 $? "$CASE_DIR/R29.out"
@@ -345,19 +345,19 @@ guard apply --non-interactive --run-id R42 --approved-manifest "$RUN_ROOT/R42/pa
 
 # 43-45. Resume reconstrueert alleen aantoonbare database/listenerprogressie.
 setup_case resumestarted; assess R43 >/dev/null; plan R43 >/dev/null; token=$(approval R43); force_partial_start_state R43
-guard resume --non-interactive --run-id R43 >"$CASE_DIR/resume.out" 2>&1
+guard resume --non-interactive --run-id R43 --approved-manifest "$RUN_ROOT/R43/patch_manifest.json" --approval-token "$(approval R43)" >"$CASE_DIR/resume.out" 2>&1
 rc=$?; grep -q '^run_id=R43$' "$RUN_ROOT/R43/startup_DB1.complete" || rc=99; ! grep -q 'label=apply_db_ru\|label=apply_ojvm' "$RUN_ROOT/R43/commands.log" || rc=98
 record 'PARTIAL START resume met reeds aanwezige binaries' 0 "$rc" "$CASE_DIR/resume.out"
 
 setup_case resumelistenerwrong; printf '\nLISTENER_READY_TIMEOUT_SECONDS=1\nLISTENER_POLL_SECONDS=1\n' >>"$CONFIG"; assess R44 >/dev/null; plan R44 >/dev/null; token=$(approval R44); force_partial_start_state R44; printf '\nMOCK_LISTENER_WRONG_HOME=true\n' >>"$FIXTURE_ENV"
-guard resume --non-interactive --run-id R44 >"$CASE_DIR/resume.out" 2>&1; record 'listener uit verkeerde home blokkeert resume' 50 $? "$CASE_DIR/resume.out"
+guard resume --non-interactive --run-id R44 --approved-manifest "$RUN_ROOT/R44/patch_manifest.json" --approval-token "$(approval R44)" >"$CASE_DIR/resume.out" 2>&1; record 'listener uit verkeerde home blokkeert resume' 50 $? "$CASE_DIR/resume.out"
 
 setup_case resumelistenernotready; printf '\nLISTENER_READY_TIMEOUT_SECONDS=1\nLISTENER_POLL_SECONDS=1\n' >>"$CONFIG"; assess R45 >/dev/null; plan R45 >/dev/null; token=$(approval R45); force_partial_start_state R45; printf '\nMOCK_LISTENER_SERVICES_READY=false\n' >>"$FIXTURE_ENV"
-guard resume --non-interactive --run-id R45 >"$CASE_DIR/resume.out" 2>&1; record 'listener zonder READY-services blokkeert resume' 50 $? "$CASE_DIR/resume.out"
+guard resume --non-interactive --run-id R45 --approved-manifest "$RUN_ROOT/R45/patch_manifest.json" --approval-token "$(approval R45)" >"$CASE_DIR/resume.out" 2>&1; record 'listener zonder READY-services blokkeert resume' 50 $? "$CASE_DIR/resume.out"
 
 # 46-47. Fasecontext blijft strikt; checksumwerk is zichtbaar en begrensd.
 setup_case resumecontext; assess R46 >/dev/null; plan R46 >/dev/null; token=$(approval R46); force_partial_start_state R46; printf 'changed\n' >>"$PATCH_ROOT/JUL2026/39472050/payload.bin"
-guard resume --non-interactive --run-id R46 >"$CASE_DIR/resume.out" 2>&1; rc=$?; grep -q 'STATIC_CONTEXT_MISMATCH|check=db_patch_tree_sha256' "$RUN_ROOT/R46/commands.log" || rc=99; record 'gewijzigde fasecontext blokkeert resume diagnostisch' 50 "$rc" "$CASE_DIR/resume.out"
+guard resume --non-interactive --run-id R46 --approved-manifest "$RUN_ROOT/R46/patch_manifest.json" --approval-token "$(approval R46)" >"$CASE_DIR/resume.out" 2>&1; rc=$?; grep -q 'STATIC_CONTEXT_MISMATCH|check=db_patch_tree_sha256' "$RUN_ROOT/R46/commands.log" || rc=99; record 'gewijzigde fasecontext blokkeert resume diagnostisch' 50 "$rc" "$CASE_DIR/resume.out"
 
 setup_case integritylog; assess R47 >/dev/null; rc=$?; grep -q 'INTEGRITY_CHECK_START' "$RUN_ROOT/R47/commands.log" && grep -q 'INTEGRITY_CHECK_END.*status=OK' "$RUN_ROOT/R47/commands.log" || rc=99; record 'checksum start/eindlogging' 10 "$rc" "$CASE_DIR/R47.out"
 
@@ -394,7 +394,7 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$CASE_DIR/app
 openssl pkey -in "$CASE_DIR/approval-private.pem" -pubout -out "$CASE_DIR/approval-public.pem" >/dev/null 2>&1
 TEST_SIGN_APPROVAL=1; token=$(approval R54); unset TEST_SIGN_APPROVAL; printf '\nTEST_REQUIRE_SIGNATURES=true\n' >>"$FIXTURE_ENV"
 guard apply --non-interactive --run-id R54 --approved-manifest "$RUN_ROOT/R54/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/apply.out" 2>&1
-rc=$?; grep -Fq 'APPROVAL_TRUST_CHANGED' "$RUN_ROOT/R54/preapply_findings.psv" || rc=99
+rc=$?; grep -Fq 'approval public key differs from PLAN trust binding' "$CASE_DIR/apply.out" || rc=99
 record 'vervangen key met eigen geldige signatures blijft BLOCKED' 20 "$rc" "$CASE_DIR/apply.out"; assert_no_downtime_started 'trust-anchorwijziging blokkeert vóór downtime' R54
 
 setup_case trustmissing; rm -f -- "$CASE_DIR/approval-public.pem"; assess R55
@@ -433,7 +433,7 @@ guard apply --non-interactive --run-id R62 --approved-manifest "$RUN_ROOT/R62/pa
 setup_case localresume autostart_n; printf 'DBN:%s:N\n' "$HOME_DIR" >"$ORATAB"; enable_local_media; assess R60 >/dev/null; plan R60 >/dev/null; token=$(approval R60); printf '\nMOCK_RC_apply_db_ru=1\n' >>"$FIXTURE_ENV"
 guard apply --non-interactive --run-id R60 --approved-manifest "$RUN_ROOT/R60/patch_manifest.json" --approval-token "$token" >/dev/null 2>&1 || true
 mv "$PATCH_ROOT" "$CASE_DIR/remote.offline"; sed -i '/MOCK_RC_apply_db_ru=1/d' "$FIXTURE_ENV"
-guard resume --non-interactive --run-id R60 >"$CASE_DIR/resume.out" 2>&1; rc=$?
+guard resume --non-interactive --run-id R60 --approved-manifest "$RUN_ROOT/R60/patch_manifest.json" --approval-token "$(approval R60)" >"$CASE_DIR/resume.out" 2>&1; rc=$?
 record 'Pilot07 resume gebruikt dezelfde lokale stage zonder share' 0 "$rc" "$CASE_DIR/resume.out"
 
 setup_case localkeychange autostart_n; printf 'DBN:%s:N\n' "$HOME_DIR" >"$ORATAB"; enable_local_media; assess R61 >/dev/null; plan R61 >/dev/null; token=$(approval R61); sed -i 's/2222222222222222222222222222222222222222222222222222222222222222/3333333333333333333333333333333333333333333333333333333333333333/' "$LOCAL_MEDIA_HELPER"
