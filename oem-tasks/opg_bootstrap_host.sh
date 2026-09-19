@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 if [[ ${OPG_BOOTSTRAP_TEST_MODE:-0} == 1 ]]; then
     TEST_ROOT=${OPG_BOOTSTRAP_TEST_ROOT:-}
@@ -23,7 +24,8 @@ if [[ ${OPG_BOOTSTRAP_TEST_MODE:-0} == 1 ]]; then
     STAGE_GROUP=root
     CONFIG_GROUP=root
 else
-    BASE=/mnt/datadomain/software/patches/Linux/oracle-patch-guard/current
+    export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    BASE=${OPG_BOOTSTRAP_BASE:-/mnt/datadomain/software/patches/Linux/oracle-patch-guard/current}
     DST_CONTEXT=/usr/local/sbin/opg_context_root.sh
     DST_MEDIA_SH=/usr/local/sbin/opg_media_stage_root.sh
     DST_MEDIA_PY=/usr/local/libexec/opg_media_stage_root.py
@@ -46,8 +48,12 @@ SRC_MEDIA_PY="$BASE/oem-tasks/opg_media_stage_root.py"
 SRC_SUDOERS="$BASE/config/examples/oracle-patch-guard-context.sudoers"
 SUDOERS_DIR=${SUDOERS_DST%/*}
 CONFIG_DIR=${CONFIG_DST%/*}
+KEY_DST="$CONFIG_DIR/approval_public.pem"
+PROCEDURE_DST="$CONFIG_DIR/oracle_home_rebuild.md"
+declare -A CONFIG_VALUES=()
 SUDOERS_TEMP=
 CONFIG_TEMP=
+SOURCE_STAGE=
 
 log() {
     printf 'OPG_BOOTSTRAP|%s\n' "$*"
@@ -66,8 +72,14 @@ OPG_ROOT=${BASE%/current}
    && "$OPG_ROOT" != */../* && "$OPG_ROOT" != */./* && "$OPG_ROOT" != */.. && "$OPG_ROOT" != */. ]] \
     || fail "OPG_ROOT kon niet veilig uit BASE worden afgeleid"
 SRC_CONFIG="$OPG_ROOT/config/patchGD_guard.conf"
+SRC_KEY="$OPG_ROOT/config/approval_public.pem"
+SRC_PROCEDURE="$OPG_ROOT/config/oracle_home_rebuild.md"
 
 cleanup() {
+    if [[ -n ${SOURCE_STAGE:-} ]]; then
+        rm -f -- "$SOURCE_STAGE"/*
+        rmdir -- "$SOURCE_STAGE"
+    fi
     if [[ -n ${SUDOERS_TEMP:-} && -f $SUDOERS_TEMP && ! -L $SUDOERS_TEMP ]]; then
         rm -f -- "$SUDOERS_TEMP"
     fi
@@ -78,7 +90,7 @@ cleanup() {
 trap cleanup EXIT
 
 validate_config_candidate() {
-    local candidate=$1 raw key value required_key
+    local candidate=$1 raw key value required_key semantic_value
     declare -A seen=()
     declare -A required=(
         [PATCH_ROOT]=1
@@ -87,8 +99,14 @@ validate_config_candidate() {
         [LOCK_ROOT]=1
         [OPG_ROOT]=1
         [APPROVAL_ROOT]=1
+        [LOCAL_STAGE_ROOT]=1
+        [MEDIA_STAGE_HELPER]=1
+        [APPROVAL_PUBLIC_KEY]=1
+        [HOME_RECOVERY_PROCEDURE]=1
     )
 
+    bash -n "$candidate" || fail "config is geen geldige shellconfig"
+    CONFIG_VALUES=()
     while IFS= read -r raw || [[ -n "$raw" ]]; do
         raw=${raw%$'\r'}
         raw=${raw#"${raw%%[![:space:]]*}"}
@@ -99,8 +117,12 @@ validate_config_candidate() {
         key=${key#"${key%%[![:space:]]*}"}; key=${key%"${key##*[![:space:]]}"}
         value=${value#"${value%%[![:space:]]*}"}; value=${value%"${value##*[![:space:]]}"}
         [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || fail "ongeldige configsleutel: $key"
+        [[ "$raw" == "${key}="* && "${raw#*=}" != [[:space:]]* ]] || fail "config vereist shell KEY=VALUE zonder spaties rond '=': $key"
         [[ -z ${seen[$key]+x} ]] || fail "dubbele configsleutel: $key"
         seen[$key]=1
+        semantic_value=$value
+        if [[ "$value" == \"*\" || "$value" == \'*\' ]]; then semantic_value=${value:1:${#value}-2}; fi
+        CONFIG_VALUES[$key]=$semantic_value
         if [[ -n ${required[$key]+x} ]]; then
             [[ -n "$value" ]] || fail "lege verplichte configwaarde: $key"
             [[ "$value" == /* && "$value" =~ ^/[A-Za-z0-9_./-]+$ && "$value" != *'//'*
@@ -109,10 +131,50 @@ validate_config_candidate() {
         fi
     done <"$candidate"
 
-    for required_key in PATCH_ROOT OPATCH_ROOT RUN_ROOT LOCK_ROOT OPG_ROOT APPROVAL_ROOT; do
+    for required_key in "${!required[@]}"; do
         [[ -n ${seen[$required_key]+x} ]] \
             || fail "verplichte configsleutel ontbreekt: $required_key"
     done
+    [[ ${CONFIG_VALUES[LOCAL_MEDIA_MODE]:-} == required ]] || fail "LOCAL_MEDIA_MODE=required ontbreekt"
+    [[ ${CONFIG_VALUES[OPG_ROOT]} == "$OPG_ROOT" ]] || fail "OPG_ROOT wijkt af van bootstrap-release"
+    [[ ${CONFIG_VALUES[LOCAL_STAGE_ROOT]} == "$STAGE_ROOT" ]] || fail "LOCAL_STAGE_ROOT wijkt af van vaste stage-root"
+    [[ ${CONFIG_VALUES[MEDIA_STAGE_HELPER]} == "$DST_MEDIA_SH" ]] || fail "MEDIA_STAGE_HELPER wijkt af van geïnstalleerde helper"
+    [[ ${CONFIG_VALUES[APPROVAL_PUBLIC_KEY]} == "$KEY_DST" ]] || fail "APPROVAL_PUBLIC_KEY wijkt af van bootstrap-doel"
+    [[ ${CONFIG_VALUES[HOME_RECOVERY_PROCEDURE]} == "$PROCEDURE_DST" ]] || fail "HOME_RECOVERY_PROCEDURE wijkt af van bootstrap-doel"
+    [[ ${CONFIG_VALUES[RUN_ROOT]} != / && ${CONFIG_VALUES[LOCK_ROOT]} != / &&
+       ${CONFIG_VALUES[RUN_ROOT]} != "${CONFIG_VALUES[LOCK_ROOT]}" ]] || fail "onveilige RUN_ROOT/LOCK_ROOT"
+    [[ ${CONFIG_VALUES[ALLOW_TEST_MODE]:-false} == false ]] || fail "ALLOW_TEST_MODE moet false blijven"
+
+    # Hooks are optional. If configured, reject missing executables rather than
+    # installing a config that depends on an undocumented /opt copy.
+    for key in BACKUP_CHECK_COMMAND ORACLE_HOME_RECOVERY_CHECK_COMMAND MAINTENANCE_WINDOW_CHECK_COMMAND DATAGUARD_CHECK_COMMAND; do
+        value=${CONFIG_VALUES[$key]:-}
+        [[ -n "$value" ]] || continue
+        [[ "$value" =~ ^/[A-Za-z0-9_./-]+$ && -f "$value" && -x "$value" && ! -L "$value" ]] \
+            || fail "geconfigureerde hook ontbreekt of is onveilig: $key"
+    done
+    if [[ ${CONFIG_VALUES[BACKUP_CHECK_COMMAND]:-} == */check_rman_backup ]]; then
+        for key in EXPECTED_SBT_LIBRARY EXPECTED_BACKUP_HOST EXPECTED_STORAGE_UNIT; do
+            value=${CONFIG_VALUES[$key]:-}
+            [[ "$value" =~ [^[:space:]] && "$value" != *example.com* ]] \
+                || fail "sitewaarde ontbreekt voor RMAN-hook: $key"
+        done
+    fi
+    if [[ ${CONFIG_VALUES[ORACLE_HOME_RECOVERY_CHECK_COMMAND]:-} == */check_oracle_home_recovery ]]; then
+        value=${CONFIG_VALUES[RECOVERY_BASE_IMAGE]:-}
+        [[ "$value" == /* && -r "$value" && -f "$value" && ! -L "$value" ]] \
+            || fail "RECOVERY_BASE_IMAGE ontbreekt of is onveilig"
+        for key in RECOVERY_BASE_IMAGE_SHA256 OPATCH_ZIP_SHA256; do
+            [[ ${CONFIG_VALUES[$key]:-} =~ ^[A-Fa-f0-9]{64}$ ]] || fail "geldige checksum ontbreekt: $key"
+        done
+    fi
+    value=${CONFIG_VALUES[MAINTENANCE_WINDOW_CHECK_COMMAND]:-}
+    if [[ "$value" == "$BASE/project/checks/check_maintenance_window" ]] ||
+       { [[ -n "$value" ]] && cmp -s "$value" "$BASE/project/checks/check_maintenance_window"; }; then
+        [[ ${CONFIG_VALUES[MAINTENANCE_WINDOW_MANIFEST]:-} =~ ^/[A-Za-z0-9_./-]+$ ]] \
+            || fail "MAINTENANCE_WINDOW_MANIFEST-pad ontbreekt"
+        # CREATE-WINDOW supplies the actual lifecycle-bound file later.
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -121,16 +183,49 @@ validate_config_candidate() {
 
 [[ $EUID -eq 0 ]] || fail "bootstrap moet als root draaien"
 
+for dependency in bash python3 openssl sudo flock timeout sha256sum stat readlink realpath mktemp \
+                  install cmp mv rm chown chmod awk grep sed cut head tail tr sort find xargs \
+                  pgrep df du date hostname id getent unzip zipinfo cp cat sync rmdir; do
+    command -v "$dependency" >/dev/null 2>&1 || fail "vereiste OS-tool ontbreekt: $dependency"
+done
+/usr/bin/python3 -I -c 'import sys, ssl, zipfile, hashlib, fcntl; assert sys.version_info >= (3, 6)' \
+    || fail "Python 3.6+ met vereiste standaardmodules ontbreekt"
+[[ -x /usr/bin/openssl ]] || fail "/usr/bin/openssl ontbreekt"
+if ! id "$RUN_USER" >/dev/null 2>&1 || ! getent group "$STAGE_GROUP" >/dev/null; then
+    fail "Oracle runtimegebruiker/groep ontbreekt"
+fi
+
 log "START|host=$(hostname -f 2>/dev/null || hostname)"
 
 # ---------------------------------------------------------------------------
 # Validate source files
 # ---------------------------------------------------------------------------
 
-for src in "$SRC_CONTEXT" "$SRC_MEDIA_SH" "$SRC_MEDIA_PY" "$SRC_SUDOERS" "$SRC_CONFIG"; do
+for src in "$SRC_CONTEXT" "$SRC_MEDIA_SH" "$SRC_MEDIA_PY" "$SRC_SUDOERS" "$SRC_CONFIG" "$SRC_KEY" "$SRC_PROCEDURE"; do
     [[ -f "$src" ]] || fail "bronbestand ontbreekt: $src"
     [[ ! -L "$src" ]] || fail "bronbestand is een symlink: $src"
+    [[ -r "$src" && -s "$src" ]] || fail "bronbestand is leeg of onleesbaar: $src"
+    mode=$(stat -c '%a' "$src") || fail "bron-mode onleesbaar: $src"
+    (( (8#$mode & 0022) == 0 )) || fail "bronbestand is group/world-writable: $src"
 done
+# Freeze the incoming bundle before validation; activation uses these same bytes.
+SOURCE_STAGE=$(mktemp -d /tmp/opg-bootstrap-source.tmp.XXXXXX) || fail "staging mislukt"
+for source_var in SRC_CONTEXT SRC_MEDIA_SH SRC_MEDIA_PY SRC_SUDOERS SRC_CONFIG SRC_KEY SRC_PROCEDURE; do
+    src=${!source_var}
+    install -o root -g root -m 0600 "$src" "$SOURCE_STAGE/$source_var" || fail "bronstaging mislukt"
+    printf -v "$source_var" '%s' "$SOURCE_STAGE/$source_var"
+done
+for src in "$SRC_CONTEXT" "$SRC_MEDIA_SH"; do
+    bash -n "$src" || fail "helper-shellsyntax ongeldig"
+done
+/usr/bin/python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$SRC_MEDIA_PY" \
+    || fail "media-helper Python-syntax ongeldig"
+for src in "$SRC_KEY" "$SRC_PROCEDURE"; do
+    [[ -r "$src" && -s "$src" ]] || fail "centraal artifact is leeg of onleesbaar: $src"
+    mode=$(stat -c '%a' "$src") || fail "artifact-mode onleesbaar: $src"
+    (( (8#$mode & 0022) == 0 )) || fail "centraal artifact is group/world-writable: $src"
+done
+openssl pkey -pubin -in "$SRC_KEY" -noout >/dev/null 2>&1 || fail "approval_public.pem is geen geldige publieke sleutel"
 
 config_source_mode=$(stat -c '%a' "$SRC_CONFIG") \
     || fail "stat mislukt voor centrale config: $SRC_CONFIG"
@@ -139,6 +234,65 @@ config_source_mode=$(stat -c '%a' "$SRC_CONFIG") \
 (( (8#$config_source_mode & 0022) == 0 )) \
     || fail "centrale config is group/world-writable: $SRC_CONFIG"
 validate_config_candidate "$SRC_CONFIG"
+LOG_ROOT=${CONFIG_VALUES[RUN_ROOT]}
+LOCK_ROOT=${CONFIG_VALUES[LOCK_ROOT]}
+for runtime in "$BASE/oem-tasks/opg_oem.sh" "$BASE/project/patchGD_guard.sh"; do
+    [[ -f "$runtime" && -x "$runtime" && ! -L "$runtime" ]] || fail "release-runtime ontbreekt: $runtime"
+done
+[[ -f "$BASE/project/lib/opg_core.sh" && -r "$BASE/project/lib/opg_core.sh" ]] || fail "core-library ontbreekt"
+
+# Read-only destination preflight. No installed file or directory changes until
+# every incoming artifact and existing installation prerequisite has passed.
+validate_existing_directory() {
+    local target=$1 expected=$2 parent
+    parent=$target
+    while [[ "$parent" != / ]]; do
+        [[ ! -L "$parent" ]] || fail "directorypad bevat symlink: $parent"
+        if [[ -e "$parent" ]]; then
+            [[ -d "$parent" ]] || fail "directorypad is geen directory: $parent"
+        fi
+        parent=${parent%/*}; parent=${parent:-/}
+    done
+    if [[ -e "$target" ]]; then
+        [[ $(stat -c '%U:%G:%a' "$target") == "$expected" ]] \
+            || fail "onjuiste owner/mode voor directory: $target"
+    fi
+}
+for spec in "$LOG_ROOT|${RUN_USER}:${STAGE_GROUP}:750" \
+            "$LOCK_ROOT|root:${STAGE_GROUP}:2770" \
+            "${DST_CONTEXT%/*}|root:${PRIVILEGED_GROUP}:755" \
+            "${DST_MEDIA_PY%/*}|root:${PRIVILEGED_GROUP}:755" \
+            "$CONFIG_DIR|root:root:755" "$STAGE_ANCHOR|root:${PRIVILEGED_GROUP}:755" \
+            "$STAGE_ROOT|root:${STAGE_GROUP}:750" \
+            "$STAGE_ROOT/.locks|root:${STAGE_GROUP}:750" \
+            "$STAGE_ROOT/purging|root:${STAGE_GROUP}:750" \
+            "$STAGE_ROOT/incoming|root:${STAGE_GROUP}:750" \
+            "$STAGE_ROOT/ready|root:${STAGE_GROUP}:750" \
+            "$CONTEXT_ROOT|root:${STAGE_GROUP}:750" \
+            "$CONTEXT_ROOT/stage-cleanup|root:${STAGE_GROUP}:750"; do
+    validate_existing_directory "${spec%%|*}" "${spec#*|}"
+done
+[[ -d ${STAGE_ANCHOR%/stage} && ! -L ${STAGE_ANCHOR%/stage} ]] || fail "stage-parent ontbreekt of is onveilig"
+for spec in "$DST_CONTEXT|root:${PRIVILEGED_GROUP}:755" \
+            "$DST_MEDIA_SH|root:${PRIVILEGED_GROUP}:755" \
+            "$DST_MEDIA_PY|root:${PRIVILEGED_GROUP}:755" \
+            "$SUDOERS_DST|root:root:440" "$CONFIG_DST|root:${CONFIG_GROUP}:640" \
+            "$KEY_DST|root:${CONFIG_GROUP}:640" "$PROCEDURE_DST|root:${CONFIG_GROUP}:640" \
+            "$STAGE_ROOT/.locks/media-stage.lock|root:${STAGE_GROUP}:640"; do
+    target=${spec%%|*}
+    if [[ -e "$target" || -L "$target" ]]; then
+        [[ -f "$target" && ! -L "$target" && $(stat -c '%h' "$target") == 1 &&
+           $(stat -c '%U:%G:%a' "$target") == "${spec#*|}" ]] || fail "onveilig installatiedoel: $target"
+    fi
+done
+[[ -d "$SUDOERS_DIR" && ! -L "$SUDOERS_DIR" ]] || fail "sudoers-directory ontbreekt of is onveilig"
+sudoers_dir_identity=$(stat -c '%U:%G:%a' "$SUDOERS_DIR")
+[[ "$sudoers_dir_identity" =~ ^root:root:[0-7]{3,4}$ ]] || fail "onveilige sudoers-directory"
+(( (8#${sudoers_dir_identity##*:} & 0022) == 0 )) || fail "schrijfbare sudoers-directory"
+[[ -x "$VISUDO_BIN" && -f "$VISUDO_BIN" && ! -L "$VISUDO_BIN" ]] || fail "visudo ontbreekt of is onveilig"
+"$VISUDO_BIN" -cf "$SRC_SUDOERS" || fail "meegeleverde sudoers-file faalt visudo-validatie"
+
+# All preflight validation succeeded. Begin activation.
 
 # ---------------------------------------------------------------------------
 # Authoritative run-log root
@@ -177,7 +331,10 @@ install_if_changed() {
     if [[ -f "$dst" ]] && cmp -s "$src" "$dst"; then
         log "UNCHANGED|$dst"
     else
-        install -o root -g "$PRIVILEGED_GROUP" -m 0755 "$src" "$dst"
+        CONFIG_TEMP=$(mktemp "${dst%/*}/.opg-helper.XXXXXX") || fail "helperstaging mislukt"
+        install -o root -g "$PRIVILEGED_GROUP" -m 0755 "$src" "$CONFIG_TEMP"
+        mv -f -- "$CONFIG_TEMP" "$dst"
+        CONFIG_TEMP=
         log "INSTALLED|$dst"
     fi
 
@@ -281,7 +438,7 @@ install_sudoers
 # ---------------------------------------------------------------------------
 
 install_runtime_config() {
-    local dir_identity target_identity
+    local dir_identity target_identity source=${1:-$SRC_CONFIG} destination=${2:-$CONFIG_DST}
 
     if [[ -e "$CONFIG_DIR" || -L "$CONFIG_DIR" ]]; then
         [[ -d "$CONFIG_DIR" && ! -L "$CONFIG_DIR" ]] \
@@ -298,41 +455,47 @@ install_runtime_config() {
     [[ "$dir_identity" == root:root:755 ]] \
         || fail "onjuiste owner/mode voor configdirectory: $dir_identity"
 
-    if [[ -e "$CONFIG_DST" || -L "$CONFIG_DST" ]]; then
-        [[ -f "$CONFIG_DST" && ! -L "$CONFIG_DST" ]] \
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        [[ -f "$destination" && ! -L "$destination" ]] \
             || fail "bestaande lokale config is geen veilig regulier bestand"
     fi
 
     CONFIG_TEMP=$(mktemp "${CONFIG_DIR}/.patchGD_guard.conf.tmp.XXXXXX") \
         || fail "tijdelijke configcandidate kon niet worden gemaakt"
-    install -o root -g "$CONFIG_GROUP" -m 0640 "$SRC_CONFIG" "$CONFIG_TEMP" \
+    install -o root -g "$CONFIG_GROUP" -m 0640 "$source" "$CONFIG_TEMP" \
         || fail "configcandidate kon niet veilig worden gestaged"
-    cmp -s "$SRC_CONFIG" "$CONFIG_TEMP" \
+    cmp -s "$source" "$CONFIG_TEMP" \
         || fail "configcandidate wijkt af van centrale bron"
-    validate_config_candidate "$CONFIG_TEMP"
+    if [[ "$destination" == "$CONFIG_DST" ]]; then
+        validate_config_candidate "$CONFIG_TEMP"
+        [[ ${CONFIG_VALUES[RUN_ROOT]} == "$LOG_ROOT" && ${CONFIG_VALUES[LOCK_ROOT]} == "$LOCK_ROOT" ]] \
+            || fail "centrale runtimepaden wijzigden tijdens bootstrap"
+    elif [[ "$destination" == "$KEY_DST" ]]; then
+        openssl pkey -pubin -in "$CONFIG_TEMP" -noout >/dev/null 2>&1 || fail "ongeldige public-key candidate"
+    else
+        [[ -s "$CONFIG_TEMP" ]] || fail "lege herstelprocedure-candidate"
+    fi
 
-    if [[ -f "$CONFIG_DST" ]] && cmp -s "$CONFIG_TEMP" "$CONFIG_DST"; then
-        target_identity=$(stat -c '%U:%G:%a' "$CONFIG_DST") \
+    if [[ -f "$destination" ]] && cmp -s "$CONFIG_TEMP" "$destination"; then
+        target_identity=$(stat -c '%U:%G:%a' "$destination") \
             || fail "stat mislukt voor bestaande lokale config"
         if [[ "$target_identity" == "root:${CONFIG_GROUP}:640" ]]; then
             rm -f -- "$CONFIG_TEMP"
             CONFIG_TEMP=
-            log "UNCHANGED|$CONFIG_DST"
+            log "UNCHANGED|$destination"
             return 0
         fi
     fi
 
-    mv -f -- "$CONFIG_TEMP" "$CONFIG_DST" \
+    mv -f -- "$CONFIG_TEMP" "$destination" \
         || fail "runtimeconfig kon niet atomisch worden geactiveerd"
     CONFIG_TEMP=
-    target_identity=$(stat -c '%U:%G:%a' "$CONFIG_DST") \
+    target_identity=$(stat -c '%U:%G:%a' "$destination") \
         || fail "stat mislukt voor geïnstalleerde runtimeconfig"
     [[ "$target_identity" == "root:${CONFIG_GROUP}:640" ]] \
         || fail "onjuiste owner/mode voor runtimeconfig: $target_identity"
-    log "INSTALLED|$CONFIG_DST"
+    log "INSTALLED|$destination"
 }
-
-install_runtime_config
 
 # ---------------------------------------------------------------------------
 # Trusted local stage anchor
@@ -388,7 +551,7 @@ log "STAGE_ROOT_OK|$STAGE_ROOT|owner=root|group=${STAGE_GROUP}|mode=750"
 # Stage coordination and cleanup evidence
 # ---------------------------------------------------------------------------
 
-for managed_dir in "$STAGE_ROOT/.locks" "$STAGE_ROOT/purging"; do
+for managed_dir in "$STAGE_ROOT/.locks" "$STAGE_ROOT/purging" "$STAGE_ROOT/incoming" "$STAGE_ROOT/ready"; do
     if [[ -e "$managed_dir" || -L "$managed_dir" ]]; then
         [[ -d "$managed_dir" && ! -L "$managed_dir" ]] || fail "stage-beheerdirectory is onveilig: $managed_dir"
     fi
@@ -410,6 +573,19 @@ for evidence_dir in "$CONTEXT_ROOT" "$CONTEXT_ROOT/stage-cleanup"; do
 done
 log "STAGE_LOCK_OK|$MEDIA_LOCK|owner=root|group=${STAGE_GROUP}|mode=640"
 log "STAGE_CLEANUP_EVIDENCE_OK|$CONTEXT_ROOT/stage-cleanup|owner=root|group=${STAGE_GROUP}|mode=750"
+
+if [[ -e "$LOCK_ROOT" || -L "$LOCK_ROOT" ]]; then
+    [[ -d "$LOCK_ROOT" && ! -L "$LOCK_ROOT" && $(stat -c '%U:%G:%a' "$LOCK_ROOT") == "root:${STAGE_GROUP}:2770" ]] \
+        || fail "bestaande LOCK_ROOT heeft onveilige owner/mode/type: $LOCK_ROOT"
+else
+    install -d -o root -g "$STAGE_GROUP" -m 2770 "$LOCK_ROOT"
+fi
+log "LOCK_ROOT_OK|$LOCK_ROOT"
+
+# Activate local configuration only after prerequisites have been established.
+install_runtime_config "$SRC_KEY" "$KEY_DST"
+install_runtime_config "$SRC_PROCEDURE" "$PROCEDURE_DST"
+install_runtime_config
 
 # ---------------------------------------------------------------------------
 # Final verification

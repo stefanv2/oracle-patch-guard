@@ -80,6 +80,13 @@ identificeert, bijvoorbeeld datum plus korte Git-hash.
 
 `current/oem-tasks/opg_bootstrap_host.sh` leest de centrale hostconfigcandidate
 uit `${OPG_ROOT}/config/patchGD_guard.conf`, valideert die en plaatst hem
-atomisch als `/etc/oracle-patch-guard/patchGD_guard.conf`. De meegeleverde
+atomisch als `/etc/oracle-patch-guard/patchGD_guard.conf`. Ook `approval_public.pem`
+en `oracle_home_rebuild.md` komen uit die centrale configdirectory en worden
+vóór de lokale config als root-owned bestanden geïnstalleerd. Bootstrap maakt
+RUN_ROOT, LOCK_ROOT en de context/stage-roots zodat STAGE_MEDIA en PRECHECK
+geen voorafgaande PREPARE nodig hebben. PREPARE controleert later uitsluitend
+deploymentdrift; de wrapper behoudt zijn bestaande formele contextrol.
+Zie het volledige [fresh-host contract](../OEM_WRAPPER_GUIDE.md#fresh-host-installatiecontract).
+De meegeleverde
 privileged helpers komen uit dezelfde actieve release onder
 `current/oem-tasks`. Bootstrap verandert de patch- of lifecyclelogica niet.

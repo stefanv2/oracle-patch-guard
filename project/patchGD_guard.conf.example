@@ -1,5 +1,8 @@
 # Oracle Patch Guard - voorbeeldconfiguratie
-# Kopieer naar /etc/oracle-patch-guard/patchGD_guard.conf en pas lokaal aan.
+# Beheer de siteconfig in <OPG_ROOT>/config/patchGD_guard.conf.
+# Root-bootstrap valideert en distribueert deze naar /etc/oracle-patch-guard.
+# Gebruik voor ingestelde hooks bestaande executables uit de actieve release
+# (pas hieronder het generieke OPG_ROOT-pad aan); geen verborgen /opt-kopie.
 
 OPG_ROOT=/mnt/patch-share/oracle-patch-guard
 APPROVAL_ROOT=/mnt/patch-share/oracle-patch-guard/approvals
@@ -52,14 +55,14 @@ EXPECTED_SBT_LIBRARY=
 EXPECTED_BACKUP_HOST=
 EXPECTED_STORAGE_UNIT=
 # Hersteloptie 2: gecontroleerde rebuild van exact dezelfde Oracle Home.
-ORACLE_HOME_RECOVERY_CHECK_COMMAND=/opt/oracle-patch-guard/checks/check_oracle_home_recovery
+ORACLE_HOME_RECOVERY_CHECK_COMMAND=/mnt/patch-share/oracle-patch-guard/current/project/checks/check_oracle_home_recovery
 RECOVERY_BASE_IMAGE=/secure/oracle-media/LINUX.X64_193000_db_home.zip
 RECOVERY_BASE_IMAGE_SHA256=VUL_HIER_EXACT_64_HEX_IN
 OPATCH_ZIP_SHA256=VUL_HIER_EXACT_64_HEX_IN
 HOME_RECOVERY_PROCEDURE=/etc/oracle-patch-guard/oracle_home_rebuild.md
 HOME_REBUILD_MIN_FREE_MB=30720
 # Root-owned 0640 key=value-manifest; zie README.
-MAINTENANCE_WINDOW_CHECK_COMMAND=/opt/oracle-patch-guard/checks/check_maintenance_window
+MAINTENANCE_WINDOW_CHECK_COMMAND=/mnt/patch-share/oracle-patch-guard/current/project/checks/check_maintenance_window
 MAINTENANCE_WINDOW_MANIFEST=/etc/oracle-patch-guard/maintenance_window.conf
 # Niet meer gebruikt: Data Pump komt uit dezelfde inventory-SQL als DB/PDB/services.
 DATAPUMP_CHECK_COMMAND=
