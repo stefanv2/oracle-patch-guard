@@ -66,7 +66,15 @@ installeert en valideert:
 - de lokale root-helpers;
 - het begrensde sudoers-fragment;
 - de beveiligde runtimeconfiguratie;
-- de stage anchors vanaf `/u01/stage`.
+- de publieke approvalsleutel en de site-herstelprocedure;
+- RUN_ROOT, LOCK_ROOT, context/evidenceroot en de stage anchors vanaf `/u01/stage`.
+
+De volledige volgorde is `BOOTSTRAP -> STAGE_MEDIA -> PRECHECK -> NEW-RUN ->
+PREPARE -> CREATE-WINDOW -> ASSESS -> PLAN -> STAGE`. PREPARE controleert later
+de deployment en laat de wrapper de formele runcontext behandelen; hij installeert
+geen prerequisites meer. PRECHECK blijft lifecycle-neutraal en roept PREPARE niet aan.
+Zie het [fresh-host installatiecontract](OEM_WRAPPER_GUIDE.md#fresh-host-installatiecontract)
+voor centrale inputs, verplichte instellingen en modes.
 
 Voer bij de normale flow geen handmatige `cp`, `chmod` of configinstallatie op
 het target uit. Een bootstrapfout moet eerst worden opgelost; ga niet verder

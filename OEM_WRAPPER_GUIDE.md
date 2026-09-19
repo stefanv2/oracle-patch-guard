@@ -33,6 +33,88 @@ persistente directories buiten `current`. Lokale context staat in
 `/var/lib/oracle-patch-guard` en run-evidence in
 `/var/log/oracle-patch-guard/<RUN_ID>`.
 
+## Fresh-host installatiecontract
+
+De volgorde op een ondersteunde, correct geconfigureerde Oracle-host is:
+
+```text
+BOOTSTRAP -> STAGE_MEDIA -> PRECHECK -> NEW-RUN -> PREPARE
+          -> CREATE-WINDOW -> ASSESS -> PLAN -> STAGE
+```
+
+BOOTSTRAP draait als root vóór de lifecycle-neutrale readinessstappen. PRECHECK
+roept PREPARE niet aan, installeert niets en wijzigt geen Oracle- of actieve
+lifecycle-state; uitsluitend zijn eigen PRECHECK-evidence wordt geschreven.
+
+Maak de immutable release uit een schoon Git-commit, bijvoorbeeld met
+`git archive --format=tar HEAD | tar -xf - -C "$RELEASE"`, en activeer `current`.
+Beheer daarnaast drie reguliere, niet group/world-writable centrale bestanden:
+
+- `${OPG_ROOT}/config/patchGD_guard.conf`: volledige siteconfiguratie;
+- `${OPG_ROOT}/config/approval_public.pem`: geldige publieke sleutel;
+- `${OPG_ROOT}/config/oracle_home_rebuild.md`: niet-lege, door de site goedgekeurde herstelprocedure.
+
+Roep de installer als root aan; geef bij een andere deploymentroot het
+current-pad expliciet mee:
+
+```bash
+OPG_BOOTSTRAP_BASE="${OPG_ROOT}/current" \
+  bash "${OPG_ROOT}/current/oem-tasks/opg_bootstrap_host.sh"
+```
+
+Bootstrap installeert of valideert:
+
+| Object | Productie-owner en mode |
+| --- | --- |
+| `/etc/oracle-patch-guard` | `root:root 0755` |
+| Config, public key en herstelprocedure in die directory | `root:oinstall 0640`, atomische vervanging per bestand |
+| Context/media shellhelpers onder `/usr/local/sbin`, media-engine onder `/usr/local/libexec` | `root:root 0755`, gecontroleerde hashes |
+| Meegeleverd begrensd sudoers-fragment | `root:root 0440`, `visudo -cf` vóór activatie |
+| `/var/lib/oracle-patch-guard` en `stage-cleanup` | `root:oinstall 0750`; geen `current_run.json` aangemaakt |
+| Geconfigureerde `RUN_ROOT` | `oracle:oinstall 0750` |
+| Geconfigureerde `LOCK_ROOT` | `root:oinstall 2770` |
+| `/u01/stage` | `root:root 0755` |
+| `/u01/stage/oracle-patch-guard`, `.locks`, `incoming`, `ready`, `purging` | `root:oinstall 0750` |
+| `.locks/media-stage.lock` | `root:oinstall 0640` |
+
+De Oracle-gebruiker/groep en `/u01` moeten al bestaan. Bootstrap controleert
+Bash, Python 3.6+ met standaardmodules, OpenSSL, sudo/visudo, flock, timeout,
+unzip/zipinfo en de gebruikte reguliere filesystem/proces-tools. Hij installeert
+geen OS-packages en repareert geen Oracle-configuratie. De centrale cyclepointer,
+cycleconfig, ondertekende artifactmanifesten en patch-ZIPs moeten voor STAGE_MEDIA
+beschikbaar zijn; media-validatie en extractie blijven bij de mediahelper.
+
+Verplicht in de centrale config zijn `OPG_ROOT`, `APPROVAL_ROOT`, `PATCH_ROOT`,
+`OPATCH_ROOT`, `RUN_ROOT`, `LOCK_ROOT`, `LOCAL_MEDIA_MODE=required`,
+`LOCAL_STAGE_ROOT`, `MEDIA_STAGE_HELPER`, `APPROVAL_PUBLIC_KEY` en
+`HOME_RECOVERY_PROCEDURE`. De laatste vaste lokale paden moeten overeenkomen met
+bovenstaande installatiedoelen. Schrijf padwaarden letterlijk, zonder quotes of
+shell-expansie; gebruik `KEY=VALUE` zonder spaties rond `=`.
+
+Optionele hooks mogen leeg blijven. Een ingestelde hook moet al als executable
+bestaan, bij voorkeur onder `${OPG_ROOT}/current/project/checks`. Voor de
+meegeleverde RMAN-hook zijn de drie `EXPECTED_*` sitewaarden verplicht. Voor de
+meegeleverde rebuild-hook zijn een leesbaar `RECOVERY_BASE_IMAGE` en geldige
+`RECOVERY_BASE_IMAGE_SHA256`/`OPATCH_ZIP_SHA256` verplicht. Een ingestelde
+maintenance-window-hook vereist het manifestpad; het rungebonden bestand zelf
+wordt pas door CREATE-WINDOW gemaakt. Ontbrekende inhoudelijke readiness-evidence
+kan PRECHECK nog steeds fail-closed als UNKNOWN/BLOCKED rapporteren.
+
+De centrale config blijft autoritatief: er worden geen oude lokale waarden
+teruggemengd. Afgewezen kandidaten vervangen de lokale config niet. Herhaal
+bootstrap na correctie of deploymentwijzigingen; installeer niet tijdens een
+actieve patchrun. Meerdere bestanden vormen geen atomische bundeltransactie:
+na een installatiefout moet bootstrap succesvol worden herhaald vóór verdergaan.
+
+PREPARE is daarna een read-only deploymentcontrole: hij vergelijkt centrale en
+lokale config/key/procedure en releasehelpers, en controleert runtimepaden en
+modes. Hij voert geen `sudo install` meer uit. Bij drift blokkeert hij en vraagt
+om root-bootstrap. De bestaande OEM-wrapper blijft bij PREPARE de formele
+runcontext maken/hergebruiken/valideren volgens de bestaande lifecycle-regels.
+
+AIDE blijft een toekomstige operationele follow-up na installatie of Oracle
+Home-mutatie volgens sitebeleid; deze wijziging automatiseert geen baseline-update.
+
 ## Centrale metadata
 
 Plaats de actieve-cyclepointer als regulier, niet-symlink en niet group/world-writable bestand:
