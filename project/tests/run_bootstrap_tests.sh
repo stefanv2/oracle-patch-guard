@@ -330,5 +330,40 @@ write_valid_config
 run_bootstrap
 record 'geen maintenance hook blijft optioneel' 0 $?
 
+# Model the Oracle Linux OS alias without touching the host's /var/lock.
+mkdir -p "$BASE/run"
+chmod 0755 "$BASE/run" "$BASE/var"
+mv "$BASE/var/lock" "$BASE/run/lock"
+chmod 0755 "$BASE/run/lock"
+ln -s ../run/lock "$BASE/var/lock"
+run_bootstrap
+record 'root-owned veilige OS var/lock symlink wordt toegestaan' 0 $?
+installed_before=$(sha256sum "$BASE/usr/local/sbin/opg_context_root.sh" "$CONFIG_TARGET")
+chown 65534:root "$BASE/run/lock"
+run_bootstrap; rc=$?
+[[ $(sha256sum "$BASE/usr/local/sbin/opg_context_root.sh" "$CONFIG_TARGET") == "$installed_before" ]] || rc=99
+record 'OS-locksymlink naar niet-root-owned doel blokkeert zonder vervanging' 30 "$rc"
+chown root:root "$BASE/run/lock"
+chmod 0777 "$BASE/run/lock"
+run_bootstrap
+record 'OS-locksymlink naar schrijfbaar doel blokkeert' 30 $?
+chmod 0755 "$BASE/run/lock"
+chown -h 65534:root "$BASE/var/lock"
+run_bootstrap
+record 'niet-root-owned OS-locksymlink blokkeert' 30 $?
+chown -h root:root "$BASE/var/lock"
+chmod 0777 "$BASE/var"
+run_bootstrap
+record 'schrijfbare OS-locksymlinkparent blokkeert' 30 $?
+chmod 0755 "$BASE/var"
+chmod 0777 "$BASE/run"
+run_bootstrap
+record 'schrijfbare canonieke OS-lockparent blokkeert' 30 $?
+chmod 0755 "$BASE/run"
+mv "$BASE/var/log/oracle-patch-guard" "$BASE/safe-log-target"
+ln -s "$BASE/safe-log-target" "$BASE/var/log/oracle-patch-guard"
+run_bootstrap
+record 'arbitraire deploymentdirectorysymlink blijft geblokkeerd' 30 $?
+
 printf '\nBootstrap results: %d passed, %d failed\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))
