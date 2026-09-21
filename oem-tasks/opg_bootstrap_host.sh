@@ -243,11 +243,36 @@ done
 
 # Read-only destination preflight. No installed file or directory changes until
 # every incoming artifact and existing installation prerequisite has passed.
+validate_os_lock_symlink() {
+    local link=$1 prefix='' resolved directory mode
+    if [[ ${OPG_BOOTSTRAP_TEST_MODE:-0} == 1 ]]; then prefix=$TEST_ROOT; fi
+    # Only the OS /var/lock alias is supported, never arbitrary deployment links.
+    [[ "$link" == "$prefix/var/lock" && $(stat -c '%u' "$link") == 0 ]] \
+        || fail "onverwachte of niet-root-owned symlink: $link"
+    resolved=$(readlink -e -- "$link") || fail "OS-locksymlink kan niet worden opgelost: $link"
+    [[ "$resolved" == "$prefix/run/lock" && -d "$resolved" && ! -L "$resolved" ]] \
+        || fail "onveilig OS-locksymlinkdoel: $link"
+    # Check both the link's parent chain and the canonical target chain. The
+    # isolated test root substitutes for /; its shared /tmp parent is not an OS path.
+    for directory in "${link%/*}" "$resolved"; do
+        while :; do
+            [[ -d "$directory" && ! -L "$directory" && $(stat -c '%u' "$directory") == 0 ]] \
+                || fail "onveilige OS-lockdirectory: $directory"
+            mode=$(stat -c '%a' "$directory")
+            (( (8#$mode & 0022) == 0 )) || fail "schrijfbare OS-lockdirectory: $directory"
+            [[ "$directory" == "${prefix:-/}" ]] && break
+            directory=${directory%/*}; directory=${directory:-/}
+        done
+    done
+}
+
 validate_existing_directory() {
     local target=$1 expected=$2 parent
     parent=$target
     while [[ "$parent" != / ]]; do
-        [[ ! -L "$parent" ]] || fail "directorypad bevat symlink: $parent"
+        if [[ -L "$parent" ]]; then
+            validate_os_lock_symlink "$parent"
+        fi
         if [[ -e "$parent" ]]; then
             [[ -d "$parent" ]] || fail "directorypad is geen directory: $parent"
         fi
