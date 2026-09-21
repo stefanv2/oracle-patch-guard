@@ -152,6 +152,22 @@ expect_rc 'verkeerde Oracle Home in venster' 2 bash "$ROOT/checks/check_maintena
 sed -i "s|allowed_oracle_home=.*|allowed_oracle_home=$HOME_DIR|; s|start=.*|start=2026-99-99T10:00:00Z|" "$WINDOW"
 expect_rc 'onbetrouwbare venstertijd' 3 bash "$ROOT/checks/check_maintenance_window"
 
+mv "$WINDOW" "$WINDOW.saved"
+export OPG_WINDOW_BINDING_MODE=formal OPG_CHECK_PHASE=preapply
+expect_rc 'PREAPPLY ontbrekend window blijft UNKNOWN en niet-ready' 3 bash "$ROOT/checks/check_maintenance_window"
+export OPG_WINDOW_BINDING_MODE=precheck
+expect_rc 'PREAPPLY ontbrekend window wordt ook met precheck binding niet versoepeld' 3 bash "$ROOT/checks/check_maintenance_window"
+export OPG_CHECK_PHASE=assess
+expect_rc 'PRECHECK ontbrekend window geeft conditionele exitcode' 2 bash "$ROOT/checks/check_maintenance_window"
+ln -s "$WINDOW.absent" "$WINDOW"
+expect_rc 'PRECHECK dangling window symlink blijft UNKNOWN' 3 bash "$ROOT/checks/check_maintenance_window"
+rm "$WINDOW"
+printf 'malformed\n' >"$WINDOW"; chmod 0640 "$WINDOW"
+expect_rc 'PRECHECK malformed bestaand window blijft UNKNOWN' 3 bash "$ROOT/checks/check_maintenance_window"
+export OPG_WINDOW_BINDING_MODE=formal OPG_CHECK_PHASE=preapply
+expect_rc 'PREAPPLY malformed bestaand window blijft BLOCKED' 2 bash "$ROOT/checks/check_maintenance_window"
+mv "$WINDOW.saved" "$WINDOW"
+
 ENV_CAPTURE="$TMP_BASE/capture_backup_expectations"
 cat >"$ENV_CAPTURE" <<'EOF'
 #!/usr/bin/env bash
