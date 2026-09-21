@@ -11,11 +11,21 @@ expected_run=${RUN_ID:-}
 binding_mode=${OPG_WINDOW_BINDING_MODE:-formal}
 
 unknown() { printf 'UNKNOWN: %s\n' "$*"; exit 3; }
-blocked() { printf 'BLOCKED: %s\n' "$*"; exit 2; }
+blocked() {
+  # PRECHECK maps exit 2 to CONDITIONAL. Existing invalid evidence must not
+  # receive the same treatment as an expected, not-yet-created window.
+  if [[ "$binding_mode" == precheck && "$phase" == assess ]]; then unknown "$*"; fi
+  printf 'BLOCKED: %s\n' "$*"; exit 2
+}
 field() { awk -F= -v key="$1" '$1==key{sub(/^[^=]*=/,"");print;exit}' "$manifest"; }
 
 [[ -n "$manifest" ]] || unknown 'MAINTENANCE_WINDOW_MANIFEST is niet geconfigureerd.'
 [[ "$binding_mode" == formal || "$binding_mode" == precheck ]] || unknown "ongeldige window-bindingmode: $binding_mode"
+if [[ "$binding_mode" == precheck && "$phase" == assess && ! -e "$manifest" && ! -L "$manifest" &&
+      -d "${manifest%/*}" && -x "${manifest%/*}" ]]; then
+  printf 'NOT_CREATED: maintenance window wordt later door CREATE-WINDOW gemaakt.\n'
+  exit 2
+fi
 [[ -f "$manifest" && ! -L "$manifest" && -r "$manifest" ]] || unknown "manifest is niet veilig leesbaar: $manifest"
 owner=$(stat -c '%U' "$manifest" 2>/dev/null) || unknown 'eigenaar kon niet worden bepaald.'
 mode=$(stat -c '%a' "$manifest" 2>/dev/null) || unknown 'mode kon niet worden bepaald.'

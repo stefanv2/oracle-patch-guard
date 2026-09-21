@@ -755,7 +755,7 @@ record 'PLAN vertrouwt PRECHECK niet en voert checks opnieuw uit' 20 "$rc" "$CAS
 
 setup_case precheckwindow
 window_manifest="$CASE_DIR/maintenance_window.conf"
-window_start=$(date -u -d "@$(( $(date +%s) - 60 ))" '+%Y-%m-%dT%H:%M:%SZ')
+window_start=$(date -u -d "@$(( $(date +%s) + 600 ))" '+%Y-%m-%dT%H:%M:%SZ')
 window_end=$(date -u -d "@$(( $(date +%s) + 7200 ))" '+%Y-%m-%dT%H:%M:%SZ')
 cat >"$window_manifest" <<EOF
 hostname=$(hostname -f 2>/dev/null || hostname)
@@ -786,6 +786,22 @@ guard assess --non-interactive --target-oracle-home "$HOME_DIR" --run-id PWINDOW
 grep -Fq 'BLOCKED: run_id mismatch:' "$RUN_ROOT/PWINDOW-FORMAL/maintenance_window.txt" || formal_window_rc=99
 grep -Fq 'BLOCKED|WINDOW_INVALID|' "$RUN_ROOT/PWINDOW-FORMAL/findings.psv" || formal_window_rc=98
 record 'formele ASSESS behoudt strikte maintenance-window RUN_ID-binding' 20 "$formal_window_rc" "$CASE_DIR/PWINDOW-FORMAL.out"
+
+mv "$window_manifest" "$window_manifest.saved"
+precheck PWINDOW-MISSING; rc=$?
+grep -Fq 'CONDITIONAL|MAINTENANCE_WINDOW_READINESS|' "$RUN_ROOT/PWINDOW-MISSING/precheck_summary.psv" || rc=99
+grep -Fq 'WINDOW_UNKNOWN' "$RUN_ROOT/PWINDOW-MISSING/findings.psv" && rc=98
+[[ ! -e "$window_manifest" && ! -e "$RUN_ROOT/PWINDOW-MISSING/execution_state.json" && ! -e "$RUN_ROOT/PWINDOW-MISSING/patch_manifest.json" ]] || rc=97
+record_precheck 'PRECHECK ontbrekend window is CONDITIONAL zonder creatie of lifecyclemutatie' 10 "$rc" "$CASE_DIR/PWINDOW-MISSING.out"
+for action in assess plan; do
+  guard "$action" --non-interactive --target-oracle-home "$HOME_DIR" --run-id "PW-MISSING-$action" 39472050 39222882 JUL2026 12.2.0.1.52 p6880880_190000_Linux-x86-64.zip >"$CASE_DIR/window-$action.out" 2>&1; rc=$?
+  grep -Fq 'UNKNOWN|WINDOW_UNKNOWN|' "$RUN_ROOT/PW-MISSING-$action/findings.psv" || rc=99
+  record "formele $action blijft niet-ready zonder window" 30 "$rc" "$CASE_DIR/window-$action.out"
+done
+printf 'malformed manifest\n' >"$window_manifest"; chmod 0640 "$window_manifest"
+precheck PWINDOW-MALFORMED; rc=$?
+grep -Fq 'UNKNOWN|WINDOW_UNKNOWN|' "$RUN_ROOT/PWINDOW-MALFORMED/findings.psv" || rc=99
+record_precheck 'PRECHECK bestaand malformed window blijft UNKNOWN' 30 "$rc" "$CASE_DIR/PWINDOW-MALFORMED.out"
 
 setup_case precheckapply; precheck PA1 >/dev/null
 guard apply --non-interactive --run-id PA1 --approved-manifest "$RUN_ROOT/PA1/patch_manifest.json" --approval-token "$RUN_ROOT/PA1/approval.json" >"$CASE_DIR/apply.out" 2>&1
