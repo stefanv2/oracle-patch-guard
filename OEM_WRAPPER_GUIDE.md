@@ -115,6 +115,21 @@ runcontext maken/hergebruiken/valideren volgens de bestaande lifecycle-regels.
 AIDE blijft een toekomstige operationele follow-up na installatie of Oracle
 Home-mutatie volgens sitebeleid; deze wijziging automatiseert geen baseline-update.
 
+## PRECHECK met historische COMPLETE-context
+
+PRECHECK behoudt een bestaande, aantoonbaar COMPLETE-context als historie.
+De wrapper valideert eerst completion en geeft uitsluitend aan PRECHECK de
+historische `run_id` en `window_id` mee. Een verder geldig maar verlopen window
+met exact die `run_id` en `change_id` geldt als historisch: window-readiness is
+CONDITIONAL totdat CREATE-WINDOW een nieuw window maakt. Een geldig bestaand
+actueel/toekomstig window wordt normaal gecontroleerd, ook als het nog een oude
+runbinding heeft; PRECHECK valideert readiness, geen formele runautorisatie.
+Afwijkende bindings, malformed/onveilige bestanden en dangling symlinks blijven
+fail-closed. Niet-terminale context krijgt geen historische uitzondering.
+ASSESS, PLAN en PREAPPLY behouden hun bestaande strikte controles.
+PRECHECK maakt alleen eigen readiness-evidence met een PRECHECK-id, geen nieuwe
+formele runcontext of window, en wijzigt/archiveert de historie niet.
+
 ## Centrale metadata
 
 Plaats de actieve-cyclepointer als regulier, niet-symlink en niet group/world-writable bestand:

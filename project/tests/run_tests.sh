@@ -787,6 +787,19 @@ grep -Fq 'BLOCKED: run_id mismatch:' "$RUN_ROOT/PWINDOW-FORMAL/maintenance_windo
 grep -Fq 'BLOCKED|WINDOW_INVALID|' "$RUN_ROOT/PWINDOW-FORMAL/findings.psv" || formal_window_rc=98
 record 'formele ASSESS behoudt strikte maintenance-window RUN_ID-binding' 20 "$formal_window_rc" "$CASE_DIR/PWINDOW-FORMAL.out"
 
+cp "$window_manifest" "$window_manifest.future"
+sed -i 's/^start=.*/start=2026-01-01T10:00:00Z/;s/^end=.*/end=2026-01-01T16:00:00Z/' "$window_manifest"
+export OPG_PRECHECK_COMPLETED_RUN_ID=OLDER-FORMAL-RUN OPG_PRECHECK_COMPLETED_WINDOW_ID=PRECHECK-WINDOW-TEST
+precheck PWINDOW-HISTORY; rc=$?
+grep -Fq 'CONDITIONAL|MAINTENANCE_WINDOW_READINESS|' "$RUN_ROOT/PWINDOW-HISTORY/precheck_summary.psv" || rc=99
+grep -Fq 'NOT_CURRENT:' "$RUN_ROOT/PWINDOW-HISTORY/maintenance_window.txt" || rc=98
+[[ "$context_before" == "$(sha256sum "$CASE_DIR/current_run.json" | awk '{print $1}')" && ! -e "$RUN_ROOT/PWINDOW-HISTORY/execution_state.json" ]] || rc=97
+record_precheck 'PRECHECK bewezen historisch verlopen window is CONDITIONAL' 10 "$rc" "$CASE_DIR/PWINDOW-HISTORY.out"
+guard assess --non-interactive --target-oracle-home "$HOME_DIR" --run-id OLDER-FORMAL-RUN 39472050 39222882 JUL2026 12.2.0.1.52 p6880880_190000_Linux-x86-64.zip >"$CASE_DIR/history-formal.out" 2>&1; rc=$?
+grep -Fq 'BLOCKED|WINDOW_INVALID|' "$RUN_ROOT/OLDER-FORMAL-RUN/findings.psv" || rc=99
+record 'formele ASSESS negeert historische PRECHECK hints' 20 "$rc" "$CASE_DIR/history-formal.out"
+unset OPG_PRECHECK_COMPLETED_RUN_ID OPG_PRECHECK_COMPLETED_WINDOW_ID
+mv "$window_manifest.future" "$window_manifest"
 mv "$window_manifest" "$window_manifest.saved"
 precheck PWINDOW-MISSING; rc=$?
 grep -Fq 'CONDITIONAL|MAINTENANCE_WINDOW_READINESS|' "$RUN_ROOT/PWINDOW-MISSING/precheck_summary.psv" || rc=99
