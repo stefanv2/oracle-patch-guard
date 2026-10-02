@@ -166,6 +166,25 @@ printf 'malformed\n' >"$WINDOW"; chmod 0640 "$WINDOW"
 expect_rc 'PRECHECK malformed bestaand window blijft UNKNOWN' 3 bash "$ROOT/checks/check_maintenance_window"
 export OPG_WINDOW_BINDING_MODE=formal OPG_CHECK_PHASE=preapply
 expect_rc 'PREAPPLY malformed bestaand window blijft BLOCKED' 2 bash "$ROOT/checks/check_maintenance_window"
+cat >"$WINDOW" <<EOF
+hostname=pilot.example
+change_id=OLD-WINDOW
+start=2026-01-01T10:00:00Z
+end=2026-01-01T16:00:00Z
+allowed_oracle_home=$HOME_DIR
+run_id=REC1
+min_remaining_minutes=30
+EOF
+export OPG_PRECHECK_COMPLETED_RUN_ID=REC1 OPG_PRECHECK_COMPLETED_WINDOW_ID=OLD-WINDOW
+expect_rc 'PREAPPLY negeert COMPLETE-window hints en weigert verlopen window' 2 bash "$ROOT/checks/check_maintenance_window"
+export OPG_CHECK_PHASE=assess
+expect_rc 'formele ASSESS negeert COMPLETE-window hints' 2 bash "$ROOT/checks/check_maintenance_window"
+export OPG_WINDOW_BINDING_MODE=precheck
+expect_rc 'PRECHECK exact historisch verlopen window is conditioneel' 2 bash "$ROOT/checks/check_maintenance_window"
+export OPG_PRECHECK_COMPLETED_WINDOW_ID=OTHER-WINDOW
+expect_rc 'PRECHECK verlopen window met andere change_id blijft UNKNOWN' 3 bash "$ROOT/checks/check_maintenance_window"
+unset OPG_PRECHECK_COMPLETED_RUN_ID OPG_PRECHECK_COMPLETED_WINDOW_ID
+export OPG_WINDOW_BINDING_MODE=formal OPG_CHECK_PHASE=preapply
 mv "$WINDOW.saved" "$WINDOW"
 
 ENV_CAPTURE="$TMP_BASE/capture_backup_expectations"

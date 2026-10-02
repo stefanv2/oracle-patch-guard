@@ -680,5 +680,92 @@ for context_variant in missing corrupt; do
 done
 unset BLACKOUT_FIXTURE_ROOT BLACKOUT_FIXTURE_RUNROOT BLACKOUT_REAL_MODULE
 
+# Exercise the real window checker across the wrapper's env -i boundary.
+# Oracle/core assessment is stubbed here; run_tests.sh covers the core's actual
+# PRECHECK exit/summary mapping. Completion validation uses the existing stub.
+for window_case in no_context complete_missing complete_valid complete_malformed complete_dangling active_missing complete_missing_parent complete_expired complete_wrong_run complete_wrong_window complete_unsafe complete_unverified active_expired; do
+  setup_case "window_${window_case}"
+  if [[ "$window_case" != no_context ]]; then
+    enable_pilot07_media
+    run_wrapper new-run
+    window_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id)
+    if [[ "$window_case" == active_* ]]; then
+      write_state "$window_run" 03_PLAN_GENERATED PLAN
+    else
+      write_state "$window_run" 12_COMPLETE COMPLETE
+    fi
+  fi
+  window_path=$CASE/etc/maintenance_window.conf
+  [[ "$window_case" != complete_missing_parent ]] || window_path=$CASE/etc/removed/window.conf
+  printf '\nMAINTENANCE_WINDOW_MANIFEST=%s\n' "$window_path" >>"$CONFIG"
+  if [[ "$window_case" == complete_valid || "$window_case" == complete_expired || "$window_case" == complete_wrong_* || "$window_case" == complete_unsafe || "$window_case" == complete_unverified || "$window_case" == active_expired ]]; then
+    cat >"$window_path" <<EOF
+hostname=svtest.example
+change_id=$(json_get "$CONTEXT_ROOT/current_run.json" window_id)
+start=2026-10-02T10:00:00Z
+end=2026-10-02T16:00:00Z
+allowed_oracle_home=$HOME_DIR
+run_id=$window_run
+min_remaining_minutes=30
+EOF
+    chmod 0640 "$window_path"
+    if [[ "$window_case" != complete_valid ]]; then
+      sed -i 's/2026-10-02/2026-09-10/g' "$window_path"
+    fi
+    [[ "$window_case" != complete_wrong_run ]] || sed -i 's/^run_id=.*/run_id=OTHER-RUN/' "$window_path"
+    [[ "$window_case" != complete_wrong_window ]] || sed -i 's/^change_id=.*/change_id=OTHER-WINDOW/' "$window_path"
+    [[ "$window_case" != complete_unsafe ]] || chmod 0666 "$window_path"
+    [[ "$window_case" != complete_unverified ]] || printf '20\n' >"$CASE/completion-validation.rc"
+  elif [[ "$window_case" == complete_malformed ]]; then
+    printf 'invalid window\n' >"$window_path"; chmod 0640 "$window_path"
+  elif [[ "$window_case" == complete_dangling ]]; then
+    ln -s "$CASE/absent-window" "$window_path"
+  fi
+  # Capture all context/history/state/window bytes and directory entries before
+  # PRECHECK; no new formal context, archive or window may appear afterward.
+  snapshot_window_state() {
+    find "$CONTEXT_ROOT" "$RUN_ROOT" "$CASE/etc" -printf '%p %y %m %u %g %l\n' 2>/dev/null
+    find "$CONTEXT_ROOT" "$RUN_ROOT" "$CASE/etc" -type f -exec sha256sum {} + 2>/dev/null
+    return 0
+  }
+  before_window_state=$(snapshot_window_state | sort)
+  cat >"$PROJECT/patchGD_guard.sh" <<EOF
+#!/usr/bin/env bash
+[[ -z \${RUN_ID+x} && -z \${WINDOW_ID+x} && -z \${OPG_WINDOW_BINDING_MODE+x} ]] || exit 91
+[[ \$1 == precheck ]] || exit 92
+shift
+while (( \$# )); do
+  case \$1 in
+    --run-id) export RUN_ID=\$2; shift ;;
+  esac
+  shift
+done
+[[ \$RUN_ID == *-PRECHECK-* ]] || exit 93
+export MAINTENANCE_WINDOW_MANIFEST='$window_path' TARGET_ORACLE_HOME='$HOME_DIR'
+export HOST_NAME=svtest.example OPG_CHECK_PHASE=assess OPG_WINDOW_BINDING_MODE=precheck
+export OPG_TEST_MODE=1 OPG_NOW_EPOCH_OVERRIDE=1790931600
+bash '$ROOT/project/checks/check_maintenance_window'
+rc=\$?
+case \$rc in 0) exit 0 ;; 2) exit 10 ;; *) exit 30 ;; esac
+EOF
+  chmod 0750 "$PROJECT/patchGD_guard.sh"
+  export OPG_TEST_PRECHECK_RUN_STAMP=20261002T090000Z
+  run_wrapper precheck; rc=$?
+  expected=0
+  case "$window_case" in
+    complete_valid) grep -Fq 'READY: change_id=OPG-' "$OUT" || rc=94 ;;
+    complete_expired) grep -Fq 'NOT_CURRENT:' "$OUT" || rc=94 ;;
+    complete_unverified) expected=20 ;;
+    complete_malformed|complete_dangling|complete_missing_parent|complete_wrong_*|complete_unsafe|active_expired)
+      expected=30; grep -Fq 'OPG_OEM_PRECHECK_RESULT|status=UNKNOWN' "$OUT" || rc=95 ;;
+    *) grep -Fq 'OPG_OEM_PRECHECK_RESULT|status=CONDITIONAL' "$OUT" || rc=96 ;;
+  esac
+  [[ "$before_window_state" == "$(snapshot_window_state | sort)" ]] || rc=97
+  if [[ "$window_case" == complete_* ]]; then
+    grep -Fq "media-stage|validate-completion $window_run" "$CASE/routes.log" || rc=98
+  fi
+  record "real window checker: $window_case; no inherited binding or lifecycle mutation" "$expected" "$rc"
+done
+
 printf '\nOEM wrapper results: %s passed, %s failed\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

@@ -54,6 +54,18 @@ now_epoch=${OPG_NOW_EPOCH_OVERRIDE:-$(date +%s)}
 [[ "$now_epoch" =~ ^[0-9]+$ ]] || unknown 'huidige tijd kon niet worden bepaald.'
 (( end_epoch > start_epoch )) || blocked 'eindtijd ligt niet na starttijd.'
 
+# Only the wrapper's verified COMPLETE context can identify an expired window
+# as historical. Validate every other field/permission first; never bypass
+# malformed evidence, insufficient window duration, or a different binding.
+if [[ "$phase" == assess && "$binding_mode" == precheck &&
+      -n ${OPG_PRECHECK_COMPLETED_RUN_ID:-} && -n ${OPG_PRECHECK_COMPLETED_WINDOW_ID:-} &&
+      "$manifest_run" == "$OPG_PRECHECK_COMPLETED_RUN_ID" &&
+      "$change_id" == "$OPG_PRECHECK_COMPLETED_WINDOW_ID" ]] && (( now_epoch > end_epoch )); then
+  (( (end_epoch - start_epoch) / 60 >= minimum )) || blocked 'historisch venster had onvoldoende venstertijd.'
+  printf 'NOT_CURRENT: verlopen window hoort bij geverifieerde COMPLETE-run %s; nieuw window vereist vóór PLAN/APPLY.\n' "$manifest_run"
+  exit 2
+fi
+
 if [[ "$phase" == preapply ]]; then
   (( now_epoch >= start_epoch && now_epoch <= end_epoch )) || blocked 'huidige tijd ligt niet binnen het goedgekeurde venster.'
   remaining=$(( (end_epoch - now_epoch) / 60 ))

@@ -611,15 +611,22 @@ clean_oracle_env() {
 
 run_precheck() {
   local run_stamp precheck_run_id patch_guard_rc=0 oem_rc status
+  local completed_run_id='' completed_window_id=''
   discover_all
   validate_lifecycle_neutral_context
+  if [[ "$LIFECYCLE_CONTEXT_SCOPE" == SAME_CYCLE_COMPLETE || "$LIFECYCLE_CONTEXT_SCOPE" == HISTORICAL_COMPLETE ]]; then
+    completed_run_id=$RUN_ID
+    completed_window_id=$WINDOW_ID
+  fi
   run_stamp=${OPG_TEST_PRECHECK_RUN_STAMP:-$(date -u '+%Y%m%dT%H%M%SZ')}
   [[ "$run_stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || fail "$EXIT_UNKNOWN" PRECHECK 'PRECHECK-tijdstempel is ongeldig.'
   precheck_run_id=${SHORT_HOST}-${ORACLE_SID}-${PATCH_CYCLE}-PRECHECK-${run_stamp}
   [[ "$precheck_run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] || fail "$EXIT_BLOCKED" PRECHECK 'Afgeleide PRECHECK RUN_ID is ongeldig of te lang.'
   [[ ! -e "${RUN_ROOT}/${precheck_run_id}" ]] || fail "$EXIT_BLOCKED" PRECHECK "Afgeleide PRECHECK RUN_ID bestaat al: ${precheck_run_id}"
   require_script "$CORE_SCRIPT" core
-  clean_oracle_env /bin/bash "$CORE_SCRIPT" precheck --non-interactive --target-oracle-home "$ORACLE_HOME" \
+  clean_oracle_env /usr/bin/env OPG_PRECHECK_COMPLETED_RUN_ID="$completed_run_id" \
+    OPG_PRECHECK_COMPLETED_WINDOW_ID="$completed_window_id" \
+    /bin/bash "$CORE_SCRIPT" precheck --non-interactive --target-oracle-home "$ORACLE_HOME" \
     --run-id "$precheck_run_id" --config "$CONFIG_FILE" "$DB_RU_PATCH_ID" "$OJVM_PATCH_ID" "$PATCH_CYCLE" "$OPATCH_VERSION" "$OPATCH_ZIP" || patch_guard_rc=$?
   oem_rc=$patch_guard_rc
   case "$patch_guard_rc" in
