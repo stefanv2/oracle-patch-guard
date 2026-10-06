@@ -119,12 +119,14 @@ descriptorfix eindigde de automatische lokale media-cleanup aantoonbaar op
 
 ### First successful parallel multi-host OEM patch run - 2026-09-10
 
-Een parallelle OEM-run is succesvol afgerond op `DBHOST03 / d000084p`
-(non-CDB) en `dbhost02 / exampledb` (CDB met PDB). Beide doorliepen PLAN,
+Een parallelle OEM-run is succesvol afgerond op `dbhost01 / dbnoncdb01`
+(non-CDB) en `dbhost02 / cdb01` (CDB met PDB). Beide doorliepen PLAN,
 centrale APPROVE, APPLY, VALIDATE en COMPLETE en eindigden op `12_COMPLETE`,
 exitcode 0 en OEM-status `Succeeded`. De doorlooptijden waren 22m04s en 22m20s.
 Iedere target gebruikte zijn eigen RUN_ID, state en logdirectory; de centrale
 approvaltaak verwerkte de onafhankelijke READY-runs gezamenlijk.
+
+Host- en databasenamen in dit verslag zijn geanonimiseerde voorbeeldnamen.
 
 ## Repository-indeling
 

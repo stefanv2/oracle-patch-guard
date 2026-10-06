@@ -148,7 +148,7 @@ APPLY on the testhost. No database-core change is needed.
 
 ## CDB/PDB limitation
 
-Only `exampledb:oracle_database` is selected. Separate `oracle_pdb` targets are
+Only `cdb01:oracle_database` is selected. Separate `oracle_pdb` targets are
 not automatically added. The supplied test coexisted with a foreign blackout
 already covering PDBs; it cannot prove that the narrow database blackout alone
 suppresses PDB alerts. Verify this independently before claiming full coverage.
