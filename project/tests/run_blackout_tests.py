@@ -11,12 +11,12 @@ import sys
 from unittest.mock import patch
 
 FOREIGN = '''Blackoutname = automatic_patching_OPG
-Targets = (SYSBACKGROUND_10:oracle_dbservice,LISTENER_sv2210620.frd.shsdir.nl:oracle_listener,d001pcdb_d000001p:oracle_pdb,OraDB19Home1_1_sv2210620.frd.shsdir.nl_7:oracle_home,d000001p:oracle_dbservice,d001pcdb.frd.shsdir.nl:oracle_dbservice,d001pcdb:oracle_database,SYSUSERS_10:oracle_dbservice,d001pcdbXDB:oracle_dbservice,d001pcdb_CDBROOT:oracle_pdb,)
+Targets = (SYSBACKGROUND_10:oracle_dbservice,LISTENER_dbhost02.example.com:oracle_listener,cdb01_pdb01:oracle_pdb,OraDB19Home1_1_dbhost02.example.com_7:oracle_home,pdb01:oracle_dbservice,cdb01.example.com:oracle_dbservice,cdb01:oracle_database,SYSUSERS_10:oracle_dbservice,cdb01XDB:oracle_dbservice,cdb01_CDBROOT:oracle_pdb,)
 Time = ({2026-08-31|11:09:47,|} )
 Expired = False
 '''
-OWN = '''Blackoutname = OPG_TEST_d001pcdb_20260911
-Targets = (d001pcdb:oracle_database,)
+OWN = '''Blackoutname = OPG_TEST_cdb01_20260911
+Targets = (cdb01:oracle_database,)
 Time = ({2026-09-11|15:08:01|5 Min,|} )
 Expired = False
 '''
@@ -31,7 +31,7 @@ class Contracts(unittest.TestCase):
         during = b.blackouts(FOREIGN + '\n' + OWN)
         self.assertEqual(len(during), 2)
         self.assertEqual(len(b.blackouts(FOREIGN)), 1)
-        self.assertEqual(during[1]['targets'], ['d001pcdb:oracle_database'])
+        self.assertEqual(during[1]['targets'], ['cdb01:oracle_database'])
 
     def test_disabled_default(self):
         self.assertEqual(b.mode({}), 'disabled')
