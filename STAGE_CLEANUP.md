@@ -5,6 +5,13 @@ Oracle Patch Guard verwijdert na een bewezen succesvolle patchrun automatisch ui
 De privileged media-engine ondersteunt als minimale target-runtime Python
 3.6.8, zoals standaard beschikbaar op de gebruikte Oracle Linux-generatie.
 
+De verwijdering gebruikt symlink-aanvalbestendige `shutil.rmtree`; ontbrekende
+runtimeondersteuning blokkeert cleanup. Deze hardening beschermt tegen
+symlinkverwisselingen binnen execution-media. De bestaande trust boundary
+begint bij `/u01/stage`; manipulatie van hogere padcomponenten, waaronder
+`/u01`, valt buiten deze bescherming. Er worden geen nieuwe ownership- of
+permissievoorwaarden aan die hogere directories gesteld.
+
 ## Automatische happy-path
 
 De volgorde is strikt:

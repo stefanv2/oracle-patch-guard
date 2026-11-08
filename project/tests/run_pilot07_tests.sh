@@ -12,7 +12,7 @@ RUNTIME=${BASE}.runtime
 mkdir -p "$RUNTIME"; cp "$SOURCE_HELPER" "$RUNTIME/opg_media_stage_root.sh"; cp "$SOURCE_HELPER_ENGINE" "$RUNTIME/opg_media_stage_root.py"; chmod 0755 "$RUNTIME" "$RUNTIME/opg_media_stage_root.sh" "$RUNTIME/opg_media_stage_root.py"
 HELPER=$RUNTIME/opg_media_stage_root.sh
 HELPER_ENGINE=$RUNTIME/opg_media_stage_root.py
-PASS=0 FAIL=0
+PASS=0 FAIL=0 SKIP=0
 if [[ ${OPG_KEEP_TEST_TMP:-0} != 1 ]]; then trap 'rm -rf -- "$BASE".*' EXIT; else printf 'Pilot07 testtmp prefix: %s\n' "$BASE"; fi
 
 record() {
@@ -128,14 +128,53 @@ PY
 }
 add_default_oracle_write_acl() {
   python3 - "$1" <<'PY'
-import os, struct, sys
+import errno, os, struct, sys
+# A non-mapped fixture identity is an explicit namespace limitation.
+try:
+    with open('/proc/self/uid_map') as mapping:
+        ranges = [tuple(map(int, line.split())) for line in mapping if line.strip()]
+except OSError as exc:
+    print('ACL fixture uid-map check failed: ' + str(exc), file=sys.stderr)
+    sys.exit(1)
+if not any(start <= 424242 < start + length for start, outside, length in ranges):
+    print('ACL fixture unavailable: UID 424242 is not mapped in this user namespace',
+          file=sys.stderr)
+    sys.exit(77)
 undefined = 0xffffffff
 entries = ((0x01, 0o7, undefined), (0x02, 0o7, 424242),
            (0x04, 0o5, undefined), (0x10, 0o7, undefined),
            (0x20, 0o5, undefined))
 data = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *entry) for entry in entries)
-os.setxattr(sys.argv[1], 'system.posix_acl_default', data, follow_symlinks=False)
+try:
+    os.setxattr(sys.argv[1], 'system.posix_acl_default', data, follow_symlinks=False)
+except OSError as exc:
+    print('ACL fixture write failed: errno={0}; path={1}; cause={2}'.format(
+        exc.errno, sys.argv[1], exc), file=sys.stderr)
+    sys.exit(77 if exc.errno in (errno.ENOTSUP, errno.EOPNOTSUPP) else 1)
+try:
+    actual = os.getxattr(sys.argv[1], 'system.posix_acl_default', follow_symlinks=False)
+except OSError as exc:
+    print('ACL fixture readback failed: errno={0}; path={1}; cause={2}'.format(
+        exc.errno, sys.argv[1], exc), file=sys.stderr)
+    sys.exit(1)
+if actual != data:
+    print('ACL fixture readback mismatch: ' + sys.argv[1], file=sys.stderr)
+    sys.exit(1)
 PY
+}
+
+check_oracle_acl() {
+  local path=$1 name=$2 rc=0
+  add_default_oracle_write_acl "$path" || rc=$?
+  if (( rc == 77 )); then
+    printf 'skip - %s (ACL fixture unavailable; see diagnostic above)\n' "$name"
+    SKIP=$((SKIP+1))
+  elif (( rc != 0 )); then
+    record "$name: fixture construction failed" 0 "$rc"
+  else
+    verify; rc=$?
+    record "$name" 20 "$rc"
+  fi
 }
 
 validate_local_with_fake_identity() {
@@ -263,8 +302,8 @@ setup_case rootgroup; stage >/dev/null; validate_local_with_fake_identity group 
 setup_case rootmode; stage >/dev/null; chmod 0775 "$(local_root)"; verify; record 'verkeerde mode lokale stage-root wordt geblokkeerd' 20 $?
 setup_case anchorsymlink; stage >/dev/null; mv "$CASE/u01/stage" "$CASE/u01/stage.real"; ln -s stage.real "$CASE/u01/stage"; verify; record 'symlink trusted anchor wordt geblokkeerd' 20 $?
 setup_case rootsymlink; stage >/dev/null; mv "$(local_root)" "$CASE/u01/stage/root.real"; ln -s root.real "$(local_root)"; verify; record 'symlink lokale stage-root wordt geblokkeerd' 20 $?
-setup_case anchoracl; stage >/dev/null; add_default_oracle_write_acl "$CASE/u01/stage"; verify; record 'oracle write-ACL op trusted anchor wordt geblokkeerd' 20 $?
-setup_case rootacl; stage >/dev/null; add_default_oracle_write_acl "$(local_root)"; verify; record 'oracle write-ACL op lokale stage-root wordt geblokkeerd' 20 $?
+setup_case anchoracl; stage >/dev/null; check_oracle_acl "$CASE/u01/stage" 'oracle write-ACL op trusted anchor wordt geblokkeerd'
+setup_case rootacl; stage >/dev/null; check_oracle_acl "$(local_root)" 'oracle write-ACL op lokale stage-root wordt geblokkeerd'
 setup_case rootcontrolled; stage >/dev/null; verify; record 'bestaande volledig root-controlled layout blijft toegestaan' 0 $?
 
 setup_case roots; stage >/dev/null; identity=$(manifest_hash); cp -a "$(local_root)/ready/JUL2026/$identity/media/JUL2026/39472050" "$CASE/copy"
@@ -349,5 +388,5 @@ OPG_MEDIA_TEST_MODE=1 OPG_MEDIA_TEST_ROOT="$CASE" "$launch/opg_media_stage_root.
 rm "$launch/opg_media_stage_root.py"; ln -s "$SOURCE_HELPER_ENGINE" "$launch/opg_media_stage_root.py"
 OPG_MEDIA_TEST_MODE=1 OPG_MEDIA_TEST_ROOT="$CASE" "$launch/opg_media_stage_root.sh" verify-active-stage JUL2026 >/dev/null 2>&1; record 'symlink lokale media-engine wordt geweigerd' 30 $?
 
-printf '\nPilot07 media results: %d passed, %d failed\n' "$PASS" "$FAIL"
+printf '\nPilot07 media results: %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 (( FAIL == 0 ))
