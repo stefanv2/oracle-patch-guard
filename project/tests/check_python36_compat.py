@@ -7,6 +7,7 @@ import sys
 
 
 FORBIDDEN_CALL_KEYWORDS = {
+    ("shutil", "rmtree"): {"dir_fd", "onexc"},
     ("subprocess", "run"): {"capture_output", "text"},
     ("subprocess", "Popen"): {"capture_output", "text"},
     ("shutil", "copytree"): {"dirs_exist_ok"},

@@ -932,6 +932,39 @@ def unlink_if_present(path):
         pass
 
 
+def purge_failure(run_id, exc, message, path):
+    code = EXIT_BLOCKED if isinstance(exc, SystemExit) and exc.code == EXIT_BLOCKED else EXIT_UNKNOWN
+    if isinstance(exc, OSError):
+        message += f": errno={exc.errno}; path={exc.filename or path}; cause={exc}"
+        if exc.filename2:
+            message += f"; destination={exc.filename2}"
+    cleanup_stop(run_id, code, "FAILED_RETAINED", message)
+
+
+def require_safe_rmtree():
+    if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
+        die(EXIT_UNKNOWN, "runtime ondersteunt geen symlink-veilige rmtree")
+
+
+def prepare_purge_parents(local, cycle, gid):
+    """Validate before use; only initialize directories created by this call."""
+    validate_local_parents(local)
+    owner, oracle_uid, oracle_groups = stage_security_ids(gid)
+    for directory in (local / "purging", local / "purging" / cycle):
+        try:
+            directory.mkdir(mode=0o750)
+        except FileExistsError:
+            pass
+        else:
+            os.chown(directory, owner, gid)
+            os.chmod(directory, 0o750)
+        info = directory.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != owner or
+                info.st_gid != gid or stat.S_IMODE(info.st_mode) != 0o750):
+            die(EXIT_BLOCKED, f"onveilige purge-directory: {directory}")
+        validate_stage_acl(directory, oracle_uid, oracle_groups)
+
+
 def measured_safe_purge(path):
     total = 0
     for base, dirs, files in os.walk(path, topdown=True, followlinks=False):
@@ -945,12 +978,8 @@ def measured_safe_purge(path):
                                      (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1)):
                 die(EXIT_BLOCKED, f"symlink/hardlink/speciaal object in purge-tree: {item}")
             total += info.st_blocks * 512
-    for base, dirs, files in os.walk(path, topdown=False, followlinks=False):
-        for name in files:
-            (Path(base) / name).unlink()
-        for name in dirs:
-            (Path(base) / name).rmdir()
-    path.rmdir()
+    require_safe_rmtree()
+    shutil.rmtree(str(path))
     return total
 
 
@@ -1036,6 +1065,14 @@ def purge_run(run_id):
         stage = binding["stage"]
         purging = local / "purging" / binding["cycle"]
         quarantine = purging / f"{binding['identity']}.{run_id}"
+        # Fail before intent/pointer changes or quarantine rename. Validate
+        # parents within the existing stage boundary; rmtree
+        # pins descendants, not higher path components outside that boundary.
+        try:
+            require_safe_rmtree()
+            prepare_purge_parents(local, binding["cycle"], gid)
+        except (SystemExit, OSError) as exc:
+            purge_failure(run_id, exc, "purge-runtime of parentketen is onveilig", purging)
         intent_record = None
         if intent.exists():
             intent_record, _ = lifecycle_json(intent, os.getuid() if os.environ.get("OPG_MEDIA_TEST_MODE") == "1" else 0)
@@ -1062,8 +1099,6 @@ def purge_run(run_id):
                 cleanup_stop(run_id, EXIT_UNKNOWN, "FAILED_RETAINED", "active_stage is niet betrouwbaar")
             if pointer_identity == binding["identity"]:
                 pointer.unlink()
-        purging.mkdir(mode=0o750, parents=True, exist_ok=True)
-        secure_directory(local / "purging", gid); secure_directory(purging, gid)
         if stage.exists() and not quarantine.exists():
             os.rename(stage, quarantine)
         elif stage.exists() and quarantine.exists():
@@ -1072,8 +1107,8 @@ def purge_run(run_id):
             cleanup_stop(run_id, EXIT_UNKNOWN, "FAILED_RETAINED", "gesimuleerde onderbreking na rename")
         try:
             reclaimed = measured_safe_purge(quarantine) if quarantine.exists() else int(intent_record["bytes_reclaimed"])
-        except BaseException:
-            cleanup_stop(run_id, EXIT_UNKNOWN, "FAILED_RETAINED", "purge onderbroken; quarantaine behouden")
+        except (SystemExit, OSError) as exc:
+            purge_failure(run_id, exc, "purge onderbroken; resterende quarantaine behouden", quarantine)
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         record = {"schema_version": 1, "run_id": run_id, "cycle": binding["cycle"],
                   "stage_identity": binding["identity"], "original_stage_path": str(stage),
