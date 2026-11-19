@@ -578,7 +578,7 @@ grep -Fq 'OPG_PRECHECK_FINDING|run_id=PA1|severity=READY|id=TARGET_PATCHLEVEL_AL
 grep -Fq 'OPG_PRECHECK_FINDING|run_id=PA1|severity=READY|id=TARGET_PATCHLEVEL_READINESS' "$CASE_DIR/PA1.out" || rc=97
 grep -Fq 'READY|REGISTRY_SQLPATCH_READINESS|' "$RUN_ROOT/PA1/precheck_summary.psv" || rc=95
 grep -Fq 'BLOCKED|SQLPATCH_ERROR|' "$RUN_ROOT/PA1/findings.psv" && rc=94
-grep -Fqx '1|CDB$ROOT' "$RUN_ROOT/PA1/datapatch_expected_containers_DB1.psv" || rc=93
+grep -Fqx "1|CDB\$ROOT" "$RUN_ROOT/PA1/datapatch_expected_containers_DB1.psv" || rc=93
 grep -Fqx '3|PDB1' "$RUN_ROOT/PA1/datapatch_expected_containers_DB1.psv" || rc=92
 [[ $(grep -c '^CDB_SQLPATCH|' "$RUN_ROOT/PA1/datapatch_sqlpatch_DB1.log") -eq 4 ]] || rc=91
 [[ ! -e "$RUN_ROOT/PA1/execution_state.json" && ! -e "$RUN_ROOT/PA1/patch_manifest.json" ]] || rc=96
@@ -858,6 +858,158 @@ for signal in TERM INT; do
   [[ "$context_before" == "$(sha256sum "$signal_context" | awk '{print $1}')" ]] || isolation_rc=97
   [[ "$approval_before" == "$(find "$signal_approval_root" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)" ]] || isolation_rc=96
   record "${signal} tijdens PRECHECK schrijft geen formele lifecycle-artifacts" 0 "$isolation_rc"
+done
+
+prepare_active_home_case() {
+  setup_case "$1"
+  assess ACTIVE >/dev/null
+  plan ACTIVE >/dev/null
+  ACTIVE_TOKEN=$(approval ACTIVE)
+  ACTIVE_RUN="$RUN_ROOT/ACTIVE"
+}
+
+active_home_apply() {
+  local route=${1:-apply}
+  guard "$route" --non-interactive --run-id ACTIVE --approved-manifest "$ACTIVE_RUN/patch_manifest.json" \
+    --approval-token "$ACTIVE_TOKEN" >"$CASE_DIR/active.out" 2>&1
+}
+
+for verdict in FAILED AMBIGUOUS EMPTY UNKNOWN_TEXT; do
+  prepare_active_home_case "active-native-${verdict/FAILED/negative}"
+  expected=UNKNOWN
+  case "$verdict" in
+    FAILED) expected=BLOCKED ;;
+    EMPTY) verdict='' ;;
+  esac
+  printf '\nMOCK_PREREQ_active_files_before_db_39472050=%s\n' "$verdict" >>"$FIXTURE_ENV"
+  active_home_apply; rc=$?
+  grep -Fq "result=$expected|check=opatch|patch_id=39472050" "$ACTIVE_RUN/last_error.txt" &&
+    grep -Fq '|tool_exit_code=0|' "$ACTIVE_RUN/last_error.txt" &&
+    grep -Fq '|05_DATABASES_STOPPED|PARTIAL|PRE_BINARY_CHECK|' "$ACTIVE_RUN/state_history.log" &&
+    grep -Fq '|status=PARTIAL|phase=PRE_BINARY_CHECK|' "$CASE_DIR/active.out" &&
+    [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" && ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
+  record "native prereq '${verdict:-lege uitvoer}' met exit 0 stopt vóór DB-RU" 40 "$rc" "$CASE_DIR/active.out"
+done
+
+for mode in missing noexec visibility; do
+  prepare_active_home_case "active-preapply-$mode"
+  case "$mode" in
+    missing) mv -- "$HOME_DIR/OPatch/opatch" "$HOME_DIR/OPatch/offline" ;;
+    noexec) chmod a-x "$HOME_DIR/OPatch/opatch" ;;
+    visibility) printf '\nMOCK_RC_preapply_active_home_visibility=30\n' >>"$FIXTURE_ENV" ;;
+  esac
+  active_home_apply; rc=$?
+  grep -Eq 'ACTIVE_HOME_(TOOL_UNAVAILABLE|VISIBILITY_UNKNOWN)' "$ACTIVE_RUN/preapply_findings.psv" || rc=99
+  record "PREAPPLY meldt $mode" 30 "$rc" "$CASE_DIR/active.out"
+  assert_no_downtime_started "PREAPPLY $mode stopt vóór downtime" ACTIVE
+done
+
+prepare_active_home_case active-ojvm-upfront
+printf '\nMOCK_PREREQ_active_files_before_db_39222882=FAILED\n' >>"$FIXTURE_ENV"
+active_home_apply; rc=$?
+grep -Fq 'result=BLOCKED|check=opatch|patch_id=39222882' "$ACTIVE_RUN/last_error.txt" &&
+  [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" ]] || rc=99
+record 'OJVM-prereq blokkeert ook vóór de eerste DB-RU-apply' 40 "$rc" "$CASE_DIR/active.out"
+
+for stage in before_db before_ojvm; do
+  prepare_active_home_case "active-files-$stage"
+  printf '\nMOCK_RC_active_home_%s=20\n' "$stage" >>"$FIXTURE_ENV"
+  active_home_apply; rc=$?
+  grep -Fq 'result=BLOCKED|check=files' "$ACTIVE_RUN/last_error.txt" &&
+    grep -Fq 'libclntsh.so.19.1' "$ACTIVE_RUN/active_home_$stage.log" &&
+    [[ ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
+  if [[ "$stage" == before_db ]]; then
+    [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" ]] || rc=98
+  else
+    grep -Fq '|06_DB_BINARY_APPLIED|PARTIAL|PRE_BINARY_CHECK|' "$ACTIVE_RUN/state_history.log" || rc=98
+  fi
+  record "bestandsgebruik stopt $stage ondanks native PASSED" 40 "$rc" "$CASE_DIR/active.out"
+done
+
+for rc_fixture in 30 124; do
+  prepare_active_home_case "active-incomplete-$rc_fixture"
+  printf '\nMOCK_RC_active_home_before_db=%s\n' "$rc_fixture" >>"$FIXTURE_ENV"
+  active_home_apply; rc=$?
+  grep -Fq 'result=UNKNOWN|check=files' "$ACTIVE_RUN/last_error.txt" &&
+    grep -Fq "|tool_exit_code=$rc_fixture|" "$ACTIVE_RUN/last_error.txt" &&
+    [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" ]] || rc=99
+  record "bestandscontrole exit $rc_fixture geeft geen vrijgave" 40 "$rc" "$CASE_DIR/active.out"
+done
+
+prepare_active_home_case active-shutdown
+printf '\nMOCK_SHUTDOWN_STILL_ACTIVE=true\n' >>"$FIXTURE_ENV"
+active_home_apply; rc=$?
+grep -Fq 'result=BLOCKED|check=shutdown' "$ACTIVE_RUN/last_error.txt" &&
+  [[ ! -e "$ACTIVE_RUN/active_files_before_db_39472050.log" && ! -e "$ACTIVE_RUN/apply_db_ru.log" ]] || rc=99
+record 'onvolledige shutdown stopt ook de native prereq' 40 "$rc" "$CASE_DIR/active.out"
+
+for state in OPATCH_READY 06_DB_BINARY_APPLIED; do
+  prepare_active_home_case "active-resume-$state"
+  if [[ "$state" == OPATCH_READY ]]; then
+    phase=OPATCH_UPGRADE; stage=before_db
+  else
+    phase=DB_BINARY; stage=resume_ojvm
+  fi
+  sed -i "s/\"state\": \"03_PLAN_GENERATED\"/\"state\": \"$state\"/; s/\"phase\": \"PLAN\"/\"phase\": \"$phase\"/" "$ACTIVE_RUN/execution_state.json"
+  printf '\nMOCK_RC_active_home_%s=20\n' "$stage" >>"$FIXTURE_ENV"
+  active_home_apply resume; rc=$?
+  grep -Fq '|status=PARTIAL|phase=PRE_BINARY_CHECK|' "$CASE_DIR/active.out" &&
+    [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" && ! -e "$ACTIVE_RUN/apply_ojvm_resume.log" ]] || rc=99
+  record "resume uit $state respecteert bestandscontrole" 40 "$rc" "$CASE_DIR/active.out"
+done
+
+prepare_active_home_case active-sequence
+active_home_apply; rc=$?
+actual=$(sed -nE 's/.*COMMAND_START\|label=((active_files|active_home|apply_db_ru|apply_ojvm)[^|]*)\|.*/\1/p' "$ACTIVE_RUN/commands.log" | paste -sd, -)
+[[ "$actual" == active_files_before_db_39472050,active_files_before_db_39222882,active_home_before_db,apply_db_ru,active_files_before_ojvm_39222882,active_home_before_ojvm,apply_ojvm ]] || rc=99
+record 'vrijgegeven home behoudt de DB-RU en OJVM-volgorde' 0 "$rc" "$CASE_DIR/active.out"
+
+for stage in before_db before_ojvm; do
+  prepare_active_home_case "retry-$stage"
+  printf '\nMOCK_RC_active_home_%s=20\n' "$stage" >>"$FIXTURE_ENV"
+  active_home_apply; rc=$?
+  grep -Fq 'OEM Retry : ALLOWED' "$CASE_DIR/active.out" &&
+    grep -Fq 'pid=123' "$CASE_DIR/active.out" &&
+    [[ ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
+  record "OEM markeert $stage als Failed met DBA-instructie" 40 "$rc" "$CASE_DIR/active.out"
+  active_home_apply; rc=$?
+  grep -Fq 'OEM Retry : ALLOWED' "$CASE_DIR/active.out" && [[ ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
+  record "retry $stage blijft geblokkeerd zolang proces actief is" 40 "$rc" "$CASE_DIR/active.out"
+  sed -i "/^MOCK_RC_active_home_${stage}=/d" "$FIXTURE_ENV"
+  active_home_apply; rc=$?
+  [[ $(grep -c 'COMMAND_START|label=apply_db_ru|' "$ACTIVE_RUN/commands.log") == 1 &&
+     $(grep -c 'COMMAND_START|label=apply_ojvm|' "$ACTIVE_RUN/commands.log") == 1 &&
+     $(grep -c 'COMMAND_START|label=shutdown_DB1|' "$ACTIVE_RUN/commands.log") == 1 ]] || rc=99
+  record "retry $stage hervat dezelfde run en past RU eenmaal toe" 0 "$rc" "$CASE_DIR/active.out"
+done
+
+for case_name in approval window inventory media lock history binary; do
+  prepare_active_home_case "retry-deny-$case_name"
+  printf '\nMOCK_RC_active_home_before_db=20\n' >>"$FIXTURE_ENV"
+  active_home_apply
+  sed -i '/^MOCK_RC_active_home_before_db=/d' "$FIXTURE_ENV"
+  expected=20
+  case "$case_name" in
+    approval) ACTIVE_TOKEN=$(approval ACTIVE "$(( $(date +%s) - 60 ))") ;;
+    window) printf '\nMOCK_CHECK_MAINTENANCE_WINDOW=BLOCKED\n' >>"$FIXTURE_ENV" ;;
+    inventory) printf '\nMOCK_RETRY_INVENTORY_EXTRA="1234;Unexpected patch"\n' >>"$FIXTURE_ENV" ;;
+    media) printf 'changed\n' >>"$PATCH_ROOT/JUL2026/39472050/payload.bin" ;;
+    lock) printf '\nMOCK_LOCK_BUSY=true\n' >>"$FIXTURE_ENV"; expected=60 ;;
+    history) printf 'incomplete publication\n' >>"$ACTIVE_RUN/state_history.log" ;;
+    binary)
+      printf '\nMOCK_RC_apply_db_ru=73\n' >>"$FIXTURE_ENV"
+      active_home_apply; rc=$?
+      grep -Fq 'OEM Retry : NOT ALLOWED' "$CASE_DIR/active.out" || rc=99
+      record 'mislukte DB-RU na retry verbruikt checkpoint' 40 "$rc" "$CASE_DIR/active.out" ;;
+  esac
+  active_home_apply; rc=$?
+  [[ ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
+  if [[ "$case_name" == binary ]]; then
+    [[ $(grep -c 'COMMAND_START|label=apply_db_ru|' "$ACTIVE_RUN/commands.log") == 1 ]] || rc=99
+  else
+    [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" ]] || rc=99
+  fi
+  record "retry weigert $case_name" "$expected" "$rc" "$CASE_DIR/active.out"
 done
 
 printf '\nResultaat: %s geslaagd, %s mislukt\n' "$PASS" "$FAIL"

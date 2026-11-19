@@ -855,21 +855,52 @@ inventory_databases() {
 }
 
 detect_home_processes() {
-  local process_dir exe cmdline sid known=false
+  local assessment_mode=${1:-formal} process_dir exe cmdline sid manifest_sid known=false
+  local limited=false client=false output="${RUN_DIR}/home_processes.txt"
   : >"${RUN_DIR}/home_processes.txt"
-  [[ -d /proc && ${OPG_TEST_MODE:-0} != 1 ]] || return 0
+  [[ ${OPG_TEST_MODE:-0} != 1 ]] || return 0
   for process_dir in /proc/[0-9]*; do
-    [[ -r "$process_dir/exe" ]] || continue
-    exe=$(readlink -f "$process_dir/exe" 2>/dev/null || true)
+    if ! exe=$(readlink -- "$process_dir/exe" 2>/dev/null); then
+      [[ ! -d "$process_dir" ]] || limited=true
+      continue
+    fi
     [[ "$exe" == "$TARGET_ORACLE_HOME/"* ]] || continue
-    cmdline=$(tr '\0' ' ' <"$process_dir/cmdline" 2>/dev/null || true)
+    cmdline=$(tr '\0' ' ' 2>/dev/null <"$process_dir/cmdline") || limited=true
     printf '%s|%s|%s\n' "${process_dir##*/}" "$exe" "$cmdline" >>"${RUN_DIR}/home_processes.txt"
-    if [[ "$cmdline" =~ ora_pmon_([A-Za-z0-9_#$]+) ]]; then
+    case "${exe#"$TARGET_ORACLE_HOME/"}" in
+      bin/sqlplus|bin/rman|bin/adrci|bin/sqlldr|bin/expdp|bin/impdp) client=true ;;
+    esac
+    if [[ "$assessment_mode" != preapply && "$cmdline" =~ ora_pmon_([A-Za-z0-9_#$]+) ]]; then
       sid=${BASH_REMATCH[1]}; known=false
       while IFS= read -r manifest_sid; do [[ "$sid" == "$manifest_sid" ]] && known=true; done < <(opg_manifest_sids)
       [[ "$known" == true ]] || opg_add_finding BLOCKED UNEXPECTED_DATABASE "PMON uit de doelhome staat niet in het manifest." "$sid"
     fi
   done
+  if [[ "$assessment_mode" == precheck || "$assessment_mode" == preapply ]]; then
+    output="${RUN_DIR}/${assessment_mode}_home_clients.log"
+    if type -P lsof >/dev/null && type -P timeout >/dev/null &&
+       COMMAND_TIMEOUT_SECONDS=30 opg_run_capture "${assessment_mode}_home_clients" "$output" \
+         /usr/bin/python3 -I "${SCRIPT_DIR}/lib/opg_active_home.py" "$TARGET_ORACLE_HOME" --advisory; then
+      grep -q '^ACTIVE_HOME_FILE|' "$output" && client=true
+    else
+      limited=true
+    fi
+    if [[ "$client" == true ]]; then
+      if [[ "$assessment_mode" == precheck ]]; then
+        opg_add_finding CONDITIONAL HOME_CLIENT_ACTIVE "Zelfstandige client gebruikt de doelhome." "$output"
+      else
+        preapply_add CONDITIONAL HOME_CLIENT_ACTIVE "Zelfstandige client gebruikt de doelhome." "$output"
+        opg_log WARN "HOME_CLIENT_ACTIVE|evidence=$output"
+      fi
+    fi
+    if [[ "$limited" == true || ! -d /proc ]]; then
+      if [[ "$assessment_mode" == precheck ]]; then
+        opg_add_finding INFO HOME_PROCESS_VISIBILITY_LIMITED "PRECHECK heeft beperkt proceszicht. Na shutdown volgt een verplichte bestandscontrole." "$output"
+      else
+        preapply_add INFO HOME_PROCESS_VISIBILITY_LIMITED "PREAPPLY heeft beperkt proceszicht." "$output"
+      fi
+    fi
+  fi
 }
 
 detect_prior_runs() {
@@ -884,7 +915,7 @@ detect_prior_runs() {
     prior_pid=$(opg_get_json_number "$state_file" pid)
     printf '%s|%s|%s\n' "$prior_run" "$prior_state" "$state_file" >>"${RUN_DIR}/prior_runs.txt"
     case "$prior_state" in
-      PARTIAL|MANUAL_INTERVENTION_REQUIRED|04_APPROVED|05_DATABASES_STOPPED|06_DB_BINARY_APPLIED|07_OJVM_BINARY_APPLIED|08_DATABASES_STARTED|09_DATAPATCH_COMPLETE|10_UTLRP_COMPLETE|11_VALIDATION_COMPLETE)
+      PARTIAL|MANUAL_INTERVENTION_REQUIRED|RETRY_BINARY_STARTED|04_APPROVED|05_DATABASES_STOPPED|06_DB_BINARY_APPLIED|07_OJVM_BINARY_APPLIED|08_DATABASES_STARTED|09_DATAPATCH_COMPLETE|10_UTLRP_COMPLETE|11_VALIDATION_COMPLETE)
         opg_add_finding BLOCKED PRIOR_INCOMPLETE_RUN "Eerdere of afgebroken run voor deze Oracle Home vereist afhandeling." "run=${prior_run}, state=${prior_state}" ;;
       *)
         if [[ "$prior_pid" =~ ^[0-9]+$ ]] && kill -0 "$prior_pid" 2>/dev/null; then
@@ -1167,7 +1198,7 @@ emit_precheck_result() {
   while IFS='|' read -r severity id message _; do
     [[ -n "$severity" && -n "$id" ]] || continue
     case "$id" in
-      WINDOW_INVALID|MAINTENANCE_WINDOW_READINESS|TARGET_PATCHLEVEL_ALREADY_APPLIED|TARGET_PATCHLEVEL_READINESS)
+      WINDOW_INVALID|MAINTENANCE_WINDOW_READINESS|TARGET_PATCHLEVEL_ALREADY_APPLIED|TARGET_PATCHLEVEL_READINESS|HOME_CLIENT_ACTIVE|HOME_PROCESS_VISIBILITY_LIMITED)
         printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s|message=%s\n' "$RUN_ID" "$severity" "$id" "$message"
         ;;
       *) printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s\n' "$RUN_ID" "$severity" "$id" ;;
@@ -1366,7 +1397,7 @@ perform_assessment() {
   detect_unsupported_topology
   inventory_databases || opg_add_finding BLOCKED DATABASE_INVENTORY_FAILED "Database-manifest kon niet worden gemaakt." "$ORATAB_FILE"
   evaluate_installed_target_patchlevel "$assessment_mode"
-  detect_home_processes
+  detect_home_processes "$assessment_mode"
   detect_prior_runs
   check_path_space "$TARGET_ORACLE_HOME" "$MIN_HOME_FREE_MB" HOME_SPACE "Oracle Home"
   [[ -n "$central_inventory" && -d "$central_inventory" ]] && check_path_space "$central_inventory" "$MIN_INVENTORY_FREE_MB" INVENTORY_SPACE "central inventory"
@@ -1628,16 +1659,26 @@ verify_static_context_unchanged() {
 }
 
 verify_manifest_databases_stopped() {
-  local sid listener
+  local sid listener pids pid exe rc
   if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then
-    [[ ${MOCK_ENVIRONMENT_CHANGED:-false} != true ]]
-    return $?
+    [[ ${MOCK_ENVIRONMENT_CHANGED:-false} != true && ${MOCK_SHUTDOWN_STILL_ACTIVE:-false} != true ]] || return "$EXIT_BLOCKED"
+    return 0
   fi
   while IFS= read -r sid; do
-    pgrep -f "ora_pmon_${sid}([^A-Za-z0-9_]|$)" >/dev/null 2>&1 && return 1
+    pids=$(pgrep -f "ora_pmon_${sid//\$/\\$}([^A-Za-z0-9_#$]|$)"); rc=$?
+    (( rc == 1 )) && continue
+    (( rc == 0 )) || return "$EXIT_UNKNOWN"
+    while IFS= read -r pid; do
+      [[ "$pid" =~ ^[0-9]+$ ]] || return "$EXIT_UNKNOWN"
+      if ! exe=$(readlink -- "/proc/$pid/exe" 2>/dev/null); then
+        [[ ! -d "/proc/$pid" ]] && continue
+        return "$EXIT_UNKNOWN"
+      fi
+      [[ "${exe% (deleted)}" != "$TARGET_ORACLE_HOME/bin/oracle" ]] || return "$EXIT_BLOCKED"
+    done <<<"$pids"
   done < <(opg_manifest_sids)
   while IFS= read -r listener; do
-    listener_running_from_target_home "$listener" && return 1
+    listener_running_from_target_home "$listener" && return "$EXIT_BLOCKED"
   done < <(manifest_listeners)
   return 0
 }
@@ -1734,6 +1775,13 @@ perform_preapply_recheck() {
 
   owner=$(stat -c '%U' "$TARGET_ORACLE_HOME" 2>/dev/null || true)
   [[ -n "$owner" && "$owner" == "$EXEC_USER" ]] || preapply_add BLOCKED EXECUTION_USER_CHANGED "Uitvoerende gebruiker/home-owner klopt direct vóór apply niet." "user=${EXEC_USER}, owner=${owner:-UNKNOWN}"
+  local missing_tool
+  if ! missing_tool=$(check_active_home_tools); then
+    preapply_add UNKNOWN ACTIVE_HOME_TOOL_UNAVAILABLE "Vereiste tool voor Active Oracle Home Readiness ontbreekt of is niet bruikbaar." "$missing_tool"
+  elif ! preapply_active_home_visibility; then
+    preapply_add UNKNOWN ACTIVE_HOME_VISIBILITY_UNKNOWN "Vereist proceszicht is vóór shutdown niet aantoonbaar onder de uitvoerende gebruiker." "${RUN_DIR}/preapply_active_home_visibility.log"
+  fi
+  detect_home_processes preapply
   if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then
     os_id=${MOCK_OS_ID:-ol}; os_version=${MOCK_OS_VERSION:-8.10}; arch=${MOCK_ARCH:-x86_64}
   else
@@ -2471,12 +2519,265 @@ SQL
   fi
 }
 
+check_active_home_tools() {
+  local tool="$TARGET_ORACLE_HOME/OPatch/opatch"
+  local tool_path
+  if [[ ! -f "$tool" || ! -x "$tool" ]]; then
+    printf '%s\n' "$tool"
+    return 1
+  fi
+  [[ ${OPG_TEST_MODE:-0} != 1 ]] || return 0
+  for tool in lsof timeout pgrep readlink; do
+    if ! tool_path=$(type -P "$tool") || [[ ! -x "$tool_path" ]]; then
+      printf '%s\n' "$tool"
+      return 1
+    fi
+  done
+  for tool in /usr/bin/python3 "${SCRIPT_DIR}/lib/opg_active_home.py"; do
+    if [[ ! -f "$tool" || ! -r "$tool" ]]; then
+      printf '%s\n' "$tool"
+      return 1
+    fi
+  done
+  if [[ ! -x /usr/bin/python3 ]]; then
+    printf '/usr/bin/python3\n'
+    return 1
+  fi
+}
+
+preapply_active_home_visibility() {
+  # Used by opg_run_capture from the sourced core library.
+  # shellcheck disable=SC2034
+  local COMMAND_TIMEOUT_SECONDS=60
+  local output="${RUN_DIR}/preapply_active_home_visibility.log"
+  opg_run_capture preapply_active_home_visibility "$output" \
+    env LC_ALL=C /usr/bin/python3 -I "${SCRIPT_DIR}/lib/opg_active_home.py" --visibility &&
+    grep -Fxq 'PROC_COVERAGE_CONFIRMED' "$output"
+}
+
+active_files_prereq_result() {
+  local output=$1 expected_patch=$2
+  LC_ALL=C awk -v expected_patch="$expected_patch" '
+    {
+      line = tolower($0)
+      sub(/^[[:space:]]+/, "", line)
+      if (line ~ /^opatch failed/) error = 1
+      if (line !~ /^(prereq|prerequisite check)[[:space:]]+"?checkactivefilesandexecutables([^a-z0-9_]|$)/) next
+      count++
+      if (line !~ /^prereq[[:space:]]+"checkactivefilesandexecutables"[[:space:]]+for[[:space:]]+patch[[:space:]]+[0-9]+[[:space:]]+(passed|failed)[.][[:space:]]*$/) next
+      sub(/[[:space:]]+$/, "", line)
+      n = split(line, fields, /[[:space:]]+/)
+      if ("id:" fields[n-1] == "id:" expected_patch) verdict = fields[n]
+    }
+    END {
+      if (count == 1 && verdict == "failed.") exit 20
+      if (count == 1 && verdict == "passed." && !error) exit 0
+      exit 30
+    }
+  ' "$output"
+}
+
+record_binary_readiness() {
+  local result=$1 check=$2 patches=$3 rc=$4 evidence=$5 reason=$6
+  local message="ACTIVE_HOME_READINESS|result=${result}|check=${check}|patch_id=${patches}|home=${TARGET_ORACLE_HOME}|tool_exit_code=${rc}|reason=${reason}|evidence=${evidence}"
+  if [[ "$result" == PASS ]]; then
+    opg_log INFO "$message"
+    return 0
+  fi
+  opg_mark_failure PARTIAL PRE_BINARY_CHECK "$message" "$rc" || true
+  return 1
+}
+
+require_binary_home_ready() {
+  local stage=$1; shift
+  # Used by opg_run_capture from the sourced core library.
+  # shellcheck disable=SC2034
+  local COMMAND_TIMEOUT_SECONDS=60
+  local patches patch missing_tool output rc verdict failed_patch='' failed_rc failed_output
+  patches=$(IFS=,; printf '%s' "$*")
+  if ! missing_tool=$(check_active_home_tools); then
+    rc=127
+    [[ ! -e "$missing_tool" ]] || rc=126
+    record_binary_readiness UNKNOWN tools "$patches" "$rc" "$RUN_DIR/commands.log" "tool_unavailable:${missing_tool}"
+    return 1
+  fi
+  verify_manifest_databases_stopped; rc=$?
+  case "$rc" in
+    0) record_binary_readiness PASS shutdown "$patches" "$rc" "$RUN_DIR/state_history.log" confirmed ;;
+    "$EXIT_BLOCKED") record_binary_readiness BLOCKED shutdown "$patches" "$rc" "$RUN_DIR/state_history.log" process_still_running; return 1 ;;
+    *) record_binary_readiness UNKNOWN shutdown "$patches" "$rc" "$RUN_DIR/state_history.log" shutdown_unconfirmed; return 1 ;;
+  esac
+  for patch in "$@"; do
+    output="${RUN_DIR}/active_files_${stage}_${patch}.log"
+    opg_run_capture "active_files_${stage}_${patch}" "$output" env LC_ALL=C ORACLE_HOME="$TARGET_ORACLE_HOME" \
+      "$TARGET_ORACLE_HOME/OPatch/opatch" prereq CheckActiveFilesAndExecutables \
+      -oh "$TARGET_ORACLE_HOME" -ph "${PATCH_ROOT}/${MONTH}/${patch}"; rc=$?
+    active_files_prereq_result "$output" "$patch"; verdict=$?
+    if (( verdict == EXIT_BLOCKED )); then
+      failed_patch=$patch; failed_rc=$rc; failed_output=$output
+      continue
+    fi
+    if (( rc != 0 || verdict != 0 )); then
+      record_binary_readiness UNKNOWN opatch "$patch" "$rc" "$output" prerequisite_unconfirmed
+      return 1
+    fi
+    record_binary_readiness PASS opatch "$patch" "$rc" "$output" prerequisite_passed
+  done
+
+  output="${RUN_DIR}/active_home_${stage}.log"
+  opg_run_capture "active_home_${stage}" "$output" env LC_ALL=C /usr/bin/python3 -I \
+    "${SCRIPT_DIR}/lib/opg_active_home.py" "$TARGET_ORACLE_HOME"; rc=$?
+  case "$rc" in
+    0)
+      if [[ -n "$failed_patch" ]]; then
+        record_binary_readiness BLOCKED opatch "$failed_patch" "$failed_rc" "$failed_output" prerequisite_failed
+      elif grep -Fxq 'ACTIVE_HOME_SCAN_CLEAR' "$output"; then
+        record_binary_readiness PASS files "$patches" "$rc" "$output" no_active_files
+      else
+        record_binary_readiness UNKNOWN files "$patches" "$rc" "$output" inspection_unconfirmed
+      fi ;;
+    "$EXIT_BLOCKED")
+      if [[ ${allow_apply_retry:-false} == true ]] && publish_apply_retry "$stage" "$output"; then
+        return 1
+      fi
+      [[ ${OPG_STATE_WRITE_FAILED:-false} != true ]] || return 1
+      record_binary_readiness BLOCKED files "$patches" "$rc" "$output" active_files ;;
+    *) record_binary_readiness UNKNOWN files "$patches" "$rc" "$output" inspection_unconfirmed ;;
+  esac
+}
+
+retry_inventory() {
+  local stage=$1 output=$2
+  # Used by opg_run_capture from the sourced core library.
+  # shellcheck disable=SC2034
+  local COMMAND_TIMEOUT_SECONDS=60
+  opg_run_capture "retry_inventory_$stage" "$output" env LC_ALL=C ORACLE_HOME="$TARGET_ORACLE_HOME" \
+    "$TARGET_ORACLE_HOME/OPatch/opatch" lspatches -oh "$TARGET_ORACLE_HOME" &&
+    grep -Fxq 'OPatch succeeded.' "$output" &&
+    opg_verify_command_success_text "$output" || return 1
+  if [[ "$stage" == before_db ]]; then
+    ! grep -Eq "^${DB_PATCH}([;[:space:]]|$)" "$output" || return 1
+  else
+    grep -Eq "^${DB_PATCH}([;[:space:]]|$)" "$output" || return 1
+  fi
+  ! grep -Eq "^${OJVM_PATCH}([;[:space:]]|$)" "$output"
+}
+
+read_apply_retry_checkpoint() {
+  local state="$RUN_DIR/execution_state.json" history="$RUN_DIR/state_history.log"
+  [[ -f "$state" && ! -L "$state" && -f "$history" && ! -L "$history" ]] || return 1
+  /usr/bin/python3 -I - "$state" "$history" "$RUN_ID" "$HOST_NAME" "$TARGET_ORACLE_HOME" <<'PY'
+import json, re, sys
+
+def unique(pairs):
+    fields = dict(pairs)
+    if len(fields) != len(pairs):
+        raise ValueError("duplicate state field")
+    return fields
+
+state, history, run, host, home = sys.argv[1:]
+with open(state, encoding="utf-8") as source:
+    data = json.load(source, object_pairs_hook=unique)
+marker = data.get("command", "")
+match = re.fullmatch(r"OPG_RETRY:(before_db|before_ojvm):([a-f0-9]{64})", marker)
+if not match or (data.get("schema_version"), data.get("run_id"), data.get("hostname"),
+                 data.get("target_oracle_home"), data.get("state"), data.get("phase"),
+                 data.get("exit_code")) != (1, run, host, home, "PARTIAL", "PRE_BINARY_CHECK", 20):
+    sys.exit(1)
+prior = "05_DATABASES_STOPPED" if match[1] == "before_db" else "06_DB_BINARY_APPLIED"
+with open(history, encoding="utf-8") as source:
+    line = ""
+    for line in source:
+        pass
+if data.get("previous_state") != prior or line.rstrip("\n").split("|") != [
+        data.get("timestamp"), prior, "PARTIAL", "PRE_BINARY_CHECK", "", "20", marker]:
+    sys.exit(1)
+print(match[1], match[2])
+PY
+}
+
+retry_window_valid() {
+  local OPG_READ_ONLY_PHASE=true OPG_CHECK_PHASE=preapply OPG_WINDOW_BINDING_MODE=formal
+  run_optional_check retry_maintenance_window "$MAINTENANCE_WINDOW_CHECK_COMMAND" false maintenance_window
+}
+
+validate_apply_retry() {
+  local output="$RUN_DIR/retry_current_inventory.log"
+  # Used by opg_run_capture from the sourced core library.
+  # shellcheck disable=SC2034
+  local OPG_READ_ONLY_PHASE=true
+  check_active_home_tools >/dev/null &&
+    verify_static_context_unchanged &&
+    [[ "$(stat -c '%U' "$TARGET_ORACLE_HOME")" == "$EXEC_USER" ]] &&
+    [[ "$(opatch_version_at "$TARGET_ORACLE_HOME/OPatch" opatch_version "$RUN_DIR/retry_opatch_version.log")" == "$OPATCH_VERSION" ]] &&
+    retry_window_valid &&
+    verify_manifest_databases_stopped &&
+    retry_inventory "$retry_stage" "$output" &&
+    [[ "$(opg_sha256 "$output")" == "$retry_inventory_hash" ]]
+}
+
+begin_apply_retry() {
+  local phase=$1 output="$RUN_DIR/retry_before_apply_inventory.log"
+  if opg_verify_manifest_hash &&
+    [[ "$(opg_sha256 "$APPROVED_MANIFEST")" == "$(opg_sha256 "$RUN_DIR/patch_manifest.json")" ]] &&
+    retry_inventory "$retry_stage" "$output" &&
+    [[ "$(opg_sha256 "$output")" == "$retry_inventory_hash" ]] &&
+    retry_window_valid &&
+    verify_approval "$APPROVED_MANIFEST" "$APPROVAL_TOKEN" &&
+    verify_manifest_databases_stopped; then
+    opg_write_state RETRY_BINARY_STARTED "$phase"
+    return $?
+  fi
+  printf '%s\n' 'OEM Retry : NOT ALLOWED' 'DBA Action : Readiness context changed before binary apply.'
+  return 1
+}
+
+publish_apply_retry() {
+  local stage=$1 evidence=$2 prior status output hash patch_id
+  grep -q '^ACTIVE_HOME_FILE|' "$evidence" || return 1
+  case "$stage" in
+    before_db) prior=05_DATABASES_STOPPED; patch_id=$DB_PATCH; status='RU apply: NOT STARTED' ;;
+    before_ojvm) prior=06_DB_BINARY_APPLIED; patch_id=$OJVM_PATCH; status='RU apply: COMPLETE | OJVM apply: NOT STARTED' ;;
+    *) return 1 ;;
+  esac
+  if [[ "$CURRENT_STATE" == "$prior" ]]; then
+    output="$RUN_DIR/retry_initial_inventory.log"
+    retry_inventory "$stage" "$output" || return 1
+    hash=$(opg_sha256 "$output") || return 1
+    [[ "$hash" =~ ^[a-f0-9]{64}$ ]] || return 1
+    opg_write_state PARTIAL PRE_BINARY_CHECK "" "OPG_RETRY:$stage:$hash" "$EXIT_BLOCKED" || return 1
+  elif [[ ${retry_stage:-} != "$stage" ]]; then
+    return 1
+  fi
+  local message="ACTIVE_HOME_READINESS|result=BLOCKED|check=files|stage=$stage|patch_id=$patch_id|home=$TARGET_ORACLE_HOME|tool_exit_code=20|evidence=$evidence"
+  opg_log WARN "$message"
+  printf '%s\n' "$message" >"$RUN_DIR/last_error.txt" || true
+  printf '%s\n' 'OPG - ACTIVE ORACLE HOME CHECK' 'Status: BLOCKED' 'Phase: PRE_BINARY_CHECK' \
+    "Oracle Home: $TARGET_ORACLE_HOME" 'Database: STOPPED' 'Listener: STOPPED' "$status"
+  grep '^ACTIVE_HOME_FILE|' "$evidence" || true
+  printf '%s\n' "Evidence: $evidence" \
+    'REQUIRED DBA ACTION: Investigate the listed processes and terminate them only if safe. Select Retry for this failed execution in OEM.' \
+    'OPG will revalidate readiness before continuing.' 'OEM Retry : ALLOWED' 'OPG Exit : 40'
+}
+
 apply_binary_patches() {
   local db_dir="${PATCH_ROOT}/${MONTH}/${DB_PATCH}" ojvm_dir="${PATCH_ROOT}/${MONTH}/${OJVM_PATCH}"
-  opg_run_critical apply_db_ru "${RUN_DIR}/apply_db_ru.log" PARTIAL DB_BINARY "$TARGET_ORACLE_HOME/OPatch/opatch" apply -silent "$db_dir" || return 1
-  opg_run_capture verify_db_ru "${RUN_DIR}/verify_db_ru.log" "$TARGET_ORACLE_HOME/OPatch/opatch" lspatches || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED DB_BINARY "DB-RU inventoryvalidatie mislukt." 1; return 1; }
-  grep -q "$DB_PATCH" "${RUN_DIR}/verify_db_ru.log" || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED DB_BINARY "DB-RU ontbreekt na apply in inventory." 1; return 1; }
-  opg_write_state 06_DB_BINARY_APPLIED DB_BINARY || return 1
+  if [[ ${retry_stage:-} != before_ojvm ]]; then
+    require_binary_home_ready before_db "$DB_PATCH" "$OJVM_PATCH" || return 1
+    if [[ ${retry_stage:-} == before_db ]]; then
+      begin_apply_retry DB_BINARY || return 1
+      retry_stage=
+    fi
+    opg_run_critical apply_db_ru "${RUN_DIR}/apply_db_ru.log" PARTIAL DB_BINARY "$TARGET_ORACLE_HOME/OPatch/opatch" apply -silent "$db_dir" || return 1
+    opg_run_capture verify_db_ru "${RUN_DIR}/verify_db_ru.log" "$TARGET_ORACLE_HOME/OPatch/opatch" lspatches || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED DB_BINARY "DB-RU inventoryvalidatie mislukt." 1; return 1; }
+    grep -q "$DB_PATCH" "${RUN_DIR}/verify_db_ru.log" || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED DB_BINARY "DB-RU ontbreekt na apply in inventory." 1; return 1; }
+    opg_write_state 06_DB_BINARY_APPLIED DB_BINARY || return 1
+  fi
+  require_binary_home_ready before_ojvm "$OJVM_PATCH" || return 1
+  if [[ ${retry_stage:-} == before_ojvm ]]; then
+    begin_apply_retry OJVM_BINARY || return 1
+    retry_stage=
+  fi
   opg_run_critical apply_ojvm "${RUN_DIR}/apply_ojvm.log" PARTIAL OJVM_BINARY "$TARGET_ORACLE_HOME/OPatch/opatch" apply -silent "$ojvm_dir" || return 1
   opg_run_capture verify_ojvm "${RUN_DIR}/verify_ojvm.log" "$TARGET_ORACLE_HOME/OPatch/opatch" lspatches || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OJVM_BINARY "OJVM inventoryvalidatie mislukt." 1; return 1; }
   grep -q "$OJVM_PATCH" "${RUN_DIR}/verify_ojvm.log" || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OJVM_BINARY "OJVM ontbreekt na apply in inventory." 1; return 1; }
@@ -2729,17 +3030,23 @@ perform_apply() {
   # Dynamisch gescopet naar opg_write_state() in lib/opg_core.sh.
   # shellcheck disable=SC2034
   local rc OPG_STATE_READ_ONLY=$DRY_RUN
+  local allow_apply_retry=true retry_stage='' retry_inventory_hash='' retry_checkpoint locked_home
   load_run_context || { printf 'Bestaande runcontext ontbreekt.\n' >&2; return "$EXIT_BLOCKED"; }
   initialize_local_media || { opg_result_line "$EXIT_BLOCKED" BLOCKED MEDIA; return "$EXIT_BLOCKED"; }
-  [[ "$CURRENT_STATE" == 03_PLAN_GENERATED ]] || { opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"; }
+  [[ "$CURRENT_STATE" == 03_PLAN_GENERATED || "$CURRENT_STATE:$CURRENT_PHASE" == PARTIAL:PRE_BINARY_CHECK ]] || {
+    printf '%s\n' 'OEM Retry : NOT ALLOWED' 'DBA Action : Manual investigation required.'
+    opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"
+  }
   [[ "$REQUEST_OS_UPDATE" == false && "$REQUEST_REBOOT" == false ]] || { opg_mark_failure BLOCKED APPROVAL "OS-update en reboot zijn bewust gescheiden en niet ondersteund door apply." "$EXIT_INVALID_PARAMS"; opg_result_line "$EXIT_INVALID_PARAMS" INVALID_OEM_PARAMETERS APPROVAL; return "$EXIT_INVALID_PARAMS"; }
   [[ -n "$APPROVED_MANIFEST" ]] || { report_approval_blocked "approved manifest argument is missing"; opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"; }
   [[ -n "$APPROVAL_TOKEN" ]] || { report_approval_blocked "approval token argument is missing"; opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"; }
-  [[ -r "$APPROVED_MANIFEST" ]] || { report_approval_blocked "approved manifest is not readable: ${APPROVED_MANIFEST}"; opg_mark_failure BLOCKED APPROVAL "Goedgekeurd manifest is niet leesbaar." 1; opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"; }
-  [[ -r "$APPROVAL_TOKEN" ]] || { report_approval_blocked "approval token is not readable: ${APPROVAL_TOKEN}"; opg_mark_failure BLOCKED APPROVAL "Approval-token is niet leesbaar." 1; opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"; }
-  opg_verify_manifest_hash || { report_approval_blocked "local manifest hash verification failed"; opg_mark_failure BLOCKED APPROVAL "Lokaal manifest is gewijzigd." 1; opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"; }
-  [[ "$(opg_sha256 "$APPROVED_MANIFEST")" == "$(opg_sha256 "${RUN_DIR}/patch_manifest.json")" ]] || { report_approval_blocked "approved manifest differs from the run manifest"; opg_mark_failure BLOCKED APPROVAL "Goedgekeurd manifest wijkt af." 1; opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"; }
-  verify_approval "$APPROVED_MANIFEST" "$APPROVAL_TOKEN" || { report_approval_blocked "${APPROVAL_ERROR:-approval verification failed}"; opg_mark_failure BLOCKED APPROVAL "Approval-token is ongeldig, onvolledig, verlopen of niet cryptografisch verifieerbaar." 1; opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"; }
+  if [[ "$CURRENT_STATE" == 03_PLAN_GENERATED ]]; then
+    [[ -r "$APPROVED_MANIFEST" ]] || { report_approval_blocked "approved manifest is not readable: ${APPROVED_MANIFEST}"; opg_mark_failure BLOCKED APPROVAL "Goedgekeurd manifest is niet leesbaar." 1; opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"; }
+    [[ -r "$APPROVAL_TOKEN" ]] || { report_approval_blocked "approval token is not readable: ${APPROVAL_TOKEN}"; opg_mark_failure BLOCKED APPROVAL "Approval-token is niet leesbaar." 1; opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"; }
+    opg_verify_manifest_hash || { report_approval_blocked "local manifest hash verification failed"; opg_mark_failure BLOCKED APPROVAL "Lokaal manifest is gewijzigd." 1; opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"; }
+    [[ "$(opg_sha256 "$APPROVED_MANIFEST")" == "$(opg_sha256 "${RUN_DIR}/patch_manifest.json")" ]] || { report_approval_blocked "approved manifest differs from the run manifest"; opg_mark_failure BLOCKED APPROVAL "Goedgekeurd manifest wijkt af." 1; opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"; }
+    verify_approval "$APPROVED_MANIFEST" "$APPROVAL_TOKEN" || { report_approval_blocked "${APPROVAL_ERROR:-approval verification failed}"; opg_mark_failure BLOCKED APPROVAL "Approval-token is ongeldig, onvolledig, verlopen of niet cryptografisch verifieerbaar." 1; opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"; }
+  fi
   confirm_interactive_apply || { opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED"; }
   opg_acquire_lock; rc=$?
   if (( rc != 0 )); then
@@ -2751,6 +3058,25 @@ perform_apply() {
     return "$EXIT_BLOCKED"
   fi
   trap 'opg_release_lock' EXIT
+  locked_home=$TARGET_ORACLE_HOME
+  if ! load_run_context || [[ "$TARGET_ORACLE_HOME" != "$locked_home" ]] ||
+     ! opg_verify_manifest_hash ||
+     [[ "$(opg_sha256 "$APPROVED_MANIFEST")" != "$(opg_sha256 "$RUN_DIR/patch_manifest.json")" ]] ||
+     ! verify_approval "$APPROVED_MANIFEST" "$APPROVAL_TOKEN"; then
+    opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL
+    return "$EXIT_BLOCKED"
+  fi
+  case "$CURRENT_STATE:$CURRENT_PHASE" in
+    03_PLAN_GENERATED:PLAN) ;;
+    PARTIAL:PRE_BINARY_CHECK)
+      if ! retry_checkpoint=$(read_apply_retry_checkpoint); then
+        printf '%s\n' 'OEM Retry : NOT ALLOWED' 'DBA Action : Manual investigation required.'
+        opg_result_line "$EXIT_BLOCKED" BLOCKED PRE_BINARY_CHECK
+        return "$EXIT_BLOCKED"
+      fi
+      read -r retry_stage retry_inventory_hash <<<"$retry_checkpoint" ;;
+    *) opg_result_line "$EXIT_BLOCKED" BLOCKED APPROVAL; return "$EXIT_BLOCKED" ;;
+  esac
   if [[ "$DRY_RUN" != true ]] && ! opg_prepare_database_baseline_snapshot "${RUN_DIR}/patch_manifest.json"; then
     opg_log ERROR "DATABASE_BASELINE_BINDING_FAILED|route=APPLY|run_id=${RUN_ID}|manual_intervention_required=true"
     report_approval_blocked "signed database baseline binding is missing or invalid"
@@ -2758,67 +3084,82 @@ perform_apply() {
     opg_result_line "$EXIT_BLOCKED" BLOCKED PREAPPLY
     return "$EXIT_BLOCKED"
   fi
-  perform_preapply_recheck; rc=$?
-  if (( rc != 0 )); then
-    if (( rc == EXIT_UNKNOWN )); then
-      opg_mark_failure UNKNOWN PREAPPLY "Laatste hercontrole is UNKNOWN; geen database of listener is gestopt." "$rc"
-      opg_result_line "$EXIT_UNKNOWN" UNKNOWN PREAPPLY
-    else
-      opg_mark_failure BLOCKED PREAPPLY "Laatste hercontrole is BLOCKED; geen database of listener is gestopt." "$rc"
-      opg_result_line "$EXIT_BLOCKED" BLOCKED PREAPPLY
+  if [[ -n "$retry_stage" ]]; then
+    if ! validate_apply_retry; then
+      printf '%s\n' 'OEM Retry : NOT ALLOWED' 'DBA Action : Check inventory, media, shutdown and maintenance window.'
+      opg_result_line "$EXIT_BLOCKED" BLOCKED PRE_BINARY_CHECK
+      return "$EXIT_BLOCKED"
     fi
-    return "$rc"
-  fi
-  # Approval en manifest worden na alle hercontroles nogmaals geverifieerd,
-  # terwijl de exclusieve home-lock nog steeds wordt vastgehouden.
-  if ! opg_verify_manifest_hash; then
-    APPROVAL_ERROR="local manifest hash verification failed after preapply"
-  elif [[ "$(opg_sha256 "$APPROVED_MANIFEST")" != "$(opg_sha256 "${RUN_DIR}/patch_manifest.json")" ]]; then
-    APPROVAL_ERROR="approved manifest differs from the run manifest after preapply"
-  elif ! verify_approval "$APPROVED_MANIFEST" "$APPROVAL_TOKEN"; then
-    :
+    if [[ "$DRY_RUN" == true ]]; then
+      opg_result_line "$EXIT_OK" READY DRY_RUN
+      return "$EXIT_OK"
+    fi
   else
-    APPROVAL_ERROR=
-  fi
-  if [[ -n ${APPROVAL_ERROR:-} ]]; then
-    report_approval_blocked "$APPROVAL_ERROR"
-    opg_mark_failure BLOCKED PREAPPLY "Goedkeuring of manifest wijzigde/verliep tijdens de laatste hercontrole." 1
-    opg_result_line "$EXIT_BLOCKED" BLOCKED PREAPPLY
-    return "$EXIT_BLOCKED"
-  fi
-  if [[ "$DRY_RUN" == true ]]; then
-    opg_log INFO "DRY_RUN: approval, manifest en alle pre-applycontroles zijn succesvol geverifieerd."
-    opg_log INFO "DRY_RUN: database, listener en Oracle Home worden niet gewijzigd."
-    opg_release_lock
-    trap - EXIT
-    opg_result_line "$EXIT_OK" READY DRY_RUN
-    return "$EXIT_OK"
-  fi
+    perform_preapply_recheck; rc=$?
+    if (( rc != 0 )); then
+      if (( rc == EXIT_UNKNOWN )); then
+        opg_mark_failure UNKNOWN PREAPPLY "Laatste hercontrole is UNKNOWN; geen database of listener is gestopt." "$rc"
+        opg_result_line "$EXIT_UNKNOWN" UNKNOWN PREAPPLY
+      else
+        opg_mark_failure BLOCKED PREAPPLY "Laatste hercontrole is BLOCKED; geen database of listener is gestopt." "$rc"
+        opg_result_line "$EXIT_BLOCKED" BLOCKED PREAPPLY
+      fi
+      return "$rc"
+    fi
+    # Approval en manifest worden na alle hercontroles nogmaals geverifieerd,
+    # terwijl de exclusieve home-lock nog steeds wordt vastgehouden.
+    if ! opg_verify_manifest_hash; then
+      APPROVAL_ERROR="local manifest hash verification failed after preapply"
+    elif [[ "$(opg_sha256 "$APPROVED_MANIFEST")" != "$(opg_sha256 "${RUN_DIR}/patch_manifest.json")" ]]; then
+      APPROVAL_ERROR="approved manifest differs from the run manifest after preapply"
+    elif ! verify_approval "$APPROVED_MANIFEST" "$APPROVAL_TOKEN"; then
+      :
+    else
+      APPROVAL_ERROR=
+    fi
+    if [[ -n ${APPROVAL_ERROR:-} ]]; then
+      report_approval_blocked "$APPROVAL_ERROR"
+      opg_mark_failure BLOCKED PREAPPLY "Goedkeuring of manifest wijzigde/verliep tijdens de laatste hercontrole." 1
+      opg_result_line "$EXIT_BLOCKED" BLOCKED PREAPPLY
+      return "$EXIT_BLOCKED"
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+      opg_log INFO "DRY_RUN: approval, manifest en alle pre-applycontroles zijn succesvol geverifieerd."
+      opg_log INFO "DRY_RUN: database, listener en Oracle Home worden niet gewijzigd."
+      opg_release_lock
+      trap - EXIT
+      opg_result_line "$EXIT_OK" READY DRY_RUN
+      return "$EXIT_OK"
+    fi
 
-  opg_write_state 04_APPROVED APPROVAL || {
-    opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE
-    return "$EXIT_MANUAL"
-  }
-  if ! perform_opatch_upgrade; then
-    if [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]]; then
+    opg_write_state 04_APPROVED APPROVAL || {
       opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE
       return "$EXIT_MANUAL"
+    }
+    if ! perform_opatch_upgrade; then
+      if [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]]; then
+        opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE
+        return "$EXIT_MANUAL"
+      fi
+      case "$CURRENT_STATE" in
+        BLOCKED) rc=$EXIT_BLOCKED ;;
+        UNKNOWN) rc=$EXIT_UNKNOWN ;;
+        MANUAL_INTERVENTION_REQUIRED) rc=$EXIT_MANUAL ;;
+        *) rc=$EXIT_PARTIAL ;;
+      esac
+      opg_result_line "$rc" "$CURRENT_STATE" "${CURRENT_PHASE:-OPATCH_UPGRADE}"
+      return "$rc"
     fi
-    case "$CURRENT_STATE" in
-      BLOCKED) rc=$EXIT_BLOCKED ;;
-      UNKNOWN) rc=$EXIT_UNKNOWN ;;
-      MANUAL_INTERVENTION_REQUIRED) rc=$EXIT_MANUAL ;;
-      *) rc=$EXIT_PARTIAL ;;
-    esac
-    opg_result_line "$rc" "$CURRENT_STATE" "${CURRENT_PHASE:-OPATCH_UPGRADE}"
-    return "$rc"
+    stop_databases || {
+      [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]] && { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE; return "$EXIT_MANUAL"; }
+      opg_result_line "$EXIT_PARTIAL" PARTIAL STOP_DATABASES; return "$EXIT_PARTIAL"
+    }
   fi
-  stop_databases || {
-    [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]] && { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE; return "$EXIT_MANUAL"; }
-    opg_result_line "$EXIT_PARTIAL" PARTIAL STOP_DATABASES; return "$EXIT_PARTIAL"
-  }
   apply_binary_patches || {
     [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]] && { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE; return "$EXIT_MANUAL"; }
+    case "$CURRENT_PHASE" in
+      DB_BINARY|OJVM_BINARY) printf '%s\n' 'OEM Retry : NOT ALLOWED' 'DBA Action : Manual investigation required.' ;;
+    esac
     opg_result_line "$EXIT_PARTIAL" "$CURRENT_STATE" "$CURRENT_PHASE"; return "$EXIT_PARTIAL"
   }
   start_original_databases || {
@@ -2914,6 +3255,14 @@ perform_resume() {
   case "$CURRENT_STATE:$CURRENT_PHASE" in
     MEDIA_VALIDATED:OPATCH_UPGRADE|OPATCH_STAGED:OPATCH_UPGRADE|OPATCH_BACKED_UP:OPATCH_UPGRADE|OPATCH_INSTALLED_UNVERIFIED:OPATCH_UPGRADE|OPATCH_READY:OPATCH_UPGRADE|PARTIAL:OPATCH_STAGED|PARTIAL:OPATCH_BACKED_UP|PARTIAL:OPATCH_INSTALLED_UNVERIFIED)
       if ! perform_opatch_upgrade || ! stop_databases || ! apply_binary_patches || ! start_original_databases || ! run_datapatch_all || ! run_utlrp_all || ! validate_all; then
+        if [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]]; then
+          opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE
+          return "$EXIT_MANUAL"
+        fi
+        if [[ "$CURRENT_STATE:$CURRENT_PHASE" == PARTIAL:PRE_BINARY_CHECK ]]; then
+          opg_result_line "$EXIT_PARTIAL" "$CURRENT_STATE" "$CURRENT_PHASE"
+          return "$EXIT_PARTIAL"
+        fi
         opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED "${CURRENT_PHASE:-RESUME}"
         return "$EXIT_MANUAL"
       fi
@@ -2932,6 +3281,14 @@ perform_resume() {
         opg_mark_failure MANUAL_INTERVENTION_REQUIRED RESUME "Binary toestand is niet eenduidig voor veilige hervatting." 1
         opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED RESUME
         return "$EXIT_MANUAL"
+      fi
+      if ! require_binary_home_ready resume_ojvm "$OJVM_PATCH"; then
+        if [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]]; then
+          opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE
+          return "$EXIT_MANUAL"
+        fi
+        opg_result_line "$EXIT_PARTIAL" "$CURRENT_STATE" "$CURRENT_PHASE"
+        return "$EXIT_PARTIAL"
       fi
       opg_run_critical apply_ojvm "${RUN_DIR}/apply_ojvm_resume.log" MANUAL_INTERVENTION_REQUIRED OJVM_BINARY "$TARGET_ORACLE_HOME/OPatch/opatch" apply -silent "${PATCH_ROOT}/${MONTH}/${OJVM_PATCH}" || { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED OJVM_BINARY; return "$EXIT_MANUAL"; }
       opg_run_capture verify_ojvm_resume "${RUN_DIR}/verify_ojvm_resume.log" "$TARGET_ORACLE_HOME/OPatch/opatch" lspatches || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OJVM_BINARY "OJVM inventoryvalidatie na resume is mislukt." 1; opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED OJVM_BINARY; return "$EXIT_MANUAL"; }

@@ -86,6 +86,7 @@ CURRENT_STATE=05_DATABASES_STOPPED; CURRENT_PHASE=STOP_DATABASES
 opg_write_state 05_DATABASES_STOPPED STOP_DATABASES
 PATCH_ROOT="$RUN_DIR/patches"; MONTH=M; DB_PATCH=111; OJVM_PATCH=222
 __INJECTION__
+require_binary_home_ready() { :; }
 opg_run_critical() { printf '%s\n' "$1" >>"$RUN_DIR/mutations"; : >"$2"; }
 opg_run_capture() { printf '%s\n' "$1" >>"$RUN_DIR/commands"; printf '111\n222\n' >"$2"; }
 if apply_binary_patches 2>"$RUN_DIR/error"; then exit 1; fi
@@ -171,6 +172,32 @@ grep -q 'STATE_PUBLICATION_FAILED' "$RUN_DIR/error"
     checks.append(mutation_state_failure(
         "history flush failure stops next patch mutation",
         "sync() { return 1; }", "history_flush", "05_DATABASES_STOPPED"))
+    checks.append(expect_failure("binary readiness block cannot publish state", """
+CURRENT_STATE=05_DATABASES_STOPPED; CURRENT_PHASE=STOP_DATABASES
+TARGET_ORACLE_HOME="$RUN_DIR/dbhome"
+opg_write_state 05_DATABASES_STOPPED STOP_DATABASES
+sync() { return 1; }
+if record_binary_readiness BLOCKED opatch 111 0 "$RUN_DIR/prereq.log" prerequisite_failed 2>"$RUN_DIR/error"; then
+  exit 1
+fi
+[[ "$OPG_STATE_WRITE_FAILED" == true && "$CURRENT_STATE:$CURRENT_PHASE" == 05_DATABASES_STOPPED:STOP_DATABASES ]]
+grep -q 'STATE_PUBLICATION_FAILED' "$RUN_DIR/error"
+""", ("record_binary_readiness",)))
+    checks.append(expect_failure("retry cannot launch patch if checkpoint consumption fails", """
+CURRENT_STATE=PARTIAL; CURRENT_PHASE=PRE_BINARY_CHECK
+TARGET_ORACLE_HOME="$RUN_DIR/dbhome"; PATCH_ROOT="$RUN_DIR/media"; MONTH=M
+DB_PATCH=111; OJVM_PATCH=222; APPROVED_MANIFEST="$RUN_DIR/approved"; APPROVAL_TOKEN="$RUN_DIR/token"
+retry_stage=before_db; retry_inventory_hash=inventory
+require_binary_home_ready() { :; }
+retry_inventory() { :; }; retry_window_valid() { :; }
+opg_verify_manifest_hash() { :; }; verify_approval() { :; }
+opg_sha256() { printf inventory; }; verify_manifest_databases_stopped() { :; }
+opg_run_critical() { touch "$RUN_DIR/mutation"; }
+sync() { return 1; }
+if apply_binary_patches; then exit 1; fi
+[[ "$OPG_STATE_WRITE_FAILED" == true && ! -e "$RUN_DIR/mutation" ]]
+grep -q '|PARTIAL|RETRY_BINARY_STARTED|DB_BINARY|' "$RUN_DIR/state_history.log"
+""", ("begin_apply_retry", "apply_binary_patches")))
     checks.append(mutation_state_failure(
         "state write failure after successful history stops next mutation",
         "cat() { command cat >/dev/null; return 1; }",

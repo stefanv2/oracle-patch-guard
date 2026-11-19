@@ -29,6 +29,8 @@ releases/<unieke-release-id>/
 │   ├── oem_assess.sh
 │   ├── oem_apply.sh
 │   ├── lib/
+│   │   ├── opg_core.sh
+│   │   └── opg_active_home.py
 │   └── checks/
 ├── config/examples/
 └── artifact_manifest.schema.json

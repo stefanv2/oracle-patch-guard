@@ -184,11 +184,11 @@ PY
 chmod 0750 "$LEGACY_TASK_ROOT/opg_blackout.py"
 unset OPG_TEST_TASK_ROOT
 run_wrapper prepare; release_helpers_rc=$?
-run_wrapper create-window; [[ $? -eq 0 ]] || release_helpers_rc=99
+run_wrapper create-window || release_helpers_rc=99
 run_wrapper assess; [[ $? -eq 10 ]] || release_helpers_rc=98
 release_run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$release_run" 03_PLAN_GENERATED PLAN
-run_wrapper stage; [[ $? -eq 0 ]] || release_helpers_rc=97
-run_wrapper_args blackout-stop --run-id "$release_run"; [[ $? -eq 0 ]] || release_helpers_rc=96
+run_wrapper stage || release_helpers_rc=97
+run_wrapper_args blackout-stop --run-id "$release_run" || release_helpers_rc=96
 for route in prepare create-window assess stage blackout; do grep -Fxq "release|${route}" "$CASE/routes.log" || release_helpers_rc=95; done
 if grep -q '^legacy|' "$CASE/routes.log"; then release_helpers_rc=94; fi
 record 'runtimehelpers komen uitsluitend uit current/oem-tasks' 0 "$release_helpers_rc"
@@ -244,6 +244,17 @@ setup_case assessexecfailure; printf '20\n' >"$CASE/assess.rc"; printf 'OPG_OEM_
 setup_case planroute; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 02_ASSESS_OK ASSESS; printf '42\n' >"$CASE/core.rc"; run_wrapper plan; rc=$?; grep -q "^core|plan --non-interactive --run-id ${run} --config ${CONFIG}$" "$CASE/routes.log" || rc=99; grep -q "^summary|${RUN_ROOT}/${run}|PLAN$" "$CASE/summary.log" || rc=98; record 'plan routing en exit-code preservation' 42 "$rc"
 setup_case stageroute; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; run_wrapper stage; rc=$?; grep -q "^stage|${run}$" "$CASE/routes.log" || rc=99; record 'stage routing' 0 "$rc"
 setup_case applyroute; run_wrapper prepare; run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id); write_state "$run" 03_PLAN_GENERATED PLAN; prepare_approval_run "$run"; run_wrapper apply; rc=$?; grep -q "^apply|sid=DB1|home=${HOME_DIR}|args=${run} ${OPG_ROOT}/approvals/${run}/patch_manifest.json ${OPG_ROOT}/approvals/${run}/approval.json ${CONFIG}$" "$CASE/routes.log" || rc=99; [[ -f "$OPG_ROOT/approvals/$run/completion.json" && $(json_get "$OPG_ROOT/approvals/$run/completion.json" run_id) == "$run" ]] || rc=98; grep -q "OPG_COMPLETION_PUBLISH|run_id=${run}|status=SUCCESS" "$OUT" || rc=97; record 'succesvolle apply publiceert rungebonden completion' 0 "$rc"
+
+setup_case applyretry
+run_wrapper prepare
+run=$(json_get "$CONTEXT_ROOT/current_run.json" run_id)
+write_state "$run" PARTIAL PRE_BINARY_CHECK
+prepare_approval_run "$run"
+: >"$CASE/discovery.psv"
+write_mock "$PROJECT/oem_apply.sh" "printf 'retry|%s|%s|%s\n' \"\$1\" \"\$ORACLE_SID\" \"\$ORACLE_HOME\"; exit 40"
+run_wrapper apply; rc=$?
+grep -Fxq "retry|$run|DB1|$HOME_DIR" "$OUT" && [[ ! -e "$OPG_ROOT/approvals/$run/completion.json" ]] || rc=99
+record 'OEM Retry routeert dezelfde run met gestopte database en geeft exit 40 door' 40 "$rc"
 
 setup_case applywithoutplan; run_wrapper apply; rc=$?
 grep -Fq 'OPG OEM BLOCKED: APPLY vereist eerst een geldige PLAN-run voor de actieve patchcycle.' "$OUT" || rc=99
@@ -322,7 +333,7 @@ archive_file=$(find "$CONTEXT_ROOT/archive" -maxdepth 1 -type f -name "${complet
 [[ "$completed_state_hash" == "$(sha256sum "$RUN_ROOT/$completed_run/execution_state.json" | awk '{print $1}')" ]] || rc=98
 grep -q "run_id=${completed_run}|state=12_COMPLETE|reason=Previous same-cycle run is COMPLETE: new lifecycle created" "$CONTEXT_ROOT/context_history.log" || rc=97
 grep -Fq "OPG_NEW_RUN_RESULT|status=CREATED|run_id=${new_run}|cycle=JUL2026|reason=Previous same-cycle run is COMPLETE: new lifecycle created" "$OUT" || rc=96
-run_wrapper create-window; [[ $? -eq 0 ]] || rc=95
+run_wrapper create-window || rc=95
 record 'new-run maakt na verifieerbare same-cycle COMPLETE een nieuwe NONE-run' 0 "$rc"
 
 setup_case newrunsamecycleblockedorphan; enable_pilot07_media; blocked_run=svtest-DB1-JUL2026-OEM-20260824T102900Z; write_state "$blocked_run" BLOCKED ASSESS; printf 'BLOCKED|TARGET_PATCHLEVEL_ALREADY_APPLIED|target bereikt|evidence\n' >"$RUN_ROOT/$blocked_run/findings.psv"

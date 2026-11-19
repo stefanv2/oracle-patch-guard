@@ -15,6 +15,7 @@ Plaats root-owned, niet door het OEM-agentaccount wijzigbare kopieën onder bijv
 patchGD_guard.sh
 patchGD_guard.conf
 lib/opg_core.sh
+lib/opg_active_home.py
 oem_assess.sh
 oem_apply.sh
 oem_status.sh
@@ -27,6 +28,12 @@ Na overdracht vanuit de Windows-zip moeten Linux-owner en modes expliciet worden
 Vul het root-owned, niet group/world-writable `/etc/oracle-patch-guard/patchGD_guard.conf` met exacte patch-, inventory-, log-, lock-, listener- en agentpaden. De back-up-, Oracle Home-recovery-, Data Pump-, Data Guard- en onderhoudsvensterhooks moeten argumentloze, read-only executables zijn met 0 voor aantoonbaar veilig, 2 voor onveilig en 3 voor onbekend. Niet configureren levert nooit fictief succes op.
 
 ## 2. Uitvoerende gebruiker en minimale sudo
+
+Voor APPLY moeten `lsof`, `timeout` en Python 3 beschikbaar zijn. De verplichte
+procesinspectie gebruikt de numerieke UID van de Oracle Home-owner. OPG meldt
+verwachte toegangsweigeringen buiten deze UID als beperkte dekking. Zichtbare
+doelhome-treffers blokkeren voor iedere UID. Neem bij de ACC-kwalificatie expliciet
+mee welke services onder andere UIDs deze home kunnen gebruiken.
 
 Laat OEM standaard als agentaccount uitvoeren. Gebruik alleen vooraf geconfigureerde `sudo -n -u oracle` voor de root-owned OEM-wrapper die nodig is. Een conceptueel, commandospecifiek sudoerspatroon is:
 

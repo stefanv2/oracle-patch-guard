@@ -307,6 +307,10 @@ discover_target() {
   IFS='|' read -r sid home extra <<<"${DISCOVERED_TARGETS[0]}"
   [[ -z "$extra" ]] || fail "$EXIT_UNKNOWN" TARGET 'Interne targetparserfout.'
   ORACLE_SID=$sid; ORACLE_HOME=$home
+  set_target_environment
+}
+
+set_target_environment() {
   SHORT_HOST=${OPG_TEST_SHORT_HOST:-$(hostname -s 2>/dev/null || true)}
   FQDN=${OPG_TEST_FQDN:-$(hostname -f 2>/dev/null || hostname 2>/dev/null || true)}
   [[ "$SHORT_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$ ]] || fail "$EXIT_BLOCKED" TARGET 'Short hostname is ongeldig.'
@@ -486,20 +490,32 @@ load_or_create_context() {
 }
 
 load_apply_plan_context() {
-  local actual
-  discover_all
+  local actual phase selected_run
+  load_local_paths
+  load_cycle
   if [[ ! -e "$CONTEXT_FILE" && ! -L "$CONTEXT_FILE" ]]; then
     fail "$EXIT_BLOCKED" CONTEXT 'APPLY vereist eerst een geldige PLAN-run voor de actieve patchcycle.' PLAN_CONTEXT_MISSING
   fi
   read_context_file
+  selected_run=$RUN_ID
+  actual=$(run_state) || fail "$EXIT_UNKNOWN" CONTEXT 'Run-state kon niet betrouwbaar worden gelezen.'
+  phase=$(run_phase) || phase=
+  if [[ "$COMMAND:$actual:$phase" == apply:PARTIAL:PRE_BINARY_CHECK ]]; then
+    ORACLE_HOME=$(canonical_home "$CTX_HOME") || fail "$EXIT_BLOCKED" TARGET 'Opgeslagen doelhome is ongeldig.'
+    [[ "$CTX_SID" =~ ^[A-Za-z0-9_#$]+$ ]] || fail "$EXIT_BLOCKED" TARGET 'Opgeslagen SID is ongeldig.'
+    ORACLE_SID=$CTX_SID
+    set_target_environment
+  else
+    discover_target
+  fi
   if [[ "$CTX_SHORT_HOST" == "$SHORT_HOST" && "$CTX_FQDN" == "$FQDN" &&
         "$CTX_SID" == "$ORACLE_SID" && "$CTX_HOME" == "$ORACLE_HOME" &&
         "$CTX_CYCLE" != "$PATCH_CYCLE" ]]; then
     fail "$EXIT_BLOCKED" CONTEXT 'APPLY vereist eerst een geldige PLAN-run voor de actieve patchcycle.' PLAN_CONTEXT_MISSING
   fi
   validate_context_file
-  actual=$(run_state) || fail "$EXIT_UNKNOWN" CONTEXT 'Run-state kon niet betrouwbaar worden gelezen.'
-  [[ "$actual" == 03_PLAN_GENERATED ]] ||
+  [[ "$RUN_ID" == "$selected_run" ]] || fail "$EXIT_BLOCKED" CONTEXT 'Actieve run wijzigde tijdens APPLY-routing.' CONTEXT_METADATA_MISMATCH
+  [[ "$actual" == 03_PLAN_GENERATED || "$COMMAND:$actual:$phase" == apply:PARTIAL:PRE_BINARY_CHECK ]] ||
     fail "$EXIT_BLOCKED" CONTEXT 'APPLY vereist eerst een geldige PLAN-run voor de actieve patchcycle.' PLAN_CONTEXT_MISSING
 }
 

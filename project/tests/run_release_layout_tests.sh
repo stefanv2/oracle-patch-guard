@@ -35,8 +35,8 @@ done
 record 'releasebron bevat alle vereiste OEM-runtimebestanden' "$rc"
 
 rc=0
-grep -Fqx '  TASK_ROOT=${OPG_ROOT}/current/oem-tasks' "$WRAPPER" || rc=1
-grep -Fqx '  TASK_ROOT=${OPG_TEST_TASK_ROOT:-${OPG_ROOT}/current/oem-tasks}' "$WRAPPER" || rc=1
+grep -Fqx "  TASK_ROOT=\${OPG_ROOT}/current/oem-tasks" "$WRAPPER" || rc=1
+grep -Fqx "  TASK_ROOT=\${OPG_TEST_TASK_ROOT:-\${OPG_ROOT}/current/oem-tasks}" "$WRAPPER" || rc=1
 record 'wrapper routeert productie en testdefault naar current/oem-tasks' "$rc"
 
 rc=0
@@ -49,7 +49,7 @@ fi
 record 'actieve runtimecode bevat geen oude OPG_ROOT/oem-tasks-route' "$rc"
 
 rc=0
-grep -Fqx 'SRC_CONFIG="$OPG_ROOT/config/patchGD_guard.conf"' "$BOOTSTRAP" || rc=1
+grep -Fqx "SRC_CONFIG=\"\$OPG_ROOT/config/patchGD_guard.conf\"" "$BOOTSTRAP" || rc=1
 grep -Fqx '    CONFIG_DST=/etc/oracle-patch-guard/patchGD_guard.conf' "$BOOTSTRAP" || rc=1
 record 'bootstrap installeert centrale config als lokale hostconfig' "$rc"
 
@@ -57,9 +57,11 @@ rc=0
 for script in "$OEM_SOURCE"/*.sh; do
   bash -n "$script" || rc=1
 done
-python3 -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' \
-  "$OEM_SOURCE/opg_blackout.py" || rc=1
-record 'OEM-releasebron slaagt voor shell- en Python-syntax' "$rc"
+for helper in "$OEM_SOURCE/opg_blackout.py" "$ROOT/project/lib/opg_active_home.py"; do
+  [[ -f "$helper" && ! -L "$helper" ]] &&
+    python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))' "$helper" || rc=1
+done
+record 'releasebron bevat Python-helpers en slaagt voor shell- en Python-syntax' "$rc"
 
 printf '\nRelease-layout results: %d passed, %d failed\n' "$passed" "$failed"
 [[ $failed -eq 0 ]]

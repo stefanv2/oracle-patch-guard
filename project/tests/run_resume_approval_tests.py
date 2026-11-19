@@ -127,6 +127,7 @@ mutation() { printf 'mutation\n' >>"$RUN_DIR/mutations"; }
 perform_opatch_upgrade() { mutation; }
 stop_databases() { mutation; }
 apply_binary_patches() { mutation; }
+require_binary_home_ready() { :; }
 start_original_databases() { mutation; }
 register_original_databases() { mutation; }
 start_original_listeners() { mutation; }
