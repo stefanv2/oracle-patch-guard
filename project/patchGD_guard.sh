@@ -1198,7 +1198,7 @@ emit_precheck_result() {
   while IFS='|' read -r severity id message _; do
     [[ -n "$severity" && -n "$id" ]] || continue
     case "$id" in
-      WINDOW_INVALID|MAINTENANCE_WINDOW_READINESS|TARGET_PATCHLEVEL_ALREADY_APPLIED|TARGET_PATCHLEVEL_READINESS|HOME_CLIENT_ACTIVE|HOME_PROCESS_VISIBILITY_LIMITED)
+      WINDOW_INVALID|MAINTENANCE_WINDOW_READINESS|TARGET_PATCHLEVEL_ALREADY_APPLIED|TARGET_PATCHLEVEL_READINESS|HOME_CLIENT_ACTIVE|HOME_PROCESS_VISIBILITY_LIMITED|OJVM_PERL_FILE_COPY)
         printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s|message=%s\n' "$RUN_ID" "$severity" "$id" "$message"
         ;;
       *) printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s\n' "$RUN_ID" "$severity" "$id" ;;
@@ -1276,6 +1276,44 @@ validate_opatch_media() {
   printf 'MEDIA|status=VALID|version=%s\n' "$internal_version" >>"$evidence"
 }
 
+readonly OJVM_PERL_DBA_ACTION="De OJVM-relink kan Perl/File::Copy niet gebruiken. Laat de DBA Perl en de moduleprovider voor deze interpreter herstellen (zoek zo nodig met dnf provides '*/File/Copy.pm') en voer PRECHECK opnieuw uit."
+
+check_ojvm_perl() {
+  local label=$1 evidence=$2 perl_executable=perl rc=127
+  local OPG_TEST_EXECUTE_CAPTURE=${OPG_TEST_EXECUTE_CAPTURE:-false}
+  if [[ ${OPG_TEST_MODE:-0} == 1 && ${MOCK_EXECUTE_OJVM_PERL_CHECK:-false} == true ]]; then
+    OPG_TEST_EXECUTE_CAPTURE=true
+  fi
+  # javavm_refresh roept perl aan via PATH. Gebruik dezelfde SAFE_PATH en
+  # geërfde Perl-omgeving als de directe opatch apply-aanroep.
+  if [[ ${OPG_TEST_MODE:-0} != 1 || "$OPG_TEST_EXECUTE_CAPTURE" == true ]]; then
+    perl_executable=$(type -P perl) || perl_executable=
+  fi
+  if [[ -n "$perl_executable" ]]; then
+    opg_run_capture "$label" "$evidence" "$perl_executable" -e '
+      printf "perl_version=%vd\n", $^V;
+      require File::Copy;
+      File::Copy->import();
+      die "File::Copy did not export copy and move\n" unless defined &copy && defined &move;
+      printf "file_copy_module=%s\n", $INC{"File/Copy.pm"};
+      print "file_copy_import=OK\n";
+    '
+    rc=$?
+  else
+    printf 'Perl ontbreekt of is niet uitvoerbaar op het OPatch-PATH.\n' >"$evidence" || return 1
+  fi
+  printf 'perl_executable=%q\nPERL5LIB=%q\nfile_copy_exit_code=%s\n' \
+    "${perl_executable:-<missing>}" "${PERL5LIB-<unset>}" "$rc" >>"$evidence" || return 1
+  if ! grep -q '^perl_version=' "$evidence"; then
+    printf 'perl_version=unavailable\n' >>"$evidence" || return 1
+  fi
+  if (( rc == 0 )) && grep -Fxq 'file_copy_import=OK' "$evidence"; then
+    return 0
+  fi
+  printf 'file_copy_import=FAILED\n' >>"$evidence"
+  return 1
+}
+
 perform_assessment() {
   local assessment_mode=${1:-formal}
   local owner central_inventory local_inventory db_dir ojvm_dir zip readme_count opatch_actual rc os_id os_version arch expected_owner
@@ -1329,6 +1367,13 @@ perform_assessment() {
   expected_owner=${EXPECTED_ORACLE_OWNER:-$owner}
   [[ "$owner" == "$expected_owner" ]] || opg_add_finding BLOCKED HOME_OWNER_MISMATCH "Oracle Home-owner wijkt af van configuratie." "gevonden=${owner}, verwacht=${expected_owner}"
   [[ "$EXEC_USER" == "$owner" ]] || opg_add_finding BLOCKED EXECUTION_USER_MISMATCH "Uitvoerende gebruiker is niet de Oracle Home-owner; configureer sudo -n naar de owner." "user=${EXEC_USER}, owner=${owner}"
+
+  local perl_evidence="${RUN_DIR}/ojvm_perl.log"
+  if check_ojvm_perl ojvm_perl "$perl_evidence"; then
+    opg_add_finding READY OJVM_PERL_FILE_COPY "Perl kan File::Copy importeren voor de OJVM-relink." "$perl_evidence"
+  else
+    opg_add_finding BLOCKED OJVM_PERL_FILE_COPY "$OJVM_PERL_DBA_ACTION" "$perl_evidence"
+  fi
 
   local_inventory="$TARGET_ORACLE_HOME/inventory/ContentsXML/oraclehomeproperties.xml"
   [[ -r "$local_inventory" ]] || opg_add_finding BLOCKED LOCAL_INVENTORY_MISSING "Local inventory ontbreekt of is niet leesbaar." "$local_inventory"
@@ -1851,6 +1896,14 @@ perform_preapply_recheck() {
   if check_datapump_evidence preapply; then :; else rc=$?; (( rc == 2 )) && preapply_add BLOCKED DATAPUMP_ACTIVE_RECHECK "Data Pump-job is direct vóór apply actief." "${RUN_DIR}/preapply_datapump.txt"; (( rc == 3 )) && preapply_add UNKNOWN DATAPUMP_RECHECK_UNKNOWN "Data Pump kon niet opnieuw betrouwbaar worden gecontroleerd." "${RUN_DIR}/preapply_datapump.txt"; fi
   if run_optional_check preapply_dataguard "$DATAGUARD_CHECK_COMMAND" true dataguard; then :; else rc=$?; (( rc == 2 )) && preapply_add BLOCKED DATAGUARD_CHANGED "Data Guard-controle faalt direct vóór apply." "${RUN_DIR}/preapply_dataguard.txt"; (( rc != 2 )) && preapply_add UNKNOWN DATAGUARD_RECHECK_UNKNOWN "Data Guard-status kon niet opnieuw worden bewezen." "${RUN_DIR}/preapply_dataguard.txt"; fi
   if run_optional_check preapply_maintenance_window "$MAINTENANCE_WINDOW_CHECK_COMMAND" false maintenance_window; then :; else rc=$?; (( rc == 2 )) && preapply_add BLOCKED WINDOW_CHANGED "Onderhoudsvenster is direct vóór apply onvoldoende." "${RUN_DIR}/preapply_maintenance_window.txt"; (( rc != 2 )) && preapply_add UNKNOWN WINDOW_RECHECK_UNKNOWN "Onderhoudsvenster kon niet opnieuw worden bevestigd." "${RUN_DIR}/preapply_maintenance_window.txt"; fi
+
+  local perl_evidence="${RUN_DIR}/preapply_ojvm_perl.log"
+  if check_ojvm_perl preapply_ojvm_perl "$perl_evidence"; then
+    preapply_add READY OJVM_PERL_FILE_COPY "Perl kan File::Copy importeren voor de OJVM-relink." "$perl_evidence"
+  else
+    preapply_add BLOCKED OJVM_PERL_FILE_COPY "$OJVM_PERL_DBA_ACTION" "$perl_evidence"
+    opg_log ERROR "OJVM_PERL_FILE_COPY|$OJVM_PERL_DBA_ACTION Zie $perl_evidence."
+  fi
 
   if (( PREAPPLY_BLOCKED > 0 )); then write_preapply_report BLOCKED "$EXIT_BLOCKED"; return "$EXIT_BLOCKED"; fi
   if (( PREAPPLY_UNKNOWN > 0 )); then write_preapply_report UNKNOWN "$EXIT_UNKNOWN"; return "$EXIT_UNKNOWN"; fi
@@ -3254,6 +3307,12 @@ perform_resume() {
   OPG_READ_ONLY_PHASE=false
   case "$CURRENT_STATE:$CURRENT_PHASE" in
     MEDIA_VALIDATED:OPATCH_UPGRADE|OPATCH_STAGED:OPATCH_UPGRADE|OPATCH_BACKED_UP:OPATCH_UPGRADE|OPATCH_INSTALLED_UNVERIFIED:OPATCH_UPGRADE|OPATCH_READY:OPATCH_UPGRADE|PARTIAL:OPATCH_STAGED|PARTIAL:OPATCH_BACKED_UP|PARTIAL:OPATCH_INSTALLED_UNVERIFIED)
+      local perl_evidence="${RUN_DIR}/resume_ojvm_perl.log"
+      if ! check_ojvm_perl resume_ojvm_perl "$perl_evidence"; then
+        opg_log ERROR "OJVM_PERL_FILE_COPY|$OJVM_PERL_DBA_ACTION Zie $perl_evidence."
+        opg_result_line "$EXIT_BLOCKED" BLOCKED PREAPPLY
+        return "$EXIT_BLOCKED"
+      fi
       if ! perform_opatch_upgrade || ! stop_databases || ! apply_binary_patches || ! start_original_databases || ! run_datapatch_all || ! run_utlrp_all || ! validate_all; then
         if [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]]; then
           opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE

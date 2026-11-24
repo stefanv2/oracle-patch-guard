@@ -567,6 +567,75 @@ for summary_id in PATCH_CONFLICT_READINESS TOPOLOGY_READINESS DATABASE_RUNTIME_R
 done
 record 'succesvolle PRECHECK-controles tonen compacte READY-summary' 0 "$summary_rc"
 
+setup_case ojvm-perl
+perl_check_bin="$CASE_DIR/opatch-path"
+perl_check_lib="$CASE_DIR/perl-lib"
+mkdir -p "$perl_check_bin" "$perl_check_lib"
+ln -s -- "$(type -P perl)" "$perl_check_bin/perl"
+printf '\nSAFE_PATH=%s:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n' "$perl_check_bin" >>"$CONFIG"
+printf '\nMOCK_EXECUTE_OJVM_PERL_CHECK=true\nMOCK_OS_VERSION=9.6\n' >>"$FIXTURE_ENV"
+
+PERL5LIB="$perl_check_lib" PERL5OPT='' precheck PERL-OK; rc=$?
+perl_evidence="$RUN_ROOT/PERL-OK/ojvm_perl.log"
+grep -Fq 'severity=READY|id=OJVM_PERL_FILE_COPY|' "$CASE_DIR/PERL-OK.out" &&
+  grep -Fxq "perl_executable=$perl_check_bin/perl" "$perl_evidence" &&
+  grep -Fxq "PERL5LIB=$perl_check_lib" "$perl_evidence" &&
+  grep -Eq '^perl_version=[0-9]+\.[0-9]+\.[0-9]+$' "$perl_evidence" &&
+  grep -Fxq 'file_copy_import=OK' "$perl_evidence" || rc=99
+record_precheck 'PRECHECK importeert File::Copy met Perl uit het OPatch-PATH' 10 "$rc" "$CASE_DIR/PERL-OK.out"
+
+# Laat dezelfde Perl het bestand als ontbrekend ervaren zonder de host aan te passen.
+cat >"$perl_check_lib/WithoutFileCopy.pm" <<'EOF'
+package WithoutFileCopy;
+@INC = grep { !-e "$_/File/Copy.pm" } @INC;
+1;
+EOF
+PERL5LIB="$perl_check_lib" PERL5OPT=-MWithoutFileCopy precheck PERL-MISSING-MODULE; rc=$?
+grep -Fq 'severity=BLOCKED|id=OJVM_PERL_FILE_COPY|message=' "$CASE_DIR/PERL-MISSING-MODULE.out" &&
+  grep -Fq "Can't locate File/Copy.pm" "$RUN_ROOT/PERL-MISSING-MODULE/ojvm_perl.log" || rc=99
+record_precheck 'PRECHECK blokkeert wanneer File::Copy ontbreekt' 20 "$rc" "$CASE_DIR/PERL-MISSING-MODULE.out"
+
+mkdir -p "$perl_check_lib/File"
+cat >"$perl_check_lib/File/Copy.pm" <<'EOF'
+package File::Copy;
+sub import { die "File::Copy import failed in test fixture\n"; }
+1;
+EOF
+PERL5LIB="$perl_check_lib" PERL5OPT='' precheck PERL-BROKEN-IMPORT; rc=$?
+grep -Fq 'BLOCKED|OJVM_PERL_FILE_COPY|' "$RUN_ROOT/PERL-BROKEN-IMPORT/findings.psv" &&
+  grep -Fxq 'File::Copy import failed in test fixture' "$RUN_ROOT/PERL-BROKEN-IMPORT/ojvm_perl.log" || rc=99
+record_precheck 'PRECHECK blokkeert wanneer de aanwezige module niet importeert' 20 "$rc" "$CASE_DIR/PERL-BROKEN-IMPORT.out"
+rm -- "$perl_check_lib/File/Copy.pm"
+
+PERL5LIB="$perl_check_lib" PERL5OPT='' assess PERL-APPLY
+plan PERL-APPLY; token=$(approval PERL-APPLY)
+PERL5LIB="$perl_check_lib" PERL5OPT=-MWithoutFileCopy guard apply --non-interactive --run-id PERL-APPLY \
+  --approved-manifest "$RUN_ROOT/PERL-APPLY/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/perl-apply.out" 2>&1; rc=$?
+grep -Fq '|status=BLOCKED|phase=PREAPPLY|' "$CASE_DIR/perl-apply.out" &&
+  grep -Fq 'BLOCKED|OJVM_PERL_FILE_COPY|' "$RUN_ROOT/PERL-APPLY/preapply_findings.psv" &&
+  grep -Fq "Can't locate File/Copy.pm" "$RUN_ROOT/PERL-APPLY/preapply_ojvm_perl.log" &&
+  ! grep -Eq 'COMMAND_START\|label=(shutdown_|listener_stop_|apply_db_ru\||apply_ojvm\|)' "$RUN_ROOT/PERL-APPLY/commands.log" || rc=99
+record 'PREAPPLY blokkeert een goedgekeurde run wanneer File::Copy verdwijnt' 20 "$rc" "$CASE_DIR/perl-apply.out"
+assert_no_downtime_started 'PREAPPLY met ontbrekende File::Copy start geen downtime' PERL-APPLY
+
+setup_case ojvm-perl-absent
+perl_free_bin="$CASE_DIR/no-perl-bin"
+mkdir -p "$perl_free_bin" "$HOME_DIR/perl/bin"
+ln -s -- "$(type -P perl)" "$HOME_DIR/perl/bin/perl"
+perl_free_tools=()
+for tool_path in /usr/bin/*; do
+  [[ ${tool_path##*/} == perl ]] || perl_free_tools+=("$tool_path")
+done
+ln -s -t "$perl_free_bin" -- "${perl_free_tools[@]}"
+printf '\nSAFE_PATH=%s\n' "$perl_free_bin" >>"$CONFIG"
+printf '\nMOCK_EXECUTE_OJVM_PERL_CHECK=true\n' >>"$FIXTURE_ENV"
+precheck PERL-MISSING; rc=$?
+perl_evidence="$RUN_ROOT/PERL-MISSING/ojvm_perl.log"
+grep -Fq 'BLOCKED|OJVM_PERL_FILE_COPY|' "$RUN_ROOT/PERL-MISSING/findings.psv" &&
+  grep -Fxq 'perl_version=unavailable' "$perl_evidence" &&
+  grep -Fxq 'file_copy_exit_code=127' "$perl_evidence" || rc=99
+record_precheck 'PRECHECK blokkeert wanneer Perl ontbreekt op het OPatch-PATH' 20 "$rc" "$CASE_DIR/PERL-MISSING.out"
+
 setup_case precheckalreadypatched
 cat >>"$FIXTURE_ENV" <<'EOF'
 MOCK_INVENTORY_BEFORE=BOTH
@@ -957,6 +1026,17 @@ for state in OPATCH_READY 06_DB_BINARY_APPLIED; do
     [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" && ! -e "$ACTIVE_RUN/apply_ojvm_resume.log" ]] || rc=99
   record "resume uit $state respecteert bestandscontrole" 40 "$rc" "$CASE_DIR/active.out"
 done
+
+prepare_active_home_case ojvm-perl-resume
+sed -i 's/"state": "03_PLAN_GENERATED"/"state": "OPATCH_READY"/; s/"phase": "PLAN"/"phase": "OPATCH_UPGRADE"/' "$ACTIVE_RUN/execution_state.json"
+perl_resume_state=$(sha256sum "$ACTIVE_RUN/execution_state.json")
+printf '\nMOCK_RC_resume_ojvm_perl=2\n' >>"$FIXTURE_ENV"
+active_home_apply resume; rc=$?
+grep -Fq '|status=BLOCKED|phase=PREAPPLY|' "$CASE_DIR/active.out" &&
+  grep -Fxq 'file_copy_import=FAILED' "$ACTIVE_RUN/resume_ojvm_perl.log" &&
+  [[ "$perl_resume_state" == "$(sha256sum "$ACTIVE_RUN/execution_state.json")" ]] || rc=99
+record 'resume vóór shutdown blokkeert bij importfout en behoudt het checkpoint' 20 "$rc" "$CASE_DIR/active.out"
+assert_no_downtime_started 'resume met ontbrekende File::Copy start geen downtime' ACTIVE
 
 prepare_active_home_case active-sequence
 active_home_apply; rc=$?
