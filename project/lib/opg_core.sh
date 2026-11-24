@@ -343,7 +343,7 @@ opg_mock_command() {
         mock_active_version=$(<"${TARGET_ORACLE_HOME}/OPatch/.opg-version")
       fi
       printf 'OPatch Version: %s\n' "$mock_active_version" >>"$output_file" ;;
-    ojvm_perl|preapply_ojvm_perl|resume_ojvm_perl)
+    ojvm_perl|preapply_ojvm_perl|resume_ojvm_perl|ojvm_perl_*)
       printf 'perl_version=5.32.1\n' >>"$output_file"
       if (( rc == 0 )); then
         printf 'file_copy_import=OK\n' >>"$output_file"

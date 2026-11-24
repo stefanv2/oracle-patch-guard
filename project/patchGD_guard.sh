@@ -1276,7 +1276,8 @@ validate_opatch_media() {
   printf 'MEDIA|status=VALID|version=%s\n' "$internal_version" >>"$evidence"
 }
 
-readonly OJVM_PERL_DBA_ACTION="De OJVM-relink kan Perl/File::Copy niet gebruiken. Laat de DBA Perl en de moduleprovider voor deze interpreter herstellen (zoek zo nodig met dnf provides '*/File/Copy.pm') en voer PRECHECK opnieuw uit."
+readonly OJVM_PERL_DBA_REPAIR="De OJVM-relink kan Perl/File::Copy niet gebruiken. Laat de DBA Perl en de moduleprovider voor deze interpreter herstellen (zoek zo nodig met dnf provides '*/File/Copy.pm')."
+readonly OJVM_PERL_DBA_ACTION="$OJVM_PERL_DBA_REPAIR Voer daarna PRECHECK opnieuw uit."
 
 check_ojvm_perl() {
   local label=$1 evidence=$2 perl_executable=perl rc=127
@@ -2778,6 +2779,7 @@ begin_apply_retry() {
     retry_window_valid &&
     verify_approval "$APPROVED_MANIFEST" "$APPROVAL_TOKEN" &&
     verify_manifest_databases_stopped; then
+    require_ojvm_perl_after_shutdown "$retry_stage" || return "$EXIT_BLOCKED"
     opg_write_state RETRY_BINARY_STARTED "$phase"
     return $?
   fi
@@ -2813,12 +2815,29 @@ publish_apply_retry() {
     'OPG will revalidate readiness before continuing.' 'OEM Retry : ALLOWED' 'OPG Exit : 40'
 }
 
+require_ojvm_perl_after_shutdown() {
+  local stage=$1 label evidence message
+  label="ojvm_perl_$stage"
+  evidence="$RUN_DIR/$label.log"
+  check_ojvm_perl "$label" "$evidence" && return 0
+  message="OJVM_PERL_FILE_COPY|stage=$stage|database_state=STOPPED|evidence=$evidence|$OJVM_PERL_DBA_REPAIR De databases blijven gestopt."
+  if [[ -n ${retry_stage:-} ]]; then
+    message+=" Gebruik na herstel OEM Retry voor dezelfde run met geldige goedkeuring."
+    printf '%s\n' 'OEM Retry : ALLOWED'
+  else
+    message+=" Hervat na herstel dezelfde run via RESUME met geldige goedkeuring."
+  fi
+  opg_log ERROR "$message"
+  printf '%s\n' "$message" >"$RUN_DIR/last_error.txt" || true
+  return "$EXIT_BLOCKED"
+}
+
 apply_binary_patches() {
   local db_dir="${PATCH_ROOT}/${MONTH}/${DB_PATCH}" ojvm_dir="${PATCH_ROOT}/${MONTH}/${OJVM_PATCH}"
   if [[ ${retry_stage:-} != before_ojvm ]]; then
     require_binary_home_ready before_db "$DB_PATCH" "$OJVM_PATCH" || return 1
     if [[ ${retry_stage:-} == before_db ]]; then
-      begin_apply_retry DB_BINARY || return 1
+      begin_apply_retry DB_BINARY || return $?
       retry_stage=
     fi
     opg_run_critical apply_db_ru "${RUN_DIR}/apply_db_ru.log" PARTIAL DB_BINARY "$TARGET_ORACLE_HOME/OPatch/opatch" apply -silent "$db_dir" || return 1
@@ -2828,8 +2847,10 @@ apply_binary_patches() {
   fi
   require_binary_home_ready before_ojvm "$OJVM_PATCH" || return 1
   if [[ ${retry_stage:-} == before_ojvm ]]; then
-    begin_apply_retry OJVM_BINARY || return 1
+    begin_apply_retry OJVM_BINARY || return $?
     retry_stage=
+  else
+    require_ojvm_perl_after_shutdown before_ojvm || return "$EXIT_BLOCKED"
   fi
   opg_run_critical apply_ojvm "${RUN_DIR}/apply_ojvm.log" PARTIAL OJVM_BINARY "$TARGET_ORACLE_HOME/OPatch/opatch" apply -silent "$ojvm_dir" || return 1
   opg_run_capture verify_ojvm "${RUN_DIR}/verify_ojvm.log" "$TARGET_ORACLE_HOME/OPatch/opatch" lspatches || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OJVM_BINARY "OJVM inventoryvalidatie mislukt." 1; return 1; }
@@ -3209,7 +3230,12 @@ perform_apply() {
     }
   fi
   apply_binary_patches || {
+    rc=$?
     [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]] && { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE; return "$EXIT_MANUAL"; }
+    if (( rc == EXIT_BLOCKED )); then
+      opg_result_line "$EXIT_BLOCKED" BLOCKED PRE_BINARY_CHECK
+      return "$EXIT_BLOCKED"
+    fi
     case "$CURRENT_PHASE" in
       DB_BINARY|OJVM_BINARY) printf '%s\n' 'OEM Retry : NOT ALLOWED' 'DBA Action : Manual investigation required.' ;;
     esac
@@ -3313,10 +3339,20 @@ perform_resume() {
         opg_result_line "$EXIT_BLOCKED" BLOCKED PREAPPLY
         return "$EXIT_BLOCKED"
       fi
-      if ! perform_opatch_upgrade || ! stop_databases || ! apply_binary_patches || ! start_original_databases || ! run_datapatch_all || ! run_utlrp_all || ! validate_all; then
+      if perform_opatch_upgrade && stop_databases && apply_binary_patches &&
+         start_original_databases && run_datapatch_all && run_utlrp_all && validate_all; then
+        opg_release_lock; trap - EXIT
+        opg_result_line "$EXIT_OK" COMPLETE RESUME
+        return 0
+      else
+        rc=$?
         if [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]]; then
           opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE
           return "$EXIT_MANUAL"
+        fi
+        if (( rc == EXIT_BLOCKED )); then
+          opg_result_line "$EXIT_BLOCKED" BLOCKED PRE_BINARY_CHECK
+          return "$EXIT_BLOCKED"
         fi
         if [[ "$CURRENT_STATE:$CURRENT_PHASE" == PARTIAL:PRE_BINARY_CHECK ]]; then
           opg_result_line "$EXIT_PARTIAL" "$CURRENT_STATE" "$CURRENT_PHASE"
@@ -3324,10 +3360,7 @@ perform_resume() {
         fi
         opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED "${CURRENT_PHASE:-RESUME}"
         return "$EXIT_MANUAL"
-      fi
-      opg_release_lock; trap - EXIT
-      opg_result_line "$EXIT_OK" COMPLETE RESUME
-      return 0 ;;
+      fi ;;
   esac
   inventory="${RUN_DIR}/resume_inventory.txt"
   opg_run_capture resume_inventory "$inventory" "$TARGET_ORACLE_HOME/OPatch/opatch" lspatches || {
@@ -3348,6 +3381,10 @@ perform_resume() {
         fi
         opg_result_line "$EXIT_PARTIAL" "$CURRENT_STATE" "$CURRENT_PHASE"
         return "$EXIT_PARTIAL"
+      fi
+      if ! require_ojvm_perl_after_shutdown resume_ojvm; then
+        opg_result_line "$EXIT_BLOCKED" BLOCKED PRE_BINARY_CHECK
+        return "$EXIT_BLOCKED"
       fi
       opg_run_critical apply_ojvm "${RUN_DIR}/apply_ojvm_resume.log" MANUAL_INTERVENTION_REQUIRED OJVM_BINARY "$TARGET_ORACLE_HOME/OPatch/opatch" apply -silent "${PATCH_ROOT}/${MONTH}/${OJVM_PATCH}" || { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED OJVM_BINARY; return "$EXIT_MANUAL"; }
       opg_run_capture verify_ojvm_resume "${RUN_DIR}/verify_ojvm_resume.log" "$TARGET_ORACLE_HOME/OPatch/opatch" lspatches || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OJVM_BINARY "OJVM inventoryvalidatie na resume is mislukt." 1; opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED OJVM_BINARY; return "$EXIT_MANUAL"; }

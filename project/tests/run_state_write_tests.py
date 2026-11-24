@@ -189,6 +189,7 @@ TARGET_ORACLE_HOME="$RUN_DIR/dbhome"; PATCH_ROOT="$RUN_DIR/media"; MONTH=M
 DB_PATCH=111; OJVM_PATCH=222; APPROVED_MANIFEST="$RUN_DIR/approved"; APPROVAL_TOKEN="$RUN_DIR/token"
 retry_stage=before_db; retry_inventory_hash=inventory
 require_binary_home_ready() { :; }
+require_ojvm_perl_after_shutdown() { :; }
 retry_inventory() { :; }; retry_window_valid() { :; }
 opg_verify_manifest_hash() { :; }; verify_approval() { :; }
 opg_sha256() { printf inventory; }; verify_manifest_databases_stopped() { :; }

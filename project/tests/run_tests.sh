@@ -943,6 +943,11 @@ active_home_apply() {
     --approval-token "$ACTIVE_TOKEN" >"$CASE_DIR/active.out" 2>&1
 }
 
+active_run_state_and_approval_hashes() {
+  sha256sum -- "$ACTIVE_RUN/execution_state.json" "$ACTIVE_RUN/state_history.log" \
+    "$ACTIVE_RUN/patch_manifest.json" "$ACTIVE_TOKEN"
+}
+
 for verdict in FAILED AMBIGUOUS EMPTY UNKNOWN_TEXT; do
   prepare_active_home_case "active-native-${verdict/FAILED/negative}"
   expected=UNKNOWN
@@ -1038,10 +1043,43 @@ grep -Fq '|status=BLOCKED|phase=PREAPPLY|' "$CASE_DIR/active.out" &&
 record 'resume vóór shutdown blokkeert bij importfout en behoudt het checkpoint' 20 "$rc" "$CASE_DIR/active.out"
 assert_no_downtime_started 'resume met ontbrekende File::Copy start geen downtime' ACTIVE
 
+for state in PARTIAL 06_DB_BINARY_APPLIED; do
+  prepare_active_home_case "ojvm-perl-binary-resume-$state"
+  if [[ "$state" == PARTIAL ]]; then
+    printf '\nMOCK_RC_apply_db_ru=73\n' >>"$FIXTURE_ENV"
+    expected=40
+  else
+    printf '\nMOCK_RC_ojvm_perl_before_ojvm=2\n' >>"$FIXTURE_ENV"
+    expected=20
+  fi
+  active_home_apply; rc=$?
+  grep -Fq "\"state\": \"$state\"" "$ACTIVE_RUN/execution_state.json" &&
+    [[ -e "$ACTIVE_RUN/shutdown_DB1.log" && ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
+  record "APPLY laat $state achter voor RESUME" "$expected" "$rc" "$CASE_DIR/active.out"
+  sed -i '/^MOCK_RC_apply_db_ru=/d; /^MOCK_RC_ojvm_perl_before_ojvm=/d' "$FIXTURE_ENV"
+
+  before=$(active_run_state_and_approval_hashes)
+  printf '\nMOCK_EXECUTE_OJVM_PERL_CHECK=true\n' >>"$FIXTURE_ENV"
+  PERL5LIB="$perl_check_lib" PERL5OPT=-MWithoutFileCopy active_home_apply resume; rc=$?
+  grep -Fq '|status=BLOCKED|phase=PRE_BINARY_CHECK|' "$CASE_DIR/active.out" &&
+    grep -Fq 'Hervat na herstel dezelfde run via RESUME' "$CASE_DIR/active.out" &&
+    grep -Fq 'De databases blijven gestopt.' "$CASE_DIR/active.out" &&
+    grep -Fq "Can't locate File/Copy.pm" "$ACTIVE_RUN/ojvm_perl_resume_ojvm.log" &&
+    ! grep -Eq 'COMMAND_START\|label=(apply_ojvm\||startup_)' "$ACTIVE_RUN/commands.log" &&
+    [[ "$before" == "$(active_run_state_and_approval_hashes)" ]] || rc=99
+  record "RESUME $state: ontbrekende File::Copy bewaart state en blokkeert OJVM" 20 "$rc" "$CASE_DIR/active.out"
+
+  PERL5LIB="$perl_check_lib" PERL5OPT='' active_home_apply resume; rc=$?
+  [[ $(grep -Fc 'COMMAND_START|label=apply_db_ru|' "$ACTIVE_RUN/commands.log") == 1 &&
+     $(grep -Fc 'COMMAND_START|label=apply_ojvm|' "$ACTIVE_RUN/commands.log") == 1 &&
+     $(grep -Fc 'COMMAND_START|label=shutdown_DB1|' "$ACTIVE_RUN/commands.log") == 1 ]] || rc=99
+  record "RESUME $state voltooit na herstel van File::Copy" 0 "$rc" "$CASE_DIR/active.out"
+done
+
 prepare_active_home_case active-sequence
 active_home_apply; rc=$?
-actual=$(sed -nE 's/.*COMMAND_START\|label=((active_files|active_home|apply_db_ru|apply_ojvm)[^|]*)\|.*/\1/p' "$ACTIVE_RUN/commands.log" | paste -sd, -)
-[[ "$actual" == active_files_before_db_39472050,active_files_before_db_39222882,active_home_before_db,apply_db_ru,active_files_before_ojvm_39222882,active_home_before_ojvm,apply_ojvm ]] || rc=99
+actual=$(sed -nE 's/.*COMMAND_START\|label=((active_files|active_home|apply_db_ru|apply_ojvm|ojvm_perl_before_ojvm)[^|]*)\|.*/\1/p' "$ACTIVE_RUN/commands.log" | paste -sd, -)
+[[ "$actual" == active_files_before_db_39472050,active_files_before_db_39222882,active_home_before_db,apply_db_ru,active_files_before_ojvm_39222882,active_home_before_ojvm,ojvm_perl_before_ojvm,apply_ojvm ]] || rc=99
 record 'vrijgegeven home behoudt de DB-RU en OJVM-volgorde' 0 "$rc" "$CASE_DIR/active.out"
 
 for stage in before_db before_ojvm; do
@@ -1056,12 +1094,50 @@ for stage in before_db before_ojvm; do
   grep -Fq 'OEM Retry : ALLOWED' "$CASE_DIR/active.out" && [[ ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
   record "retry $stage blijft geblokkeerd zolang proces actief is" 40 "$rc" "$CASE_DIR/active.out"
   sed -i "/^MOCK_RC_active_home_${stage}=/d" "$FIXTURE_ENV"
-  active_home_apply; rc=$?
+  before=$(active_run_state_and_approval_hashes)
+  printf '\nMOCK_EXECUTE_OJVM_PERL_CHECK=true\n' >>"$FIXTURE_ENV"
+  PERL5LIB="$perl_check_lib" PERL5OPT=-MWithoutFileCopy active_home_apply; rc=$?
+  if [[ "$stage" == before_db && -e "$ACTIVE_RUN/apply_db_ru.log" ]]; then
+    rc=99
+  fi
+  grep -Fq '|status=BLOCKED|phase=PRE_BINARY_CHECK|' "$CASE_DIR/active.out" &&
+    grep -Fq 'De databases blijven gestopt.' "$CASE_DIR/active.out" &&
+    grep -Fq 'Gebruik na herstel OEM Retry voor dezelfde run' "$CASE_DIR/active.out" &&
+    grep -Fq "Can't locate File/Copy.pm" "$ACTIVE_RUN/ojvm_perl_$stage.log" &&
+    ! grep -Eq 'COMMAND_START\|label=(apply_ojvm\||startup_)' "$ACTIVE_RUN/commands.log" &&
+    [[ "$before" == "$(active_run_state_and_approval_hashes)" ]] || rc=99
+  record "retry $stage: ontbrekende File::Copy blokkeert en bewaart het checkpoint" 20 "$rc" "$CASE_DIR/active.out"
+
+  PERL5LIB="$perl_check_lib" PERL5OPT='' active_home_apply; rc=$?
   [[ $(grep -c 'COMMAND_START|label=apply_db_ru|' "$ACTIVE_RUN/commands.log") == 1 &&
      $(grep -c 'COMMAND_START|label=apply_ojvm|' "$ACTIVE_RUN/commands.log") == 1 &&
      $(grep -c 'COMMAND_START|label=shutdown_DB1|' "$ACTIVE_RUN/commands.log") == 1 ]] || rc=99
   record "retry $stage hervat dezelfde run en past RU eenmaal toe" 0 "$rc" "$CASE_DIR/active.out"
 done
+
+prepare_active_home_case retry-perl-late
+printf '\nMOCK_RC_active_home_before_db=20\n' >>"$FIXTURE_ENV"
+active_home_apply; rc=$?
+grep -Fq 'OEM Retry : ALLOWED' "$CASE_DIR/active.out" || rc=99
+record 'retry before_db: readiness publiceert het checkpoint' 40 "$rc" "$CASE_DIR/active.out"
+sed -i '/^MOCK_RC_active_home_before_db=/d' "$FIXTURE_ENV"
+printf '\nMOCK_RC_ojvm_perl_before_ojvm=2\n' >>"$FIXTURE_ENV"
+active_home_apply; rc=$?
+grep -Fq '|status=BLOCKED|phase=PRE_BINARY_CHECK|' "$CASE_DIR/active.out" &&
+  grep -Fq 'Hervat na herstel dezelfde run via RESUME' "$CASE_DIR/active.out" &&
+  grep -Fxq 'file_copy_import=OK' "$ACTIVE_RUN/ojvm_perl_before_db.log" &&
+  grep -Fxq 'file_copy_import=FAILED' "$ACTIVE_RUN/ojvm_perl_before_ojvm.log" &&
+  grep -Fq '"state": "06_DB_BINARY_APPLIED"' "$ACTIVE_RUN/execution_state.json" &&
+  tail -1 "$ACTIVE_RUN/state_history.log" | grep -Fq '|RETRY_BINARY_STARTED|06_DB_BINARY_APPLIED|DB_BINARY|' &&
+  ! grep -Eq 'COMMAND_START\|label=(apply_ojvm\||startup_)' "$ACTIVE_RUN/commands.log" || rc=99
+record 'retry before_db hercontroleert vóór OJVM en bewaart de voltooide RU-state' 20 "$rc" "$CASE_DIR/active.out"
+
+sed -i '/^MOCK_RC_ojvm_perl_before_ojvm=/d' "$FIXTURE_ENV"
+active_home_apply resume; rc=$?
+[[ $(grep -Fc 'COMMAND_START|label=apply_db_ru|' "$ACTIVE_RUN/commands.log") == 1 &&
+   $(grep -Fc 'COMMAND_START|label=apply_ojvm|' "$ACTIVE_RUN/commands.log") == 1 &&
+   $(grep -Fc 'COMMAND_START|label=shutdown_DB1|' "$ACTIVE_RUN/commands.log") == 1 ]] || rc=99
+record 'RESUME voltooit na herstel zonder RU of shutdown te herhalen' 0 "$rc" "$CASE_DIR/active.out"
 
 for case_name in approval window inventory media lock history binary; do
   prepare_active_home_case "retry-deny-$case_name"
