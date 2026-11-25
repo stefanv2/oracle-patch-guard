@@ -30,10 +30,63 @@ Vul het root-owned, niet group/world-writable `/etc/oracle-patch-guard/patchGD_g
 ## 2. Uitvoerende gebruiker en minimale sudo
 
 Voor APPLY moeten `lsof`, `timeout` en Python 3 beschikbaar zijn. De verplichte
-procesinspectie gebruikt de numerieke UID van de Oracle Home-owner. OPG meldt
-verwachte toegangsweigeringen buiten deze UID als beperkte dekking. Zichtbare
-doelhome-treffers blokkeren voor iedere UID. Neem bij de ACC-kwalificatie expliciet
-mee welke services onder andere UIDs deze home kunnen gebruiken.
+procesinspectie draait als de Oracle Home-owner. Vóór shutdown controleert
+PREAPPLY de procfs-toegang. Vóór de RU en opnieuw vóór OJVM controleert OPG de
+actieve executables en mappings. Een aangetoonde treffer geeft `BLOCKED`
+(detector-exitcode 20). Zonder treffer geeft ontbrekend proceszicht
+`UNKNOWN` (30), voor iedere UID. Een verdwenen PID telt alleen als afgehandeld
+als procfs zijn afwezigheid bevestigt. Voor een nog aanwezige PID zonder
+leesbare executable vereist de detector leesbare, lege maps en één thread.
+De scan is een momentopname binnen de zichtbare PID- en mountnamespace.
+Houd clients stil tijdens het onderhoud en kwalificeer de scan in de
+hostnamespace.
+
+Op OL9 kan `(sd-pam)` dezelfde UID hebben als `oracle` en toch onleesbare
+`maps` hebben. De upstream PAM-child wisselt van effectieve UID en GID.
+Linux reset daarbij de dumpable-status en baseert procfs-toegang onder meer
+op die status, capabilities en SELinux-beleid. Dit verklaart waarom een
+gelijke UID op zichzelf geen toegang bewijst.
+[systemd 252-broncode](https://raw.githubusercontent.com/systemd/systemd/v252/src/core/execute.c)
+[Linux dumpable-status](https://man7.org/linux/man-pages/man2/PR_SET_DUMPABLE.2const.html)
+[Linux ptrace-toegangsregels](https://man7.org/linux/man-pages/man2/ptrace.2.html)
+
+### Kwalificatie bij beperkt proceszicht
+
+Laat de DBA op een representatieve OL9.9-acceptatiehost de read-only detector
+uitvoeren als de Oracle Home-owner, met de OEM-omgeving en dezelfde procfs-mount.
+Gebruik een vertrouwde kopie van `lib/opg_active_home.py` met
+`/usr/bin/python3 -I`. Test eerst `--visibility` en daarna het scanargument
+met een canonieke fixturehome. Houd een bestand in die fixturehome gemapt
+onder een andere UID en maak de mapping daarna vrij. Verwacht 20 voor de
+zichtbare mapping en 0 na vrijgave bij volledige dekking. Verwacht 30 als
+een proces onleesbaar blijft en er geen aangetoonde treffer is. De detector
+heeft hiervoor geen database-, listener- of OPatch-opdrachten nodig.
+
+Als de Oracle-owner geen volledige dekking kan krijgen, vereist automatische
+vrijgave een apart te beoordelen read-only helper. Deze versie geeft de
+Oracle-owner in dat geval `UNKNOWN`. De helper moet in de PID- en
+mountnamespace van de host draaien, met procfs zonder verborgen PIDs.
+Valideer onder het beoogde SELinux-beleid de toegang tot `maps` en `exe` over
+UID-grenzen en bij non-dumpable taken. Op Linux vraagt dit doorgaans om
+`CAP_SYS_PTRACE` in de user namespace van de doelprocessen, naast voldoende
+DAC-toegang tot de procfs-bestanden. Begrens die rechten tot de helper.
+
+Voor integratie is een vast, lokaal helperpad nodig met een regulier
+root-owned uitvoerbaar bestand, een vaste interpreter en een opgeschoonde
+omgeving. Valideer dat de helper en alle parentdirectories van root zijn,
+zonder symlinks en zonder schrijfbevoegdheid voor groep of others.
+Bind iedere toegestane Oracle Home en aanroepende UID aan root-owned
+configuratie. Laat `sudo -n` uitsluitend de exacte helperaanroepen voor
+`visibility` en `scan` toestaan, bijvoorbeeld via
+`/usr/local/sbin/opg_active_home_inspect` met één vast actieargument en
+`NOSETENV`. De helper haalt de home uit de root-owned configuratie en
+geeft alleen de uitslag en relevante Oracle Home-treffers terug. Valideer de
+sudoersregel met `visudo -cf` en test afwijkende argumenten en een onjuiste
+caller. Koppel de uiteindelijke helper aan PREAPPLY, de controles vóór
+RU en OJVM en de bestaande retry- en resumecontroles. Verifieer dat een
+ontbrekende helper, timeout, verkeerde home-binding of ontbrekende
+dekkingsbevestiging `UNKNOWN` blijft. Voor live kwalificatie gelden de
+bestaande grenzen voor approval, locking en release-activatie.
 
 Laat OEM standaard als agentaccount uitvoeren. Gebruik alleen vooraf geconfigureerde `sudo -n -u oracle` voor de root-owned OEM-wrapper die nodig is. Een conceptueel, commandospecifiek sudoerspatroon is:
 

@@ -1000,15 +1000,28 @@ for stage in before_db before_ojvm; do
   record "bestandsgebruik stopt $stage ondanks native PASSED" 40 "$rc" "$CASE_DIR/active.out"
 done
 
-for rc_fixture in 30 124; do
-  prepare_active_home_case "active-incomplete-$rc_fixture"
-  printf '\nMOCK_RC_active_home_before_db=%s\n' "$rc_fixture" >>"$FIXTURE_ENV"
+for stage in before_db before_ojvm; do
+  prepare_active_home_case "active-incomplete-$stage"
+  printf '\nMOCK_RC_active_home_%s=30\n' "$stage" >>"$FIXTURE_ENV"
   active_home_apply; rc=$?
   grep -Fq 'result=UNKNOWN|check=files' "$ACTIVE_RUN/last_error.txt" &&
-    grep -Fq "|tool_exit_code=$rc_fixture|" "$ACTIVE_RUN/last_error.txt" &&
-    [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" ]] || rc=99
-  record "bestandscontrole exit $rc_fixture geeft geen vrijgave" 40 "$rc" "$CASE_DIR/active.out"
+    grep -Fq '|tool_exit_code=30|' "$ACTIVE_RUN/last_error.txt" &&
+    [[ ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
+  if [[ "$stage" == before_db ]]; then
+    [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" ]] || rc=98
+  else
+    grep -Fq '|06_DB_BINARY_APPLIED|PARTIAL|PRE_BINARY_CHECK|' "$ACTIVE_RUN/state_history.log" || rc=98
+  fi
+  record "onvolledig proceszicht geeft geen vrijgave $stage" 40 "$rc" "$CASE_DIR/active.out"
 done
+
+prepare_active_home_case active-timeout
+printf '\nMOCK_RC_active_home_before_db=124\n' >>"$FIXTURE_ENV"
+active_home_apply; rc=$?
+grep -Fq 'result=UNKNOWN|check=files' "$ACTIVE_RUN/last_error.txt" &&
+  grep -Fq '|tool_exit_code=124|' "$ACTIVE_RUN/last_error.txt" &&
+  [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" ]] || rc=99
+record 'timeout op bestandscontrole geeft geen vrijgave' 40 "$rc" "$CASE_DIR/active.out"
 
 prepare_active_home_case active-shutdown
 printf '\nMOCK_SHUTDOWN_STILL_ACTIVE=true\n' >>"$FIXTURE_ENV"
