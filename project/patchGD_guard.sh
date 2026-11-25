@@ -101,6 +101,7 @@ SAFE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EMCTL_PATH=
 MANAGE_LISTENERS=true
 LISTENER_NAMES="LISTENER"
+ACTIVE_HOME_INSPECTION_MODE=local
 BACKUP_CHECK_COMMAND=
 EXPECTED_SBT_LIBRARY=
 EXPECTED_BACKUP_HOST=
@@ -162,6 +163,9 @@ for numeric_setting in INTEGRITY_CHECK_TIMEOUT_SECONDS LISTENER_STOP_TIMEOUT_SEC
   [[ ${!numeric_setting:-} =~ ^[1-9][0-9]*$ ]] || { printf 'Ongeldige positieve integer voor %s.\n' "$numeric_setting" >&2; exit "$EXIT_INVALID_PARAMS"; }
 done
 [[ "$OPATCH_UPGRADE_MIN_FREE_MB" =~ ^[0-9]+$ ]] || { printf 'Ongeldige niet-negatieve integer voor OPATCH_UPGRADE_MIN_FREE_MB.\n' >&2; exit "$EXIT_INVALID_PARAMS"; }
+[[ "$ACTIVE_HOME_INSPECTION_MODE" == local || "$ACTIVE_HOME_INSPECTION_MODE" == privileged ]] || {
+  printf 'ACTIVE_HOME_INSPECTION_MODE moet local of privileged zijn.\n' >&2; exit "$EXIT_INVALID_PARAMS"
+}
 export PATH=$SAFE_PATH
 
 if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then
@@ -1198,7 +1202,7 @@ emit_precheck_result() {
   while IFS='|' read -r severity id message _; do
     [[ -n "$severity" && -n "$id" ]] || continue
     case "$id" in
-      WINDOW_INVALID|MAINTENANCE_WINDOW_READINESS|TARGET_PATCHLEVEL_ALREADY_APPLIED|TARGET_PATCHLEVEL_READINESS|HOME_CLIENT_ACTIVE|HOME_PROCESS_VISIBILITY_LIMITED)
+      WINDOW_INVALID|MAINTENANCE_WINDOW_READINESS|TARGET_PATCHLEVEL_ALREADY_APPLIED|TARGET_PATCHLEVEL_READINESS|HOME_CLIENT_ACTIVE|HOME_PROCESS_VISIBILITY_LIMITED|OJVM_PERL_FILE_COPY)
         printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s|message=%s\n' "$RUN_ID" "$severity" "$id" "$message"
         ;;
       *) printf 'OPG_PRECHECK_FINDING|run_id=%s|severity=%s|id=%s\n' "$RUN_ID" "$severity" "$id" ;;
@@ -1276,6 +1280,45 @@ validate_opatch_media() {
   printf 'MEDIA|status=VALID|version=%s\n' "$internal_version" >>"$evidence"
 }
 
+readonly OJVM_PERL_DBA_REPAIR="De OJVM-relink kan Perl/File::Copy niet gebruiken. Laat de DBA Perl en de moduleprovider voor deze interpreter herstellen (zoek zo nodig met dnf provides '*/File/Copy.pm')."
+readonly OJVM_PERL_DBA_ACTION="$OJVM_PERL_DBA_REPAIR Voer daarna PRECHECK opnieuw uit."
+
+check_ojvm_perl() {
+  local label=$1 evidence=$2 perl_executable=perl rc=127
+  local OPG_TEST_EXECUTE_CAPTURE=${OPG_TEST_EXECUTE_CAPTURE:-false}
+  if [[ ${OPG_TEST_MODE:-0} == 1 && ${MOCK_EXECUTE_OJVM_PERL_CHECK:-false} == true ]]; then
+    OPG_TEST_EXECUTE_CAPTURE=true
+  fi
+  # javavm_refresh roept perl aan via PATH. Gebruik dezelfde SAFE_PATH en
+  # geërfde Perl-omgeving als de directe opatch apply-aanroep.
+  if [[ ${OPG_TEST_MODE:-0} != 1 || "$OPG_TEST_EXECUTE_CAPTURE" == true ]]; then
+    perl_executable=$(type -P perl) || perl_executable=
+  fi
+  if [[ -n "$perl_executable" ]]; then
+    opg_run_capture "$label" "$evidence" "$perl_executable" -e '
+      printf "perl_version=%vd\n", $^V;
+      require File::Copy;
+      File::Copy->import();
+      die "File::Copy did not export copy and move\n" unless defined &copy && defined &move;
+      printf "file_copy_module=%s\n", $INC{"File/Copy.pm"};
+      print "file_copy_import=OK\n";
+    '
+    rc=$?
+  else
+    printf 'Perl ontbreekt of is niet uitvoerbaar op het OPatch-PATH.\n' >"$evidence" || return 1
+  fi
+  printf 'perl_executable=%q\nPERL5LIB=%q\nfile_copy_exit_code=%s\n' \
+    "${perl_executable:-<missing>}" "${PERL5LIB-<unset>}" "$rc" >>"$evidence" || return 1
+  if ! grep -q '^perl_version=' "$evidence"; then
+    printf 'perl_version=unavailable\n' >>"$evidence" || return 1
+  fi
+  if (( rc == 0 )) && grep -Fxq 'file_copy_import=OK' "$evidence"; then
+    return 0
+  fi
+  printf 'file_copy_import=FAILED\n' >>"$evidence"
+  return 1
+}
+
 perform_assessment() {
   local assessment_mode=${1:-formal}
   local owner central_inventory local_inventory db_dir ojvm_dir zip readme_count opatch_actual rc os_id os_version arch expected_owner
@@ -1329,6 +1372,13 @@ perform_assessment() {
   expected_owner=${EXPECTED_ORACLE_OWNER:-$owner}
   [[ "$owner" == "$expected_owner" ]] || opg_add_finding BLOCKED HOME_OWNER_MISMATCH "Oracle Home-owner wijkt af van configuratie." "gevonden=${owner}, verwacht=${expected_owner}"
   [[ "$EXEC_USER" == "$owner" ]] || opg_add_finding BLOCKED EXECUTION_USER_MISMATCH "Uitvoerende gebruiker is niet de Oracle Home-owner; configureer sudo -n naar de owner." "user=${EXEC_USER}, owner=${owner}"
+
+  local perl_evidence="${RUN_DIR}/ojvm_perl.log"
+  if check_ojvm_perl ojvm_perl "$perl_evidence"; then
+    opg_add_finding READY OJVM_PERL_FILE_COPY "Perl kan File::Copy importeren voor de OJVM-relink." "$perl_evidence"
+  else
+    opg_add_finding BLOCKED OJVM_PERL_FILE_COPY "$OJVM_PERL_DBA_ACTION" "$perl_evidence"
+  fi
 
   local_inventory="$TARGET_ORACLE_HOME/inventory/ContentsXML/oraclehomeproperties.xml"
   [[ -r "$local_inventory" ]] || opg_add_finding BLOCKED LOCAL_INVENTORY_MISSING "Local inventory ontbreekt of is niet leesbaar." "$local_inventory"
@@ -1779,7 +1829,7 @@ perform_preapply_recheck() {
   if ! missing_tool=$(check_active_home_tools); then
     preapply_add UNKNOWN ACTIVE_HOME_TOOL_UNAVAILABLE "Vereiste tool voor Active Oracle Home Readiness ontbreekt of is niet bruikbaar." "$missing_tool"
   elif ! preapply_active_home_visibility; then
-    preapply_add UNKNOWN ACTIVE_HOME_VISIBILITY_UNKNOWN "Vereist proceszicht is vóór shutdown niet aantoonbaar onder de uitvoerende gebruiker." "${RUN_DIR}/preapply_active_home_visibility.log"
+    preapply_add UNKNOWN ACTIVE_HOME_VISIBILITY_UNKNOWN "Vereist proceszicht is vóór shutdown niet aantoonbaar met de ingestelde inspectiemethode." "${RUN_DIR}/preapply_active_home_visibility.log"
   fi
   detect_home_processes preapply
   if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then
@@ -1851,6 +1901,14 @@ perform_preapply_recheck() {
   if check_datapump_evidence preapply; then :; else rc=$?; (( rc == 2 )) && preapply_add BLOCKED DATAPUMP_ACTIVE_RECHECK "Data Pump-job is direct vóór apply actief." "${RUN_DIR}/preapply_datapump.txt"; (( rc == 3 )) && preapply_add UNKNOWN DATAPUMP_RECHECK_UNKNOWN "Data Pump kon niet opnieuw betrouwbaar worden gecontroleerd." "${RUN_DIR}/preapply_datapump.txt"; fi
   if run_optional_check preapply_dataguard "$DATAGUARD_CHECK_COMMAND" true dataguard; then :; else rc=$?; (( rc == 2 )) && preapply_add BLOCKED DATAGUARD_CHANGED "Data Guard-controle faalt direct vóór apply." "${RUN_DIR}/preapply_dataguard.txt"; (( rc != 2 )) && preapply_add UNKNOWN DATAGUARD_RECHECK_UNKNOWN "Data Guard-status kon niet opnieuw worden bewezen." "${RUN_DIR}/preapply_dataguard.txt"; fi
   if run_optional_check preapply_maintenance_window "$MAINTENANCE_WINDOW_CHECK_COMMAND" false maintenance_window; then :; else rc=$?; (( rc == 2 )) && preapply_add BLOCKED WINDOW_CHANGED "Onderhoudsvenster is direct vóór apply onvoldoende." "${RUN_DIR}/preapply_maintenance_window.txt"; (( rc != 2 )) && preapply_add UNKNOWN WINDOW_RECHECK_UNKNOWN "Onderhoudsvenster kon niet opnieuw worden bevestigd." "${RUN_DIR}/preapply_maintenance_window.txt"; fi
+
+  local perl_evidence="${RUN_DIR}/preapply_ojvm_perl.log"
+  if check_ojvm_perl preapply_ojvm_perl "$perl_evidence"; then
+    preapply_add READY OJVM_PERL_FILE_COPY "Perl kan File::Copy importeren voor de OJVM-relink." "$perl_evidence"
+  else
+    preapply_add BLOCKED OJVM_PERL_FILE_COPY "$OJVM_PERL_DBA_ACTION" "$perl_evidence"
+    opg_log ERROR "OJVM_PERL_FILE_COPY|$OJVM_PERL_DBA_ACTION Zie $perl_evidence."
+  fi
 
   if (( PREAPPLY_BLOCKED > 0 )); then write_preapply_report BLOCKED "$EXIT_BLOCKED"; return "$EXIT_BLOCKED"; fi
   if (( PREAPPLY_UNKNOWN > 0 )); then write_preapply_report UNKNOWN "$EXIT_UNKNOWN"; return "$EXIT_UNKNOWN"; fi
@@ -2545,13 +2603,62 @@ check_active_home_tools() {
   fi
 }
 
+active_home_executable_trusted() {
+  local path=$1 role=$2 parent identity parent_mode
+  [[ -f "$path" && -x "$path" && ! -L "$path" && ! -w "$path" ]] || return 1
+  identity=$(/usr/bin/stat -c '%u:%g:%a' -- "$path" 2>/dev/null) || return 1
+  case "$role:$identity" in
+    sudo:0:0:4111|sudo:0:0:4755|helper:0:0:755) ;;
+    *) return 1 ;;
+  esac
+  parent=${path%/*}
+  while :; do
+    [[ -d "$parent" && ! -L "$parent" && ! -w "$parent" ]] || return 1
+    identity=$(/usr/bin/stat -c '%u:%a' -- "$parent" 2>/dev/null) || return 1
+    parent_mode=${identity#*:}
+    [[ "$identity" =~ ^0:[0-7]{3,4}$ ]] && (( (8#$parent_mode & 0022) == 0 )) || return 1
+    [[ "$parent" != / ]] || return 0
+    parent=${parent%/*}; [[ -n "$parent" ]] || parent=/
+  done
+}
+
+run_active_home_inspection() {
+  local label=$1 output=$2 mode=$3 rc subject=$TARGET_ORACLE_HOME verdict ready_marker=ACTIVE_HOME_SCAN_CLEAR
+  if [[ "$mode" == visibility ]]; then
+    subject=--visibility
+    ready_marker=PROC_COVERAGE_CONFIRMED
+  fi
+  if [[ "$ACTIVE_HOME_INSPECTION_MODE" == local ]]; then
+    opg_run_capture "$label" "$output" env LC_ALL=C /usr/bin/python3 -I \
+      "${SCRIPT_DIR}/lib/opg_active_home.py" "$subject"
+    return $?
+  fi
+
+  local sudo=/usr/bin/sudo helper=/usr/local/sbin/opg_active_home_inspect protocol_version=1
+  if ! active_home_executable_trusted "$sudo" sudo || ! active_home_executable_trusted "$helper" helper; then
+    printf 'OPG_ACTIVE_HOME_INSPECTION_UNKNOWN|reason=missing_or_untrusted_executable\n' >"$output"
+    return "$EXIT_UNKNOWN"
+  fi
+  opg_run_capture "$label" "$output" "$sudo" -n -u root -- "$helper" "$mode" </dev/null; rc=$?
+  verdict=$(grep '^OPG_ACTIVE_HOME_INSPECTION|' "$output")
+  if [[ "$verdict" == "OPG_ACTIVE_HOME_INSPECTION|version=$protocol_version|mode=$mode|home=$TARGET_ORACLE_HOME|exit_code=$rc" ]]; then
+    case "$mode:$rc" in
+      visibility:0|scan:0)
+        grep -Fxq "$ready_marker" "$output" &&
+          ! grep -Eq '^(ACTIVE_HOME_FILE|PROC_COVERAGE_UNKNOWN|OPG_ACTIVE_HOME_INSPECTION_UNKNOWN)\|' "$output" && return 0 ;;
+      scan:20) grep -q '^ACTIVE_HOME_FILE|' "$output" && return "$EXIT_BLOCKED" ;;
+    esac
+  fi
+  printf 'OPG_ACTIVE_HOME_INSPECTION_UNKNOWN|reason=unconfirmed_bound_result|tool_exit_code=%s\n' "$rc" >>"$output"
+  return "$EXIT_UNKNOWN"
+}
+
 preapply_active_home_visibility() {
   # Used by opg_run_capture from the sourced core library.
   # shellcheck disable=SC2034
   local COMMAND_TIMEOUT_SECONDS=60
   local output="${RUN_DIR}/preapply_active_home_visibility.log"
-  opg_run_capture preapply_active_home_visibility "$output" \
-    env LC_ALL=C /usr/bin/python3 -I "${SCRIPT_DIR}/lib/opg_active_home.py" --visibility &&
+  run_active_home_inspection preapply_active_home_visibility "$output" visibility &&
     grep -Fxq 'PROC_COVERAGE_CONFIRMED' "$output"
 }
 
@@ -2625,8 +2732,7 @@ require_binary_home_ready() {
   done
 
   output="${RUN_DIR}/active_home_${stage}.log"
-  opg_run_capture "active_home_${stage}" "$output" env LC_ALL=C /usr/bin/python3 -I \
-    "${SCRIPT_DIR}/lib/opg_active_home.py" "$TARGET_ORACLE_HOME"; rc=$?
+  run_active_home_inspection "active_home_${stage}" "$output" scan; rc=$?
   case "$rc" in
     0)
       if [[ -n "$failed_patch" ]]; then
@@ -2725,6 +2831,7 @@ begin_apply_retry() {
     retry_window_valid &&
     verify_approval "$APPROVED_MANIFEST" "$APPROVAL_TOKEN" &&
     verify_manifest_databases_stopped; then
+    require_ojvm_perl_after_shutdown "$retry_stage" || return "$EXIT_BLOCKED"
     opg_write_state RETRY_BINARY_STARTED "$phase"
     return $?
   fi
@@ -2760,12 +2867,29 @@ publish_apply_retry() {
     'OPG will revalidate readiness before continuing.' 'OEM Retry : ALLOWED' 'OPG Exit : 40'
 }
 
+require_ojvm_perl_after_shutdown() {
+  local stage=$1 label evidence message
+  label="ojvm_perl_$stage"
+  evidence="$RUN_DIR/$label.log"
+  check_ojvm_perl "$label" "$evidence" && return 0
+  message="OJVM_PERL_FILE_COPY|stage=$stage|database_state=STOPPED|evidence=$evidence|$OJVM_PERL_DBA_REPAIR De databases blijven gestopt."
+  if [[ -n ${retry_stage:-} ]]; then
+    message+=" Gebruik na herstel OEM Retry voor dezelfde run met geldige goedkeuring."
+    printf '%s\n' 'OEM Retry : ALLOWED'
+  else
+    message+=" Hervat na herstel dezelfde run via RESUME met geldige goedkeuring."
+  fi
+  opg_log ERROR "$message"
+  printf '%s\n' "$message" >"$RUN_DIR/last_error.txt" || true
+  return "$EXIT_BLOCKED"
+}
+
 apply_binary_patches() {
   local db_dir="${PATCH_ROOT}/${MONTH}/${DB_PATCH}" ojvm_dir="${PATCH_ROOT}/${MONTH}/${OJVM_PATCH}"
   if [[ ${retry_stage:-} != before_ojvm ]]; then
     require_binary_home_ready before_db "$DB_PATCH" "$OJVM_PATCH" || return 1
     if [[ ${retry_stage:-} == before_db ]]; then
-      begin_apply_retry DB_BINARY || return 1
+      begin_apply_retry DB_BINARY || return $?
       retry_stage=
     fi
     opg_run_critical apply_db_ru "${RUN_DIR}/apply_db_ru.log" PARTIAL DB_BINARY "$TARGET_ORACLE_HOME/OPatch/opatch" apply -silent "$db_dir" || return 1
@@ -2775,8 +2899,10 @@ apply_binary_patches() {
   fi
   require_binary_home_ready before_ojvm "$OJVM_PATCH" || return 1
   if [[ ${retry_stage:-} == before_ojvm ]]; then
-    begin_apply_retry OJVM_BINARY || return 1
+    begin_apply_retry OJVM_BINARY || return $?
     retry_stage=
+  else
+    require_ojvm_perl_after_shutdown before_ojvm || return "$EXIT_BLOCKED"
   fi
   opg_run_critical apply_ojvm "${RUN_DIR}/apply_ojvm.log" PARTIAL OJVM_BINARY "$TARGET_ORACLE_HOME/OPatch/opatch" apply -silent "$ojvm_dir" || return 1
   opg_run_capture verify_ojvm "${RUN_DIR}/verify_ojvm.log" "$TARGET_ORACLE_HOME/OPatch/opatch" lspatches || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OJVM_BINARY "OJVM inventoryvalidatie mislukt." 1; return 1; }
@@ -3156,7 +3282,12 @@ perform_apply() {
     }
   fi
   apply_binary_patches || {
+    rc=$?
     [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]] && { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE; return "$EXIT_MANUAL"; }
+    if (( rc == EXIT_BLOCKED )); then
+      opg_result_line "$EXIT_BLOCKED" BLOCKED PRE_BINARY_CHECK
+      return "$EXIT_BLOCKED"
+    fi
     case "$CURRENT_PHASE" in
       DB_BINARY|OJVM_BINARY) printf '%s\n' 'OEM Retry : NOT ALLOWED' 'DBA Action : Manual investigation required.' ;;
     esac
@@ -3254,10 +3385,32 @@ perform_resume() {
   OPG_READ_ONLY_PHASE=false
   case "$CURRENT_STATE:$CURRENT_PHASE" in
     MEDIA_VALIDATED:OPATCH_UPGRADE|OPATCH_STAGED:OPATCH_UPGRADE|OPATCH_BACKED_UP:OPATCH_UPGRADE|OPATCH_INSTALLED_UNVERIFIED:OPATCH_UPGRADE|OPATCH_READY:OPATCH_UPGRADE|PARTIAL:OPATCH_STAGED|PARTIAL:OPATCH_BACKED_UP|PARTIAL:OPATCH_INSTALLED_UNVERIFIED)
-      if ! perform_opatch_upgrade || ! stop_databases || ! apply_binary_patches || ! start_original_databases || ! run_datapatch_all || ! run_utlrp_all || ! validate_all; then
+      if [[ ${ACTIVE_HOME_INSPECTION_MODE:-local} == privileged ]] &&
+         ! preapply_active_home_visibility; then
+        opg_log ERROR "Active Home-proceszicht vóór shutdown is onbekend. Zie ${RUN_DIR}/preapply_active_home_visibility.log."
+        opg_result_line "$EXIT_UNKNOWN" UNKNOWN PREAPPLY
+        return "$EXIT_UNKNOWN"
+      fi
+      local perl_evidence="${RUN_DIR}/resume_ojvm_perl.log"
+      if ! check_ojvm_perl resume_ojvm_perl "$perl_evidence"; then
+        opg_log ERROR "OJVM_PERL_FILE_COPY|$OJVM_PERL_DBA_ACTION Zie $perl_evidence."
+        opg_result_line "$EXIT_BLOCKED" BLOCKED PREAPPLY
+        return "$EXIT_BLOCKED"
+      fi
+      if perform_opatch_upgrade && stop_databases && apply_binary_patches &&
+         start_original_databases && run_datapatch_all && run_utlrp_all && validate_all; then
+        opg_release_lock; trap - EXIT
+        opg_result_line "$EXIT_OK" COMPLETE RESUME
+        return 0
+      else
+        rc=$?
         if [[ ${OPG_STATE_WRITE_FAILED:-false} == true ]]; then
           opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED STATE_WRITE
           return "$EXIT_MANUAL"
+        fi
+        if (( rc == EXIT_BLOCKED )); then
+          opg_result_line "$EXIT_BLOCKED" BLOCKED PRE_BINARY_CHECK
+          return "$EXIT_BLOCKED"
         fi
         if [[ "$CURRENT_STATE:$CURRENT_PHASE" == PARTIAL:PRE_BINARY_CHECK ]]; then
           opg_result_line "$EXIT_PARTIAL" "$CURRENT_STATE" "$CURRENT_PHASE"
@@ -3265,10 +3418,7 @@ perform_resume() {
         fi
         opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED "${CURRENT_PHASE:-RESUME}"
         return "$EXIT_MANUAL"
-      fi
-      opg_release_lock; trap - EXIT
-      opg_result_line "$EXIT_OK" COMPLETE RESUME
-      return 0 ;;
+      fi ;;
   esac
   inventory="${RUN_DIR}/resume_inventory.txt"
   opg_run_capture resume_inventory "$inventory" "$TARGET_ORACLE_HOME/OPatch/opatch" lspatches || {
@@ -3289,6 +3439,10 @@ perform_resume() {
         fi
         opg_result_line "$EXIT_PARTIAL" "$CURRENT_STATE" "$CURRENT_PHASE"
         return "$EXIT_PARTIAL"
+      fi
+      if ! require_ojvm_perl_after_shutdown resume_ojvm; then
+        opg_result_line "$EXIT_BLOCKED" BLOCKED PRE_BINARY_CHECK
+        return "$EXIT_BLOCKED"
       fi
       opg_run_critical apply_ojvm "${RUN_DIR}/apply_ojvm_resume.log" MANUAL_INTERVENTION_REQUIRED OJVM_BINARY "$TARGET_ORACLE_HOME/OPatch/opatch" apply -silent "${PATCH_ROOT}/${MONTH}/${OJVM_PATCH}" || { opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED OJVM_BINARY; return "$EXIT_MANUAL"; }
       opg_run_capture verify_ojvm_resume "${RUN_DIR}/verify_ojvm_resume.log" "$TARGET_ORACLE_HOME/OPatch/opatch" lspatches || { opg_mark_failure MANUAL_INTERVENTION_REQUIRED OJVM_BINARY "OJVM inventoryvalidatie na resume is mislukt." 1; opg_result_line "$EXIT_MANUAL" MANUAL_INTERVENTION_REQUIRED OJVM_BINARY; return "$EXIT_MANUAL"; }

@@ -57,7 +57,7 @@ rc=0
 for script in "$OEM_SOURCE"/*.sh; do
   bash -n "$script" || rc=1
 done
-for helper in "$OEM_SOURCE/opg_blackout.py" "$ROOT/project/lib/opg_active_home.py"; do
+for helper in "$OEM_SOURCE/opg_blackout.py" "$OEM_SOURCE/opg_active_home_inspect.py" "$ROOT/project/lib/opg_active_home.py"; do
   [[ -f "$helper" && ! -L "$helper" ]] &&
     python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))' "$helper" || rc=1
 done

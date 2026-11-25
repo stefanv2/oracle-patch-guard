@@ -116,6 +116,8 @@ opg_release_lock() { :; }
 opg_prepare_database_baseline_snapshot() { :; }
 verify_resume_environment() { :; }
 verify_resume_listener_progress() { :; }
+check_ojvm_perl() { :; }
+require_ojvm_perl_after_shutdown() { :; }
 opg_write_state() { :; }
 opg_run_capture() {
   printf '111\n' >"$2"
