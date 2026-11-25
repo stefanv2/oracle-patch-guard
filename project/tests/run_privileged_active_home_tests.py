@@ -134,7 +134,7 @@ PATCH_ROOT=/fixture; MONTH=TEST
 case "$5" in
   missing) active_home_executable_trusted() { return 1; } ;;
   yes) active_home_executable_trusted() {
-    [[ "$*" == '/usr/bin/sudo 4755' || "$*" == '/usr/local/sbin/opg_active_home_inspect 755' ]]
+    [[ "$*" == '/usr/bin/sudo sudo' || "$*" == '/usr/local/sbin/opg_active_home_inspect helper' ]]
   } ;;
 esac
 opg_run_capture() {
@@ -206,7 +206,7 @@ esac
 
     def test_missing_executable_is_untrusted(self):
         with tempfile.TemporaryDirectory() as tmp:
-            command = function("active_home_executable_trusted") + '\nactive_home_executable_trusted "$1" 755'
+            command = function("active_home_executable_trusted") + '\nactive_home_executable_trusted "$1" helper'
             result = subprocess.run(["bash", "-c", command, "_", tmp + "/missing"])
             self.assertEqual(result.returncode, 1)
 
@@ -251,22 +251,45 @@ class LinuxPrivilegeTests(unittest.TestCase):
             os.setgid(GID)
             os.setuid(UID)
 
-        command = function("active_home_executable_trusted") + '\nactive_home_executable_trusted "$1" 755'
+        command = function("active_home_executable_trusted") + '\nactive_home_executable_trusted "$1" "$2"'
         with tempfile.TemporaryDirectory(prefix="opg-privileged-active-home.", dir="/run") as tmp:
             directory = Path(tmp)
             directory.chmod(0o755)
-            executable = directory / "helper"
+            executable = directory / "launcher"
             executable.write_text("#!/bin/false\n")
-            for mode, uid, parent_mode, expected in (
-                    (0o755, 0, 0o755, 0), (0o775, 0, 0o755, 1), (0o755, UID, 0o755, 1),
-                    (0o755, 0, 0o777, 1)):
-                with self.subTest(mode=mode, uid=uid, parent_mode=parent_mode):
+            cases = (
+                ("sudo", 0o4111, 0, 0, 0o755, 0),
+                ("sudo", 0o4755, 0, 0, 0o755, 0),
+                ("sudo", 0o111, 0, 0, 0o755, 1),
+                ("sudo", 0o755, 0, 0, 0o755, 1),
+                ("sudo", 0o4775, 0, 0, 0o755, 1),
+                ("sudo", 0o4113, 0, 0, 0o755, 1),
+                ("sudo", 0o4755, UID, 0, 0o755, 1),
+                ("sudo", 0o4755, 0, GID, 0o755, 1),
+                ("sudo", 0o4111, 0, 0, 0o775, 1),
+                ("helper", 0o755, 0, 0, 0o755, 0),
+                ("helper", 0o4755, 0, 0, 0o755, 1),
+                ("helper", 0o4111, 0, 0, 0o755, 1),
+                ("helper", 0o775, 0, 0, 0o755, 1),
+                ("helper", 0o755, UID, 0, 0o755, 1),
+                ("helper", 0o755, 0, 0, 0o777, 1),
+            )
+            for role, mode, uid, gid, parent_mode, expected in cases:
+                with self.subTest(role=role, mode=oct(mode), uid=uid, gid=gid, parent_mode=oct(parent_mode)):
+                    os.chown(str(executable), uid, gid)
                     executable.chmod(mode)
-                    os.chown(str(executable), uid, 0)
                     directory.chmod(parent_mode)
-                    result = subprocess.run(["bash", "-c", command, "_", str(executable)],
+                    self.assertEqual(stat.S_IMODE(executable.stat().st_mode), mode)
+                    result = subprocess.run(["bash", "-c", command, "_", str(executable), role],
                                             preexec_fn=become_oracle)
                     self.assertEqual(result.returncode, expected)
+            directory.chmod(0o755)
+            symlink = directory / "sudo-link"
+            symlink.symlink_to(executable)
+            executable.chmod(0o4111)
+            result = subprocess.run(["bash", "-c", command, "_", str(symlink), "sudo"],
+                                    preexec_fn=become_oracle)
+            self.assertEqual(result.returncode, 1)
 
     def test_scan_non_dumpable_mapping_and_release_with_reduced_privileges(self):
         launcher = """

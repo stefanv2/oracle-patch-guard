@@ -105,7 +105,7 @@ Een afwijkende namespace, ook in een geïsoleerde agentservice, levert
 Valideer de afzonderlijke sudoersregel met `visudo -cf`. Pas alleen de
 gebruikersnaam aan als de site een andere Oracle-owner heeft. Het privilege
 geldt uitsluitend voor de twee exacte acties `visibility` en `scan`.
-De guard verwacht `/usr/bin/sudo` als `root:root` met mode `4755`.
+De guard verwacht `/usr/bin/sudo` als `root:root` met mode `4111` of `4755`.
 De helper valideert `SUDO_UID`, `SUDO_GID` en de hostnamespaces. Vóór het
 lezen van doelprocessen draait hij als de geconfigureerde Oracle-owner,
 zonder aanvullende groepen en met alleen `CAP_SYS_PTRACE` effective en

@@ -2604,9 +2604,13 @@ check_active_home_tools() {
 }
 
 active_home_executable_trusted() {
-  local path=$1 mode=$2 parent identity parent_mode
+  local path=$1 role=$2 parent identity parent_mode
   [[ -f "$path" && -x "$path" && ! -L "$path" && ! -w "$path" ]] || return 1
-  [[ "$(/usr/bin/stat -c '%u:%g:%a' -- "$path" 2>/dev/null)" == "0:0:$mode" ]] || return 1
+  identity=$(/usr/bin/stat -c '%u:%g:%a' -- "$path" 2>/dev/null) || return 1
+  case "$role:$identity" in
+    sudo:0:0:4111|sudo:0:0:4755|helper:0:0:755) ;;
+    *) return 1 ;;
+  esac
   parent=${path%/*}
   while :; do
     [[ -d "$parent" && ! -L "$parent" && ! -w "$parent" ]] || return 1
@@ -2631,7 +2635,7 @@ run_active_home_inspection() {
   fi
 
   local sudo=/usr/bin/sudo helper=/usr/local/sbin/opg_active_home_inspect protocol_version=1
-  if ! active_home_executable_trusted "$sudo" 4755 || ! active_home_executable_trusted "$helper" 755; then
+  if ! active_home_executable_trusted "$sudo" sudo || ! active_home_executable_trusted "$helper" helper; then
     printf 'OPG_ACTIVE_HOME_INSPECTION_UNKNOWN|reason=missing_or_untrusted_executable\n' >"$output"
     return "$EXIT_UNKNOWN"
   fi
