@@ -2630,14 +2630,14 @@ run_active_home_inspection() {
     return $?
   fi
 
-  local sudo=/usr/bin/sudo helper=/usr/local/sbin/opg_active_home_inspect
+  local sudo=/usr/bin/sudo helper=/usr/local/sbin/opg_active_home_inspect protocol_version=1
   if ! active_home_executable_trusted "$sudo" 4755 || ! active_home_executable_trusted "$helper" 755; then
     printf 'OPG_ACTIVE_HOME_INSPECTION_UNKNOWN|reason=missing_or_untrusted_executable\n' >"$output"
     return "$EXIT_UNKNOWN"
   fi
   opg_run_capture "$label" "$output" "$sudo" -n -u root -- "$helper" "$mode" </dev/null; rc=$?
   verdict=$(grep '^OPG_ACTIVE_HOME_INSPECTION|' "$output")
-  if [[ "$verdict" == "OPG_ACTIVE_HOME_INSPECTION|mode=$mode|home=$TARGET_ORACLE_HOME|exit_code=$rc" ]]; then
+  if [[ "$verdict" == "OPG_ACTIVE_HOME_INSPECTION|version=$protocol_version|mode=$mode|home=$TARGET_ORACLE_HOME|exit_code=$rc" ]]; then
     case "$mode:$rc" in
       visibility:0|scan:0)
         grep -Fxq "$ready_marker" "$output" &&

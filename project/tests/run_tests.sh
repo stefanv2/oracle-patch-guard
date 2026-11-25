@@ -192,6 +192,9 @@ mock_datapatch_sqlpatch_rows() {
 setup_case healthy; assess R1; record 'gezonde single-instance met geaccepteerde rebuild-route' 10 $? "$CASE_DIR/R1.out"
 [[ ${OPG_STOP_AFTER_FIRST:-0} == 1 ]] && { printf '\nResultaat: %s geslaagd, %s mislukt\n' "$PASS" "$FAIL"; (( FAIL == 0 )); exit $?; }
 
+python3 "$ROOT/tests/run_privileged_active_home_tests.py"
+record 'Active Home-helpersuite' 0 $?
+
 # 2. Meerdere databases in dezelfde home -> afzonderlijke CONDITIONAL.
 setup_case multi multiple_databases; printf 'DB1:%s:Y\nDB2:%s:Y\n' "$HOME_DIR" "$HOME_DIR" >"$ORATAB"; assess R2; record 'meerdere databases zelfde home' 10 $? "$CASE_DIR/R2.out"
 

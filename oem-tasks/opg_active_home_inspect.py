@@ -17,6 +17,7 @@ POLICY = Path("/etc/oracle-patch-guard/active-home-inspect.json")
 SCANNER = Path("/usr/local/libexec/oracle-patch-guard/opg_active_home.py")
 NAMESPACES = ("pid", "mnt", "user")
 MAX_POLICY_SIZE = 4096
+PROTOCOL_VERSION = 1
 
 # Linux capability and prctl ABI. No exec is needed after reducing privileges.
 CAP_SYS_PTRACE = 1 << 19
@@ -150,10 +151,12 @@ def main(args):
         mode = args[0]
         result = inspect(None if mode == "visibility" else os.fsencode(home))
         if result == 0 or (result == 20 and mode == "scan"):
-            print("OPG_ACTIVE_HOME_INSPECTION|mode={}|home={}|exit_code={}".format(mode, home, result))
+            print("OPG_ACTIVE_HOME_INSPECTION|version={}|mode={}|home={}|exit_code={}".format(
+                PROTOCOL_VERSION, mode, home, result))
             return result
     except (OSError, KeyError, ValueError, InspectionTimeout) as error:
-        print("OPG_ACTIVE_HOME_INSPECTION_UNKNOWN|reason={}".format(json.dumps(str(error))))
+        print("OPG_ACTIVE_HOME_INSPECTION_UNKNOWN|version={}|reason={}".format(
+            PROTOCOL_VERSION, json.dumps(str(error))))
     return 30
 
 

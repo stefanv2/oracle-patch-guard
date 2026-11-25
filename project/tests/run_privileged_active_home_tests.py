@@ -14,7 +14,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 sys.dont_write_bytecode = True
@@ -28,7 +28,7 @@ HOME = "/opt/oracle/dbhome_1"
 UID, GID = 65534, 65534
 POLICY = {"uid": UID, "gid": GID, "oracle_home": HOME,
           "namespaces": {name: "{}:[123]".format(name) for name in helper.NAMESPACES}}
-BINDING = "OPG_ACTIVE_HOME_INSPECTION|mode={}|home={}|exit_code={}"
+BINDING = "OPG_ACTIVE_HOME_INSPECTION|version=1|mode={}|home={}|exit_code={}"
 HIT = 'ACTIVE_HOME_FILE|pid=1|uid=1001|process="fixture"|file="{}/bin/oracle"'.format(HOME)
 
 
@@ -99,6 +99,29 @@ class HelperTests(unittest.TestCase):
                 helper.restrict_observer(UID, GID)
         set_option.assert_not_called()
 
+    def test_helper_emits_versioned_binding(self):
+        credentials = {"SUDO_UID": str(UID), "SUDO_GID": str(GID)}
+        metadata = SimpleNamespace(st_uid=UID, st_mode=stat.S_IFDIR | 0o755)
+        for mode, code, subject in (("visibility", 0, None), ("scan", 0, os.fsencode(HOME)),
+                                    ("scan", 20, os.fsencode(HOME))):
+            with self.subTest(mode=mode, code=code):
+                inspect = Mock(return_value=code)
+                with patch.dict(os.environ, credentials, clear=True), \
+                        patch.object(helper.os, "getuid", return_value=0), \
+                        patch.object(helper.os, "geteuid", return_value=0), \
+                        patch.object(helper, "load_policy", return_value=POLICY), \
+                        patch.object(helper, "require_host_namespaces"), \
+                        patch.object(helper, "require_trusted_file"), \
+                        patch.object(helper, "restrict_observer"), \
+                        patch.object(helper.os, "stat", return_value=metadata), \
+                        patch.object(helper.os.path, "realpath", return_value=HOME), \
+                        patch.object(helper.runpy, "run_path", return_value={"inspect_proc": inspect}), \
+                        contextlib.redirect_stdout(io.StringIO()) as evidence:
+                    actual = helper.main([mode])
+                self.assertEqual(actual, code)
+                self.assertEqual(evidence.getvalue().strip(), BINDING.format(mode, HOME, code))
+                inspect.assert_called_once_with(subject)
+
 
 class GuardTests(unittest.TestCase):
     def inspect(self, mode, rc, transcript, trust="yes", route="inspect"):
@@ -168,6 +191,14 @@ esac
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertIn("opg_active_home_inspect scan", calls)
 
+    def test_rejects_legacy_or_incompatible_protocol_in_both_modes(self):
+        for mode, marker in (("visibility", "PROC_COVERAGE_CONFIRMED"), ("scan", "ACTIVE_HOME_SCAN_CLEAR")):
+            for version in ("", "|version=0", "|version=2", "|version=01", "|version=1|version=2"):
+                with self.subTest(mode=mode, version=version):
+                    binding = BINDING.format(mode, HOME, 0).replace("|version=1", version)
+                    result, _ = self.inspect(mode, 0, marker + "\n" + binding)
+                    self.assertEqual(result.returncode, 30, result.stderr)
+
     def test_missing_helper_fails_before_sudo(self):
         result, calls = self.inspect("scan", 0, "", trust="missing")
         self.assertEqual(result.returncode, 30, result.stderr)
@@ -212,7 +243,7 @@ esac
 
 
 @unittest.skipUnless(os.getuid() == 0 and os.environ.get("OPG_TEST_PRIVILEGED_SCAN") == "1",
-                     "requires an isolated root test with CAP_SYS_PTRACE")
+                     "requires root, capabilities and OPG_TEST_PRIVILEGED_SCAN=1 in an isolated Linux test")
 class LinuxPrivilegeTests(unittest.TestCase):
     def test_launcher_requires_safe_owner_mode_and_parents(self):
         def become_oracle():
@@ -304,5 +335,24 @@ sys.stdin.read()
             self.assertIn(b"untrusted file", inspect("scan", 30))
 
 
+class InspectionTestResult(unittest.TextTestResult):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.privileged_tests = 0
+
+    def startTest(self, test):
+        super().startTest(test)
+        if isinstance(test, LinuxPrivilegeTests):
+            self.privileged_tests += 1
+
+
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    runner = unittest.TextTestRunner(verbosity=2, resultclass=InspectionTestResult)
+    result = unittest.main(testRunner=runner, exit=False).result
+    privileged_skips = sum(isinstance(test, LinuxPrivilegeTests) for test, _ in result.skipped)
+    standard_skips = len(result.skipped) - privileged_skips
+    print("Standaardtests: {} uitgevoerd, {} overgeslagen".format(
+        result.testsRun - result.privileged_tests - standard_skips, standard_skips))
+    print("Root-/capabilitytests: {} uitgevoerd, {} overgeslagen".format(
+        result.privileged_tests - privileged_skips, privileged_skips))
+    sys.exit(0 if result.wasSuccessful() else 1)
