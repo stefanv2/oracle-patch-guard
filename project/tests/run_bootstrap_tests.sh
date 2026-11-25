@@ -130,6 +130,12 @@ record 'bootstrap maakt geen lifecyclecontext' 0 $?
 python3 "$ROOT/project/tests/run_bootstrap_readiness_tests.py" "$BASE" "$ROOT" >"$BASE/readiness.out" 2>&1
 rc=$?; (( rc == 0 )) || cat "$BASE/readiness.out"
 record 'bootstrap -> echte signed media-stage -> core PRECHECK zonder PREPARE' 0 "$rc"
+active_home_helper="$FIXTURE_ROOT/project/lib/opg_active_home.py"
+mv -- "$active_home_helper" "$BASE/opg_active_home.saved"
+run_bootstrap; rc=$?
+grep -Fq 'Active Oracle Home-helper ontbreekt of is onveilig' "$OUT" || rc=99
+mv -- "$BASE/opg_active_home.saved" "$active_home_helper"
+record 'bootstrap weigert een release zonder Active Oracle Home-helper' 30 "$rc"
 OPG_PREPARE_TEST_ROOT=$BASE bash "$ROOT/oem-tasks/opg_prepare_host.sh" >"$OUT" 2>&1
 record 'latere PREPARE valideert bootstrap zonder sudo install' 0 $?
 [[ "$FIXTURE_ROOT" == */current && "$CONFIG_SOURCE" == "${FIXTURE_ROOT%/current}/config/patchGD_guard.conf" && ! -e "$FIXTURE_ROOT/config/patchGD_guard.conf" ]]

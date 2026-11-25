@@ -72,6 +72,8 @@ DATAGUARD_CHECK_COMMAND=
 SAFE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EMCTL_PATH=
 MANAGE_LISTENERS=true
+# Kies privileged na kwalificatie van de lokaal geïnstalleerde read-only helper.
+ACTIVE_HOME_INSPECTION_MODE=local
 # Spatiegescheiden, streng gevalideerde listenernamen uit deze Oracle Home.
 LISTENER_NAMES="LISTENER"
 

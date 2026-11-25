@@ -1,0 +1,4 @@
+Cmnd_Alias OPG_ACTIVE_HOME_INSPECTION = /usr/local/sbin/opg_active_home_inspect visibility, \
+                                        /usr/local/sbin/opg_active_home_inspect scan
+Defaults!OPG_ACTIVE_HOME_INSPECTION env_reset
+oracle ALL=(root) NOPASSWD: NOSETENV: NOEXEC: OPG_ACTIVE_HOME_INSPECTION

@@ -192,6 +192,11 @@ mock_datapatch_sqlpatch_rows() {
 setup_case healthy; assess R1; record 'gezonde single-instance met geaccepteerde rebuild-route' 10 $? "$CASE_DIR/R1.out"
 [[ ${OPG_STOP_AFTER_FIRST:-0} == 1 ]] && { printf '\nResultaat: %s geslaagd, %s mislukt\n' "$PASS" "$FAIL"; (( FAIL == 0 )); exit $?; }
 
+python3 "$ROOT/tests/run_active_home_tests.py"
+record 'Active Home-helpersuite' 0 $?
+python3 "$ROOT/tests/run_privileged_active_home_tests.py"
+record 'Privileged Active Home-helpersuite' 0 $?
+
 # 2. Meerdere databases in dezelfde home -> afzonderlijke CONDITIONAL.
 setup_case multi multiple_databases; printf 'DB1:%s:Y\nDB2:%s:Y\n' "$HOME_DIR" "$HOME_DIR" >"$ORATAB"; assess R2; record 'meerdere databases zelfde home' 10 $? "$CASE_DIR/R2.out"
 
@@ -567,6 +572,75 @@ for summary_id in PATCH_CONFLICT_READINESS TOPOLOGY_READINESS DATABASE_RUNTIME_R
 done
 record 'succesvolle PRECHECK-controles tonen compacte READY-summary' 0 "$summary_rc"
 
+setup_case ojvm-perl
+perl_check_bin="$CASE_DIR/opatch-path"
+perl_check_lib="$CASE_DIR/perl-lib"
+mkdir -p "$perl_check_bin" "$perl_check_lib"
+ln -s -- "$(type -P perl)" "$perl_check_bin/perl"
+printf '\nSAFE_PATH=%s:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n' "$perl_check_bin" >>"$CONFIG"
+printf '\nMOCK_EXECUTE_OJVM_PERL_CHECK=true\nMOCK_OS_VERSION=9.6\n' >>"$FIXTURE_ENV"
+
+PERL5LIB="$perl_check_lib" PERL5OPT='' precheck PERL-OK; rc=$?
+perl_evidence="$RUN_ROOT/PERL-OK/ojvm_perl.log"
+grep -Fq 'severity=READY|id=OJVM_PERL_FILE_COPY|' "$CASE_DIR/PERL-OK.out" &&
+  grep -Fxq "perl_executable=$perl_check_bin/perl" "$perl_evidence" &&
+  grep -Fxq "PERL5LIB=$perl_check_lib" "$perl_evidence" &&
+  grep -Eq '^perl_version=[0-9]+\.[0-9]+\.[0-9]+$' "$perl_evidence" &&
+  grep -Fxq 'file_copy_import=OK' "$perl_evidence" || rc=99
+record_precheck 'PRECHECK importeert File::Copy met Perl uit het OPatch-PATH' 10 "$rc" "$CASE_DIR/PERL-OK.out"
+
+# Laat dezelfde Perl het bestand als ontbrekend ervaren zonder de host aan te passen.
+cat >"$perl_check_lib/WithoutFileCopy.pm" <<'EOF'
+package WithoutFileCopy;
+@INC = grep { !-e "$_/File/Copy.pm" } @INC;
+1;
+EOF
+PERL5LIB="$perl_check_lib" PERL5OPT=-MWithoutFileCopy precheck PERL-MISSING-MODULE; rc=$?
+grep -Fq 'severity=BLOCKED|id=OJVM_PERL_FILE_COPY|message=' "$CASE_DIR/PERL-MISSING-MODULE.out" &&
+  grep -Fq "Can't locate File/Copy.pm" "$RUN_ROOT/PERL-MISSING-MODULE/ojvm_perl.log" || rc=99
+record_precheck 'PRECHECK blokkeert wanneer File::Copy ontbreekt' 20 "$rc" "$CASE_DIR/PERL-MISSING-MODULE.out"
+
+mkdir -p "$perl_check_lib/File"
+cat >"$perl_check_lib/File/Copy.pm" <<'EOF'
+package File::Copy;
+sub import { die "File::Copy import failed in test fixture\n"; }
+1;
+EOF
+PERL5LIB="$perl_check_lib" PERL5OPT='' precheck PERL-BROKEN-IMPORT; rc=$?
+grep -Fq 'BLOCKED|OJVM_PERL_FILE_COPY|' "$RUN_ROOT/PERL-BROKEN-IMPORT/findings.psv" &&
+  grep -Fxq 'File::Copy import failed in test fixture' "$RUN_ROOT/PERL-BROKEN-IMPORT/ojvm_perl.log" || rc=99
+record_precheck 'PRECHECK blokkeert wanneer de aanwezige module niet importeert' 20 "$rc" "$CASE_DIR/PERL-BROKEN-IMPORT.out"
+rm -- "$perl_check_lib/File/Copy.pm"
+
+PERL5LIB="$perl_check_lib" PERL5OPT='' assess PERL-APPLY
+plan PERL-APPLY; token=$(approval PERL-APPLY)
+PERL5LIB="$perl_check_lib" PERL5OPT=-MWithoutFileCopy guard apply --non-interactive --run-id PERL-APPLY \
+  --approved-manifest "$RUN_ROOT/PERL-APPLY/patch_manifest.json" --approval-token "$token" >"$CASE_DIR/perl-apply.out" 2>&1; rc=$?
+grep -Fq '|status=BLOCKED|phase=PREAPPLY|' "$CASE_DIR/perl-apply.out" &&
+  grep -Fq 'BLOCKED|OJVM_PERL_FILE_COPY|' "$RUN_ROOT/PERL-APPLY/preapply_findings.psv" &&
+  grep -Fq "Can't locate File/Copy.pm" "$RUN_ROOT/PERL-APPLY/preapply_ojvm_perl.log" &&
+  ! grep -Eq 'COMMAND_START\|label=(shutdown_|listener_stop_|apply_db_ru\||apply_ojvm\|)' "$RUN_ROOT/PERL-APPLY/commands.log" || rc=99
+record 'PREAPPLY blokkeert een goedgekeurde run wanneer File::Copy verdwijnt' 20 "$rc" "$CASE_DIR/perl-apply.out"
+assert_no_downtime_started 'PREAPPLY met ontbrekende File::Copy start geen downtime' PERL-APPLY
+
+setup_case ojvm-perl-absent
+perl_free_bin="$CASE_DIR/no-perl-bin"
+mkdir -p "$perl_free_bin" "$HOME_DIR/perl/bin"
+ln -s -- "$(type -P perl)" "$HOME_DIR/perl/bin/perl"
+perl_free_tools=()
+for tool_path in /usr/bin/*; do
+  [[ ${tool_path##*/} == perl ]] || perl_free_tools+=("$tool_path")
+done
+ln -s -t "$perl_free_bin" -- "${perl_free_tools[@]}"
+printf '\nSAFE_PATH=%s\n' "$perl_free_bin" >>"$CONFIG"
+printf '\nMOCK_EXECUTE_OJVM_PERL_CHECK=true\n' >>"$FIXTURE_ENV"
+precheck PERL-MISSING; rc=$?
+perl_evidence="$RUN_ROOT/PERL-MISSING/ojvm_perl.log"
+grep -Fq 'BLOCKED|OJVM_PERL_FILE_COPY|' "$RUN_ROOT/PERL-MISSING/findings.psv" &&
+  grep -Fxq 'perl_version=unavailable' "$perl_evidence" &&
+  grep -Fxq 'file_copy_exit_code=127' "$perl_evidence" || rc=99
+record_precheck 'PRECHECK blokkeert wanneer Perl ontbreekt op het OPatch-PATH' 20 "$rc" "$CASE_DIR/PERL-MISSING.out"
+
 setup_case precheckalreadypatched
 cat >>"$FIXTURE_ENV" <<'EOF'
 MOCK_INVENTORY_BEFORE=BOTH
@@ -858,6 +932,258 @@ for signal in TERM INT; do
   [[ "$context_before" == "$(sha256sum "$signal_context" | awk '{print $1}')" ]] || isolation_rc=97
   [[ "$approval_before" == "$(find "$signal_approval_root" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)" ]] || isolation_rc=96
   record "${signal} tijdens PRECHECK schrijft geen formele lifecycle-artifacts" 0 "$isolation_rc"
+done
+
+prepare_active_home_case() {
+  setup_case "$1"
+  assess ACTIVE >/dev/null
+  plan ACTIVE >/dev/null
+  ACTIVE_TOKEN=$(approval ACTIVE)
+  ACTIVE_RUN="$RUN_ROOT/ACTIVE"
+}
+
+active_home_apply() {
+  local route=${1:-apply}
+  guard "$route" --non-interactive --run-id ACTIVE --approved-manifest "$ACTIVE_RUN/patch_manifest.json" \
+    --approval-token "$ACTIVE_TOKEN" >"$CASE_DIR/active.out" 2>&1
+}
+
+active_run_state_and_approval_hashes() {
+  sha256sum -- "$ACTIVE_RUN/execution_state.json" "$ACTIVE_RUN/state_history.log" \
+    "$ACTIVE_RUN/patch_manifest.json" "$ACTIVE_TOKEN"
+}
+
+for verdict in FAILED AMBIGUOUS EMPTY UNKNOWN_TEXT; do
+  prepare_active_home_case "active-native-${verdict/FAILED/negative}"
+  expected=UNKNOWN
+  case "$verdict" in
+    FAILED) expected=BLOCKED ;;
+    EMPTY) verdict='' ;;
+  esac
+  printf '\nMOCK_PREREQ_active_files_before_db_39472050=%s\n' "$verdict" >>"$FIXTURE_ENV"
+  active_home_apply; rc=$?
+  grep -Fq "result=$expected|check=opatch|patch_id=39472050" "$ACTIVE_RUN/last_error.txt" &&
+    grep -Fq '|tool_exit_code=0|' "$ACTIVE_RUN/last_error.txt" &&
+    grep -Fq '|05_DATABASES_STOPPED|PARTIAL|PRE_BINARY_CHECK|' "$ACTIVE_RUN/state_history.log" &&
+    grep -Fq '|status=PARTIAL|phase=PRE_BINARY_CHECK|' "$CASE_DIR/active.out" &&
+    [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" && ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
+  record "native prereq '${verdict:-lege uitvoer}' met exit 0 stopt vóór DB-RU" 40 "$rc" "$CASE_DIR/active.out"
+done
+
+for mode in missing noexec visibility; do
+  prepare_active_home_case "active-preapply-$mode"
+  case "$mode" in
+    missing) mv -- "$HOME_DIR/OPatch/opatch" "$HOME_DIR/OPatch/offline" ;;
+    noexec) chmod a-x "$HOME_DIR/OPatch/opatch" ;;
+    visibility) printf '\nMOCK_RC_preapply_active_home_visibility=30\n' >>"$FIXTURE_ENV" ;;
+  esac
+  active_home_apply; rc=$?
+  grep -Eq 'ACTIVE_HOME_(TOOL_UNAVAILABLE|VISIBILITY_UNKNOWN)' "$ACTIVE_RUN/preapply_findings.psv" || rc=99
+  record "PREAPPLY meldt $mode" 30 "$rc" "$CASE_DIR/active.out"
+  assert_no_downtime_started "PREAPPLY $mode stopt vóór downtime" ACTIVE
+done
+
+prepare_active_home_case active-ojvm-upfront
+printf '\nMOCK_PREREQ_active_files_before_db_39222882=FAILED\n' >>"$FIXTURE_ENV"
+active_home_apply; rc=$?
+grep -Fq 'result=BLOCKED|check=opatch|patch_id=39222882' "$ACTIVE_RUN/last_error.txt" &&
+  [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" ]] || rc=99
+record 'OJVM-prereq blokkeert ook vóór de eerste DB-RU-apply' 40 "$rc" "$CASE_DIR/active.out"
+
+for stage in before_db before_ojvm; do
+  prepare_active_home_case "active-files-$stage"
+  printf '\nMOCK_RC_active_home_%s=20\n' "$stage" >>"$FIXTURE_ENV"
+  active_home_apply; rc=$?
+  grep -Fq 'result=BLOCKED|check=files' "$ACTIVE_RUN/last_error.txt" &&
+    grep -Fq 'libclntsh.so.19.1' "$ACTIVE_RUN/active_home_$stage.log" &&
+    [[ ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
+  if [[ "$stage" == before_db ]]; then
+    [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" ]] || rc=98
+  else
+    grep -Fq '|06_DB_BINARY_APPLIED|PARTIAL|PRE_BINARY_CHECK|' "$ACTIVE_RUN/state_history.log" || rc=98
+  fi
+  record "bestandsgebruik stopt $stage ondanks native PASSED" 40 "$rc" "$CASE_DIR/active.out"
+done
+
+for stage in before_db before_ojvm; do
+  prepare_active_home_case "active-incomplete-$stage"
+  printf '\nMOCK_RC_active_home_%s=30\n' "$stage" >>"$FIXTURE_ENV"
+  active_home_apply; rc=$?
+  grep -Fq 'result=UNKNOWN|check=files' "$ACTIVE_RUN/last_error.txt" &&
+    grep -Fq '|tool_exit_code=30|' "$ACTIVE_RUN/last_error.txt" &&
+    [[ ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
+  if [[ "$stage" == before_db ]]; then
+    [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" ]] || rc=98
+  else
+    grep -Fq '|06_DB_BINARY_APPLIED|PARTIAL|PRE_BINARY_CHECK|' "$ACTIVE_RUN/state_history.log" || rc=98
+  fi
+  record "onvolledig proceszicht geeft geen vrijgave $stage" 40 "$rc" "$CASE_DIR/active.out"
+done
+
+prepare_active_home_case active-timeout
+printf '\nMOCK_RC_active_home_before_db=124\n' >>"$FIXTURE_ENV"
+active_home_apply; rc=$?
+grep -Fq 'result=UNKNOWN|check=files' "$ACTIVE_RUN/last_error.txt" &&
+  grep -Fq '|tool_exit_code=124|' "$ACTIVE_RUN/last_error.txt" &&
+  [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" ]] || rc=99
+record 'timeout op bestandscontrole geeft geen vrijgave' 40 "$rc" "$CASE_DIR/active.out"
+
+prepare_active_home_case active-shutdown
+printf '\nMOCK_SHUTDOWN_STILL_ACTIVE=true\n' >>"$FIXTURE_ENV"
+active_home_apply; rc=$?
+grep -Fq 'result=BLOCKED|check=shutdown' "$ACTIVE_RUN/last_error.txt" &&
+  [[ ! -e "$ACTIVE_RUN/active_files_before_db_39472050.log" && ! -e "$ACTIVE_RUN/apply_db_ru.log" ]] || rc=99
+record 'onvolledige shutdown stopt ook de native prereq' 40 "$rc" "$CASE_DIR/active.out"
+
+for state in OPATCH_READY 06_DB_BINARY_APPLIED; do
+  prepare_active_home_case "active-resume-$state"
+  if [[ "$state" == OPATCH_READY ]]; then
+    phase=OPATCH_UPGRADE; stage=before_db
+  else
+    phase=DB_BINARY; stage=resume_ojvm
+  fi
+  sed -i "s/\"state\": \"03_PLAN_GENERATED\"/\"state\": \"$state\"/; s/\"phase\": \"PLAN\"/\"phase\": \"$phase\"/" "$ACTIVE_RUN/execution_state.json"
+  printf '\nMOCK_RC_active_home_%s=20\n' "$stage" >>"$FIXTURE_ENV"
+  active_home_apply resume; rc=$?
+  grep -Fq '|status=PARTIAL|phase=PRE_BINARY_CHECK|' "$CASE_DIR/active.out" &&
+    [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" && ! -e "$ACTIVE_RUN/apply_ojvm_resume.log" ]] || rc=99
+  record "resume uit $state respecteert bestandscontrole" 40 "$rc" "$CASE_DIR/active.out"
+done
+
+prepare_active_home_case ojvm-perl-resume
+sed -i 's/"state": "03_PLAN_GENERATED"/"state": "OPATCH_READY"/; s/"phase": "PLAN"/"phase": "OPATCH_UPGRADE"/' "$ACTIVE_RUN/execution_state.json"
+perl_resume_state=$(sha256sum "$ACTIVE_RUN/execution_state.json")
+printf '\nMOCK_RC_resume_ojvm_perl=2\n' >>"$FIXTURE_ENV"
+active_home_apply resume; rc=$?
+grep -Fq '|status=BLOCKED|phase=PREAPPLY|' "$CASE_DIR/active.out" &&
+  grep -Fxq 'file_copy_import=FAILED' "$ACTIVE_RUN/resume_ojvm_perl.log" &&
+  [[ "$perl_resume_state" == "$(sha256sum "$ACTIVE_RUN/execution_state.json")" ]] || rc=99
+record 'resume vóór shutdown blokkeert bij importfout en behoudt het checkpoint' 20 "$rc" "$CASE_DIR/active.out"
+assert_no_downtime_started 'resume met ontbrekende File::Copy start geen downtime' ACTIVE
+
+for state in PARTIAL 06_DB_BINARY_APPLIED; do
+  prepare_active_home_case "ojvm-perl-binary-resume-$state"
+  if [[ "$state" == PARTIAL ]]; then
+    printf '\nMOCK_RC_apply_db_ru=73\n' >>"$FIXTURE_ENV"
+    expected=40
+  else
+    printf '\nMOCK_RC_ojvm_perl_before_ojvm=2\n' >>"$FIXTURE_ENV"
+    expected=20
+  fi
+  active_home_apply; rc=$?
+  grep -Fq "\"state\": \"$state\"" "$ACTIVE_RUN/execution_state.json" &&
+    [[ -e "$ACTIVE_RUN/shutdown_DB1.log" && ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
+  record "APPLY laat $state achter voor RESUME" "$expected" "$rc" "$CASE_DIR/active.out"
+  sed -i '/^MOCK_RC_apply_db_ru=/d; /^MOCK_RC_ojvm_perl_before_ojvm=/d' "$FIXTURE_ENV"
+
+  before=$(active_run_state_and_approval_hashes)
+  printf '\nMOCK_EXECUTE_OJVM_PERL_CHECK=true\n' >>"$FIXTURE_ENV"
+  PERL5LIB="$perl_check_lib" PERL5OPT=-MWithoutFileCopy active_home_apply resume; rc=$?
+  grep -Fq '|status=BLOCKED|phase=PRE_BINARY_CHECK|' "$CASE_DIR/active.out" &&
+    grep -Fq 'Hervat na herstel dezelfde run via RESUME' "$CASE_DIR/active.out" &&
+    grep -Fq 'De databases blijven gestopt.' "$CASE_DIR/active.out" &&
+    grep -Fq "Can't locate File/Copy.pm" "$ACTIVE_RUN/ojvm_perl_resume_ojvm.log" &&
+    ! grep -Eq 'COMMAND_START\|label=(apply_ojvm\||startup_)' "$ACTIVE_RUN/commands.log" &&
+    [[ "$before" == "$(active_run_state_and_approval_hashes)" ]] || rc=99
+  record "RESUME $state: ontbrekende File::Copy bewaart state en blokkeert OJVM" 20 "$rc" "$CASE_DIR/active.out"
+
+  PERL5LIB="$perl_check_lib" PERL5OPT='' active_home_apply resume; rc=$?
+  [[ $(grep -Fc 'COMMAND_START|label=apply_db_ru|' "$ACTIVE_RUN/commands.log") == 1 &&
+     $(grep -Fc 'COMMAND_START|label=apply_ojvm|' "$ACTIVE_RUN/commands.log") == 1 &&
+     $(grep -Fc 'COMMAND_START|label=shutdown_DB1|' "$ACTIVE_RUN/commands.log") == 1 ]] || rc=99
+  record "RESUME $state voltooit na herstel van File::Copy" 0 "$rc" "$CASE_DIR/active.out"
+done
+
+prepare_active_home_case active-sequence
+active_home_apply; rc=$?
+actual=$(sed -nE 's/.*COMMAND_START\|label=((active_files|active_home|apply_db_ru|apply_ojvm|ojvm_perl_before_ojvm)[^|]*)\|.*/\1/p' "$ACTIVE_RUN/commands.log" | paste -sd, -)
+[[ "$actual" == active_files_before_db_39472050,active_files_before_db_39222882,active_home_before_db,apply_db_ru,active_files_before_ojvm_39222882,active_home_before_ojvm,ojvm_perl_before_ojvm,apply_ojvm ]] || rc=99
+record 'vrijgegeven home behoudt de DB-RU en OJVM-volgorde' 0 "$rc" "$CASE_DIR/active.out"
+
+for stage in before_db before_ojvm; do
+  prepare_active_home_case "retry-$stage"
+  printf '\nMOCK_RC_active_home_%s=20\n' "$stage" >>"$FIXTURE_ENV"
+  active_home_apply; rc=$?
+  grep -Fq 'OEM Retry : ALLOWED' "$CASE_DIR/active.out" &&
+    grep -Fq 'pid=123' "$CASE_DIR/active.out" &&
+    [[ ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
+  record "OEM markeert $stage als Failed met DBA-instructie" 40 "$rc" "$CASE_DIR/active.out"
+  active_home_apply; rc=$?
+  grep -Fq 'OEM Retry : ALLOWED' "$CASE_DIR/active.out" && [[ ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
+  record "retry $stage blijft geblokkeerd zolang proces actief is" 40 "$rc" "$CASE_DIR/active.out"
+  sed -i "/^MOCK_RC_active_home_${stage}=/d" "$FIXTURE_ENV"
+  before=$(active_run_state_and_approval_hashes)
+  printf '\nMOCK_EXECUTE_OJVM_PERL_CHECK=true\n' >>"$FIXTURE_ENV"
+  PERL5LIB="$perl_check_lib" PERL5OPT=-MWithoutFileCopy active_home_apply; rc=$?
+  if [[ "$stage" == before_db && -e "$ACTIVE_RUN/apply_db_ru.log" ]]; then
+    rc=99
+  fi
+  grep -Fq '|status=BLOCKED|phase=PRE_BINARY_CHECK|' "$CASE_DIR/active.out" &&
+    grep -Fq 'De databases blijven gestopt.' "$CASE_DIR/active.out" &&
+    grep -Fq 'Gebruik na herstel OEM Retry voor dezelfde run' "$CASE_DIR/active.out" &&
+    grep -Fq "Can't locate File/Copy.pm" "$ACTIVE_RUN/ojvm_perl_$stage.log" &&
+    ! grep -Eq 'COMMAND_START\|label=(apply_ojvm\||startup_)' "$ACTIVE_RUN/commands.log" &&
+    [[ "$before" == "$(active_run_state_and_approval_hashes)" ]] || rc=99
+  record "retry $stage: ontbrekende File::Copy blokkeert en bewaart het checkpoint" 20 "$rc" "$CASE_DIR/active.out"
+
+  PERL5LIB="$perl_check_lib" PERL5OPT='' active_home_apply; rc=$?
+  [[ $(grep -c 'COMMAND_START|label=apply_db_ru|' "$ACTIVE_RUN/commands.log") == 1 &&
+     $(grep -c 'COMMAND_START|label=apply_ojvm|' "$ACTIVE_RUN/commands.log") == 1 &&
+     $(grep -c 'COMMAND_START|label=shutdown_DB1|' "$ACTIVE_RUN/commands.log") == 1 ]] || rc=99
+  record "retry $stage hervat dezelfde run en past RU eenmaal toe" 0 "$rc" "$CASE_DIR/active.out"
+done
+
+prepare_active_home_case retry-perl-late
+printf '\nMOCK_RC_active_home_before_db=20\n' >>"$FIXTURE_ENV"
+active_home_apply; rc=$?
+grep -Fq 'OEM Retry : ALLOWED' "$CASE_DIR/active.out" || rc=99
+record 'retry before_db: readiness publiceert het checkpoint' 40 "$rc" "$CASE_DIR/active.out"
+sed -i '/^MOCK_RC_active_home_before_db=/d' "$FIXTURE_ENV"
+printf '\nMOCK_RC_ojvm_perl_before_ojvm=2\n' >>"$FIXTURE_ENV"
+active_home_apply; rc=$?
+grep -Fq '|status=BLOCKED|phase=PRE_BINARY_CHECK|' "$CASE_DIR/active.out" &&
+  grep -Fq 'Hervat na herstel dezelfde run via RESUME' "$CASE_DIR/active.out" &&
+  grep -Fxq 'file_copy_import=OK' "$ACTIVE_RUN/ojvm_perl_before_db.log" &&
+  grep -Fxq 'file_copy_import=FAILED' "$ACTIVE_RUN/ojvm_perl_before_ojvm.log" &&
+  grep -Fq '"state": "06_DB_BINARY_APPLIED"' "$ACTIVE_RUN/execution_state.json" &&
+  tail -1 "$ACTIVE_RUN/state_history.log" | grep -Fq '|RETRY_BINARY_STARTED|06_DB_BINARY_APPLIED|DB_BINARY|' &&
+  ! grep -Eq 'COMMAND_START\|label=(apply_ojvm\||startup_)' "$ACTIVE_RUN/commands.log" || rc=99
+record 'retry before_db hercontroleert vóór OJVM en bewaart de voltooide RU-state' 20 "$rc" "$CASE_DIR/active.out"
+
+sed -i '/^MOCK_RC_ojvm_perl_before_ojvm=/d' "$FIXTURE_ENV"
+active_home_apply resume; rc=$?
+[[ $(grep -Fc 'COMMAND_START|label=apply_db_ru|' "$ACTIVE_RUN/commands.log") == 1 &&
+   $(grep -Fc 'COMMAND_START|label=apply_ojvm|' "$ACTIVE_RUN/commands.log") == 1 &&
+   $(grep -Fc 'COMMAND_START|label=shutdown_DB1|' "$ACTIVE_RUN/commands.log") == 1 ]] || rc=99
+record 'RESUME voltooit na herstel zonder RU of shutdown te herhalen' 0 "$rc" "$CASE_DIR/active.out"
+
+for case_name in approval window inventory media lock history binary; do
+  prepare_active_home_case "retry-deny-$case_name"
+  printf '\nMOCK_RC_active_home_before_db=20\n' >>"$FIXTURE_ENV"
+  active_home_apply
+  sed -i '/^MOCK_RC_active_home_before_db=/d' "$FIXTURE_ENV"
+  expected=20
+  case "$case_name" in
+    approval) ACTIVE_TOKEN=$(approval ACTIVE "$(( $(date +%s) - 60 ))") ;;
+    window) printf '\nMOCK_CHECK_MAINTENANCE_WINDOW=BLOCKED\n' >>"$FIXTURE_ENV" ;;
+    inventory) printf '\nMOCK_RETRY_INVENTORY_EXTRA="1234;Unexpected patch"\n' >>"$FIXTURE_ENV" ;;
+    media) printf 'changed\n' >>"$PATCH_ROOT/JUL2026/39472050/payload.bin" ;;
+    lock) printf '\nMOCK_LOCK_BUSY=true\n' >>"$FIXTURE_ENV"; expected=60 ;;
+    history) printf 'incomplete publication\n' >>"$ACTIVE_RUN/state_history.log" ;;
+    binary)
+      printf '\nMOCK_RC_apply_db_ru=73\n' >>"$FIXTURE_ENV"
+      active_home_apply; rc=$?
+      grep -Fq 'OEM Retry : NOT ALLOWED' "$CASE_DIR/active.out" || rc=99
+      record 'mislukte DB-RU na retry verbruikt checkpoint' 40 "$rc" "$CASE_DIR/active.out" ;;
+  esac
+  active_home_apply; rc=$?
+  [[ ! -e "$ACTIVE_RUN/apply_ojvm.log" ]] || rc=99
+  if [[ "$case_name" == binary ]]; then
+    [[ $(grep -c 'COMMAND_START|label=apply_db_ru|' "$ACTIVE_RUN/commands.log") == 1 ]] || rc=99
+  else
+    [[ ! -e "$ACTIVE_RUN/apply_db_ru.log" ]] || rc=99
+  fi
+  record "retry weigert $case_name" "$expected" "$rc" "$CASE_DIR/active.out"
 done
 
 printf '\nResultaat: %s geslaagd, %s mislukt\n' "$PASS" "$FAIL"

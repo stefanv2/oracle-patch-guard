@@ -343,8 +343,37 @@ opg_mock_command() {
         mock_active_version=$(<"${TARGET_ORACLE_HOME}/OPatch/.opg-version")
       fi
       printf 'OPatch Version: %s\n' "$mock_active_version" >>"$output_file" ;;
+    ojvm_perl|preapply_ojvm_perl|resume_ojvm_perl|ojvm_perl_*)
+      printf 'perl_version=5.32.1\n' >>"$output_file"
+      if (( rc == 0 )); then
+        printf 'file_copy_import=OK\n' >>"$output_file"
+      fi ;;
     conflict_db_ru|conflict_ojvm)
       printf 'Prereq CheckConflictAgainstOHWithDetail passed.\n' >>"$output_file" ;;
+    active_files_*)
+      local prereq_patch=${label##*_}
+      variable="MOCK_PREREQ_${label}"
+      case "${!variable-PASSED}" in
+        PASSED) printf 'Prereq "checkActiveFilesAndExecutables" for patch %s passed.\n' "$prereq_patch" >>"$output_file" ;;
+        FAILED) printf 'Prereq "checkActiveFilesAndExecutables" for patch %s failed.\n' "$prereq_patch" >>"$output_file" ;;
+        AMBIGUOUS) printf 'Prereq "checkActiveFilesAndExecutables" for patch %s passed.\nPrereq "checkActiveFilesAndExecutables" for patch %s failed.\n' "$prereq_patch" "$prereq_patch" >>"$output_file" ;;
+        '') : >"$output_file" ;;
+        *) printf '%s\n' "${!variable}" >>"$output_file" ;;
+      esac ;;
+    active_home_before_*|active_home_resume_*)
+      case "$rc" in
+        "$EXIT_OK") printf 'ACTIVE_HOME_SCAN_CLEAR\n' >>"$output_file" ;;
+        "$EXIT_BLOCKED") printf 'LSOF_RESULT|exit_code=0\nACTIVE_HOME_FILE|pid=123|uid=1000|process="sqlplus"|file="%s/lib/libclntsh.so.19.1"\n' "$TARGET_ORACLE_HOME" >>"$output_file" ;;
+      esac ;;
+    preapply_active_home_visibility)
+      printf 'PROC_COVERAGE_CONFIRMED\n' >>"$output_file" ;;
+    retry_inventory_before_db|retry_inventory_before_ojvm)
+      if [[ "$label" == retry_inventory_before_ojvm ]]; then
+        printf '%s;Database RU\n' "$DB_PATCH" >"$output_file"
+      else
+        : >"$output_file"
+      fi
+      printf '%s\nOPatch succeeded.\n' "${MOCK_RETRY_INVENTORY_EXTRA:-}" >>"$output_file" ;;
     datapatch_sqlpatch_*|validation_sqlpatch_*)
       local sqlpatch_sid expected_file expected_con_id expected_name expected_patch mock_status=${MOCK_DATAPATCH_SQLPATCH_STATUS:-SUCCESS}
       sqlpatch_sid=${label#*_sqlpatch_}

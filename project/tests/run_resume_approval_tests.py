@@ -116,6 +116,8 @@ opg_release_lock() { :; }
 opg_prepare_database_baseline_snapshot() { :; }
 verify_resume_environment() { :; }
 verify_resume_listener_progress() { :; }
+check_ojvm_perl() { :; }
+require_ojvm_perl_after_shutdown() { :; }
 opg_write_state() { :; }
 opg_run_capture() {
   printf '111\n' >"$2"
@@ -127,6 +129,7 @@ mutation() { printf 'mutation\n' >>"$RUN_DIR/mutations"; }
 perform_opatch_upgrade() { mutation; }
 stop_databases() { mutation; }
 apply_binary_patches() { mutation; }
+require_binary_home_ready() { :; }
 start_original_databases() { mutation; }
 register_original_databases() { mutation; }
 start_original_listeners() { mutation; }
