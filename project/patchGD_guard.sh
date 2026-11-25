@@ -101,6 +101,7 @@ SAFE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EMCTL_PATH=
 MANAGE_LISTENERS=true
 LISTENER_NAMES="LISTENER"
+ACTIVE_HOME_INSPECTION_MODE=local
 BACKUP_CHECK_COMMAND=
 EXPECTED_SBT_LIBRARY=
 EXPECTED_BACKUP_HOST=
@@ -162,6 +163,9 @@ for numeric_setting in INTEGRITY_CHECK_TIMEOUT_SECONDS LISTENER_STOP_TIMEOUT_SEC
   [[ ${!numeric_setting:-} =~ ^[1-9][0-9]*$ ]] || { printf 'Ongeldige positieve integer voor %s.\n' "$numeric_setting" >&2; exit "$EXIT_INVALID_PARAMS"; }
 done
 [[ "$OPATCH_UPGRADE_MIN_FREE_MB" =~ ^[0-9]+$ ]] || { printf 'Ongeldige niet-negatieve integer voor OPATCH_UPGRADE_MIN_FREE_MB.\n' >&2; exit "$EXIT_INVALID_PARAMS"; }
+[[ "$ACTIVE_HOME_INSPECTION_MODE" == local || "$ACTIVE_HOME_INSPECTION_MODE" == privileged ]] || {
+  printf 'ACTIVE_HOME_INSPECTION_MODE moet local of privileged zijn.\n' >&2; exit "$EXIT_INVALID_PARAMS"
+}
 export PATH=$SAFE_PATH
 
 if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then
@@ -1825,7 +1829,7 @@ perform_preapply_recheck() {
   if ! missing_tool=$(check_active_home_tools); then
     preapply_add UNKNOWN ACTIVE_HOME_TOOL_UNAVAILABLE "Vereiste tool voor Active Oracle Home Readiness ontbreekt of is niet bruikbaar." "$missing_tool"
   elif ! preapply_active_home_visibility; then
-    preapply_add UNKNOWN ACTIVE_HOME_VISIBILITY_UNKNOWN "Vereist proceszicht is vóór shutdown niet aantoonbaar onder de uitvoerende gebruiker." "${RUN_DIR}/preapply_active_home_visibility.log"
+    preapply_add UNKNOWN ACTIVE_HOME_VISIBILITY_UNKNOWN "Vereist proceszicht is vóór shutdown niet aantoonbaar met de ingestelde inspectiemethode." "${RUN_DIR}/preapply_active_home_visibility.log"
   fi
   detect_home_processes preapply
   if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then
@@ -2599,13 +2603,58 @@ check_active_home_tools() {
   fi
 }
 
+active_home_executable_trusted() {
+  local path=$1 mode=$2 parent identity parent_mode
+  [[ -f "$path" && -x "$path" && ! -L "$path" && ! -w "$path" ]] || return 1
+  [[ "$(/usr/bin/stat -c '%u:%g:%a' -- "$path" 2>/dev/null)" == "0:0:$mode" ]] || return 1
+  parent=${path%/*}
+  while :; do
+    [[ -d "$parent" && ! -L "$parent" && ! -w "$parent" ]] || return 1
+    identity=$(/usr/bin/stat -c '%u:%a' -- "$parent" 2>/dev/null) || return 1
+    parent_mode=${identity#*:}
+    [[ "$identity" =~ ^0:[0-7]{3,4}$ ]] && (( (8#$parent_mode & 0022) == 0 )) || return 1
+    [[ "$parent" != / ]] || return 0
+    parent=${parent%/*}; [[ -n "$parent" ]] || parent=/
+  done
+}
+
+run_active_home_inspection() {
+  local label=$1 output=$2 mode=$3 rc subject=$TARGET_ORACLE_HOME verdict ready_marker=ACTIVE_HOME_SCAN_CLEAR
+  if [[ "$mode" == visibility ]]; then
+    subject=--visibility
+    ready_marker=PROC_COVERAGE_CONFIRMED
+  fi
+  if [[ "$ACTIVE_HOME_INSPECTION_MODE" == local ]]; then
+    opg_run_capture "$label" "$output" env LC_ALL=C /usr/bin/python3 -I \
+      "${SCRIPT_DIR}/lib/opg_active_home.py" "$subject"
+    return $?
+  fi
+
+  local sudo=/usr/bin/sudo helper=/usr/local/sbin/opg_active_home_inspect
+  if ! active_home_executable_trusted "$sudo" 4755 || ! active_home_executable_trusted "$helper" 755; then
+    printf 'OPG_ACTIVE_HOME_INSPECTION_UNKNOWN|reason=missing_or_untrusted_executable\n' >"$output"
+    return "$EXIT_UNKNOWN"
+  fi
+  opg_run_capture "$label" "$output" "$sudo" -n -u root -- "$helper" "$mode" </dev/null; rc=$?
+  verdict=$(grep '^OPG_ACTIVE_HOME_INSPECTION|' "$output")
+  if [[ "$verdict" == "OPG_ACTIVE_HOME_INSPECTION|mode=$mode|home=$TARGET_ORACLE_HOME|exit_code=$rc" ]]; then
+    case "$mode:$rc" in
+      visibility:0|scan:0)
+        grep -Fxq "$ready_marker" "$output" &&
+          ! grep -Eq '^(ACTIVE_HOME_FILE|PROC_COVERAGE_UNKNOWN|OPG_ACTIVE_HOME_INSPECTION_UNKNOWN)\|' "$output" && return 0 ;;
+      scan:20) grep -q '^ACTIVE_HOME_FILE|' "$output" && return "$EXIT_BLOCKED" ;;
+    esac
+  fi
+  printf 'OPG_ACTIVE_HOME_INSPECTION_UNKNOWN|reason=unconfirmed_bound_result|tool_exit_code=%s\n' "$rc" >>"$output"
+  return "$EXIT_UNKNOWN"
+}
+
 preapply_active_home_visibility() {
   # Used by opg_run_capture from the sourced core library.
   # shellcheck disable=SC2034
   local COMMAND_TIMEOUT_SECONDS=60
   local output="${RUN_DIR}/preapply_active_home_visibility.log"
-  opg_run_capture preapply_active_home_visibility "$output" \
-    env LC_ALL=C /usr/bin/python3 -I "${SCRIPT_DIR}/lib/opg_active_home.py" --visibility &&
+  run_active_home_inspection preapply_active_home_visibility "$output" visibility &&
     grep -Fxq 'PROC_COVERAGE_CONFIRMED' "$output"
 }
 
@@ -2679,8 +2728,7 @@ require_binary_home_ready() {
   done
 
   output="${RUN_DIR}/active_home_${stage}.log"
-  opg_run_capture "active_home_${stage}" "$output" env LC_ALL=C /usr/bin/python3 -I \
-    "${SCRIPT_DIR}/lib/opg_active_home.py" "$TARGET_ORACLE_HOME"; rc=$?
+  run_active_home_inspection "active_home_${stage}" "$output" scan; rc=$?
   case "$rc" in
     0)
       if [[ -n "$failed_patch" ]]; then
@@ -3333,6 +3381,12 @@ perform_resume() {
   OPG_READ_ONLY_PHASE=false
   case "$CURRENT_STATE:$CURRENT_PHASE" in
     MEDIA_VALIDATED:OPATCH_UPGRADE|OPATCH_STAGED:OPATCH_UPGRADE|OPATCH_BACKED_UP:OPATCH_UPGRADE|OPATCH_INSTALLED_UNVERIFIED:OPATCH_UPGRADE|OPATCH_READY:OPATCH_UPGRADE|PARTIAL:OPATCH_STAGED|PARTIAL:OPATCH_BACKED_UP|PARTIAL:OPATCH_INSTALLED_UNVERIFIED)
+      if [[ ${ACTIVE_HOME_INSPECTION_MODE:-local} == privileged ]] &&
+         ! preapply_active_home_visibility; then
+        opg_log ERROR "Active Home-proceszicht vóór shutdown is onbekend. Zie ${RUN_DIR}/preapply_active_home_visibility.log."
+        opg_result_line "$EXIT_UNKNOWN" UNKNOWN PREAPPLY
+        return "$EXIT_UNKNOWN"
+      fi
       local perl_evidence="${RUN_DIR}/resume_ojvm_perl.log"
       if ! check_ojvm_perl resume_ojvm_perl "$perl_evidence"; then
         opg_log ERROR "OJVM_PERL_FILE_COPY|$OJVM_PERL_DBA_ACTION Zie $perl_evidence."

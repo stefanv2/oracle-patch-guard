@@ -147,15 +147,28 @@ def process_identity(proc_fd):
         return "UNKNOWN", b""
 
 
+def report_hits(hits):
+    for hit in sorted(hits, key=lambda item: (item[0], item[3])):
+        report_hit(*hit)
+
+
+def inspect_proc(home):
+    hits, incomplete = scan_proc(home)
+    if incomplete:
+        print("PROC_COVERAGE_UNKNOWN|" + incomplete)
+    if hits:
+        report_hits(hits)
+        return 20
+    if incomplete:
+        return 30
+    print("PROC_COVERAGE_CONFIRMED" if home is None else "ACTIVE_HOME_SCAN_CLEAR")
+    return 0
+
+
 def main(home, advisory=False):
     try:
         if home == "--visibility":
-            _, incomplete = scan_proc(None)
-            if incomplete:
-                print("PROC_COVERAGE_UNKNOWN|" + incomplete)
-                return 30
-            print("PROC_COVERAGE_CONFIRMED")
-            return 0
+            return inspect_proc(None)
         home = os.fsencode(home)
         result = subprocess.run(
             ["lsof", "-nP", "-a", "-d", "txt,mem,DEL", "-F0pcuftn"],
@@ -182,17 +195,9 @@ def main(home, advisory=False):
         if not hits:
             # lsof can omit mappings silently. Its empty result needs independent
             # corroboration, including cross-UID visibility of live processes.
-            hits, incomplete = scan_proc(home)
-            if incomplete:
-                print("PROC_COVERAGE_UNKNOWN|" + incomplete)
-                if not hits:
-                    return 30
-        for hit in sorted(hits, key=lambda item: (item[0], item[3])):
-            report_hit(*hit)
-        if hits:
-            return 20
-        print("ACTIVE_HOME_SCAN_CLEAR")
-        return 0
+            return inspect_proc(home)
+        report_hits(hits)
+        return 20
     except (OSError, ValueError) as error:
         print("FILE_INSPECTION_UNKNOWN|reason={}".format(json.dumps(str(error))))
         return 30
