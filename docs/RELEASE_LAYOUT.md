@@ -19,6 +19,7 @@ releases/<unieke-release-id>/
 │   ├── opg_assess_task.sh
 │   ├── opg_stage_approval.sh
 │   ├── opg_blackout.py
+│   ├── opg_active_home_inspect.py
 │   ├── opg_bootstrap_host.sh
 │   ├── opg_build_artifact_manifest.py
 │   ├── opg_context_root.sh
@@ -29,6 +30,8 @@ releases/<unieke-release-id>/
 │   ├── oem_assess.sh
 │   ├── oem_apply.sh
 │   ├── lib/
+│   │   ├── opg_core.sh
+│   │   └── opg_active_home.py
 │   └── checks/
 ├── config/examples/
 └── artifact_manifest.schema.json

@@ -57,9 +57,11 @@ rc=0
 for script in "$OEM_SOURCE"/*.sh; do
   bash -n "$script" || rc=1
 done
-python3 -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' \
-  "$OEM_SOURCE/opg_blackout.py" || rc=1
-record 'OEM-releasebron slaagt voor shell- en Python-syntax' "$rc"
+for helper in "$OEM_SOURCE/opg_blackout.py" "$OEM_SOURCE/opg_active_home_inspect.py" "$ROOT/project/lib/opg_active_home.py"; do
+  [[ -f "$helper" && ! -L "$helper" ]] &&
+    python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))' "$helper" || rc=1
+done
+record 'releasebron bevat Python-helpers en slaagt voor shell- en Python-syntax' "$rc"
 
 printf '\nRelease-layout results: %d passed, %d failed\n' "$passed" "$failed"
 [[ $failed -eq 0 ]]

@@ -240,6 +240,8 @@ for runtime in "$BASE/oem-tasks/opg_oem.sh" "$BASE/project/patchGD_guard.sh"; do
     [[ -f "$runtime" && -x "$runtime" && ! -L "$runtime" ]] || fail "release-runtime ontbreekt: $runtime"
 done
 [[ -f "$BASE/project/lib/opg_core.sh" && -r "$BASE/project/lib/opg_core.sh" ]] || fail "core-library ontbreekt"
+[[ -f "$BASE/project/lib/opg_active_home.py" && -r "$BASE/project/lib/opg_active_home.py" && ! -L "$BASE/project/lib/opg_active_home.py" ]] ||
+  fail "Active Oracle Home-helper ontbreekt of is onveilig"
 
 # Read-only destination preflight. No installed file or directory changes until
 # every incoming artifact and existing installation prerequisite has passed.

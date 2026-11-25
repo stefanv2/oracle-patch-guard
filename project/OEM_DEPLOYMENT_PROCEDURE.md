@@ -15,6 +15,7 @@ Plaats root-owned, niet door het OEM-agentaccount wijzigbare kopieën onder bijv
 patchGD_guard.sh
 patchGD_guard.conf
 lib/opg_core.sh
+lib/opg_active_home.py
 oem_assess.sh
 oem_apply.sh
 oem_status.sh
@@ -27,6 +28,116 @@ Na overdracht vanuit de Windows-zip moeten Linux-owner en modes expliciet worden
 Vul het root-owned, niet group/world-writable `/etc/oracle-patch-guard/patchGD_guard.conf` met exacte patch-, inventory-, log-, lock-, listener- en agentpaden. De back-up-, Oracle Home-recovery-, Data Pump-, Data Guard- en onderhoudsvensterhooks moeten argumentloze, read-only executables zijn met 0 voor aantoonbaar veilig, 2 voor onveilig en 3 voor onbekend. Niet configureren levert nooit fictief succes op.
 
 ## 2. Uitvoerende gebruiker en minimale sudo
+
+Voor APPLY moeten `lsof`, `timeout` en Python 3 beschikbaar zijn. De verplichte
+procesinspectie draait standaard als de Oracle Home-owner. Vóór shutdown controleert
+PREAPPLY de procfs-toegang. Vóór de RU en opnieuw vóór OJVM controleert OPG de
+actieve executables en mappings. Een aangetoonde treffer geeft `BLOCKED`
+(detector-exitcode 20). Zonder treffer geeft ontbrekend proceszicht
+`UNKNOWN` (30), voor iedere UID. Een verdwenen PID telt alleen als afgehandeld
+als procfs zijn afwezigheid bevestigt. Voor een nog aanwezige PID zonder
+leesbare executable vereist de detector leesbare, lege maps en één thread.
+De scan is een momentopname binnen de zichtbare PID- en mountnamespace.
+Houd clients stil tijdens het onderhoud en kwalificeer de scan in de
+hostnamespace.
+
+Op OL9 kan `(sd-pam)` dezelfde UID hebben als `oracle` en toch onleesbare
+`maps` hebben. De upstream PAM-child wisselt van effectieve UID en GID.
+Linux reset daarbij de dumpable-status en baseert procfs-toegang onder meer
+op die status, capabilities en SELinux-beleid. Dit verklaart waarom een
+gelijke UID op zichzelf geen toegang bewijst.
+[systemd 252-broncode](https://raw.githubusercontent.com/systemd/systemd/v252/src/core/execute.c)
+[Linux dumpable-status](https://man7.org/linux/man-pages/man2/PR_SET_DUMPABLE.2const.html)
+[Linux ptrace-toegangsregels](https://man7.org/linux/man-pages/man2/ptrace.2.html)
+
+### Read-only helper bij beperkt proceszicht
+
+Laat de DBA op een representatieve OL9.9-acceptatiehost de read-only detector
+uitvoeren als de Oracle Home-owner, met de OEM-omgeving en dezelfde procfs-mount.
+Gebruik een vertrouwde kopie van `lib/opg_active_home.py` met
+`/usr/bin/python3 -I`. Test eerst `--visibility` en daarna het scanargument
+met een canonieke fixturehome. Houd een bestand in die fixturehome gemapt
+onder een andere UID en maak de mapping daarna vrij. Verwacht 20 voor de
+zichtbare mapping en 0 na vrijgave bij volledige dekking. Verwacht 30 als
+een proces onleesbaar blijft en er geen aangetoonde treffer is. De detector
+heeft hiervoor geen database-, listener- of OPatch-opdrachten nodig.
+
+Wanneer de Oracle-owner onvoldoende proceszicht heeft, kwalificeer dan
+de opt-in modus `ACTIVE_HOME_INSPECTION_MODE=privileged`. Deze gebruikt
+dezelfde scanner in PREAPPLY en vóór RU en OJVM, ook bij Retry en Resume.
+PRECHECK blijft advisory. In privileged modus geven een ontbrekende of
+onvertrouwde helper, timeout en ongeldige of afwijkend gebonden uitvoer
+`UNKNOWN`. Een enkele configuratie bindt één caller aan één Oracle Home.
+
+Installeer bij een afzonderlijk goedgekeurde hostwijziging deze bestanden uit
+dezelfde beoordeelde commit. Installeer beide Python-bestanden als
+`root:root` op vaste lokale paden. Zorg voor root-owned parentdirectories
+zonder symlinks of schrijfbevoegdheid voor groep of anderen.
+
+| Bron | Doel | Mode |
+| --- | --- | --- |
+| `oem-tasks/opg_active_home_inspect.py` | `/usr/local/sbin/opg_active_home_inspect` | `0755` |
+| `project/lib/opg_active_home.py` | `/usr/local/libexec/oracle-patch-guard/opg_active_home.py` | `0644` |
+| Hostgebonden JSON | `/etc/oracle-patch-guard/active-home-inspect.json` | `0400` |
+| `config/examples/oracle-patch-guard-active-home.sudoers` | `/etc/sudoers.d/oracle-patch-guard-active-home` | `0440` |
+
+Maak de JSON als root vanuit de werkelijke hostnamespaces. Gebruik de
+numerieke UID/GID van de bestaande Oracle-eigenaar en het canonieke homepad.
+Lees de drie namespace-identiteiten op de host met
+`readlink /proc/1/ns/pid /proc/1/ns/mnt /proc/1/ns/user`. Onderstaand voorbeeld
+toont het formaat. Herbevestig de binding na reboot of een namespace-wijziging.
+Een afwijkende namespace, ook in een geïsoleerde agentservice, levert
+`UNKNOWN` op.
+
+```json
+{
+  "uid": 54321,
+  "gid": 54321,
+  "oracle_home": "/u01/app/oracle/product/19.0.0/dbhome_1",
+  "namespaces": {
+    "pid": "pid:[4026531836]",
+    "mnt": "mnt:[4026531841]",
+    "user": "user:[4026531837]"
+  }
+}
+```
+
+Valideer de afzonderlijke sudoersregel met `visudo -cf`. Pas alleen de
+gebruikersnaam aan als de site een andere Oracle-owner heeft. Het privilege
+geldt uitsluitend voor de twee exacte acties `visibility` en `scan`.
+De guard verwacht `/usr/bin/sudo` als `root:root` met mode `4111` of `4755`.
+De helper valideert `SUDO_UID`, `SUDO_GID` en de hostnamespaces. Vóór het
+lezen van doelprocessen draait hij als de geconfigureerde Oracle-owner,
+zonder aanvullende groepen en met alleen `CAP_SYS_PTRACE` effective en
+permitted. De inheritable, ambient en bounding sets zijn leeg en
+`no_new_privs` staat aan. De scanner leest alleen procfs, gebruikt geen
+`ptrace()`-attach en start geen subprocessen.
+Het canonieke Oracle Home-pad moet met alleen de primaire GID toegankelijk
+zijn.
+[Linux capabilities](https://man7.org/linux/man-pages/man7/capabilities.7.html)
+
+**SELinux op OL9.9.** Kwalificeer de twee sudo-aanroepen vanuit de werkelijke
+OEM-context met SELinux in enforcing-modus. Vereist zijn toegang tot de
+root-owned code/configuratie, de privilegeverlaging (`setuid`, `setgid`,
+`setpcap` en `process:setcap`), `sys_ptrace` voor de helper en read-only
+toegang tot de relevante procfs-objecten. Bij de SELinux-hook voor
+`PTRACE_MODE_READ` gaat het om `file:read` op de doelcontext. Een
+`process:ptrace`-toestemming voor attach is hiervoor niet nodig. Onderzoek
+weigeringen met `ausearch -m AVC,USER_AVC -ts recent -i`. Laat eventuele
+labeling en toegangsregels beperken tot een apart helperdomein en de
+geobserveerde leesoperaties. De benodigde doeltypes zijn hostspecifiek.
+Borg dat de agent- en Oracle-shellcontext deze rechten niet overerven.
+[SELinux-kernelhook](https://github.com/torvalds/linux/blob/v5.14/security/selinux/hooks.c#L2022-L2055)
+[SELinux-diagnostiek](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/using_selinux/troubleshooting-problems-related-to-selinux_using-selinux)
+
+Test in een acceptatieomgeving `sudo -n -u root -- /usr/local/sbin/opg_active_home_inspect visibility`
+en dezelfde aanroep met `scan`. Controleer exit 20 met een mapping door een
+non-dumpable fixtureproces, 0 na vrijgave bij volledige dekking en 30 bij
+ontbrekende dekking. Test verkeerde caller, extra argumenten, timeouts en
+home-binding. Zet de hostconfig pas op `privileged` na kwalificatie van die
+preflight- en scanuitslagen. De scan gebruikt de canonieke doelhome als
+padgrens. Kwalificeer de home zonder bindmount- of hardlinkaliassen en houd
+clients stil tijdens de onderhoudsoperatie.
 
 Laat OEM standaard als agentaccount uitvoeren. Gebruik alleen vooraf geconfigureerde `sudo -n -u oracle` voor de root-owned OEM-wrapper die nodig is. Een conceptueel, commandospecifiek sudoerspatroon is:
 
