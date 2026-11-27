@@ -93,3 +93,5 @@ Zie het volledige [fresh-host contract](../OEM_WRAPPER_GUIDE.md#fresh-host-insta
 De meegeleverde
 privileged helpers komen uit dezelfde actieve release onder
 `current/oem-tasks`. Bootstrap verandert de patch- of lifecyclelogica niet.
+Voor expliciete hostgebonden activering en acceptatie, zie
+[Privileged Active Home via BOOTSTRAP](PRIVILEGED_ACTIVE_HOME_BOOTSTRAP.md).

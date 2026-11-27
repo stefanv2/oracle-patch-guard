@@ -42,10 +42,6 @@ else
     CONFIG_GROUP=oinstall
 fi
 
-SRC_CONTEXT="$BASE/oem-tasks/opg_context_root.sh"
-SRC_MEDIA_SH="$BASE/oem-tasks/opg_media_stage_root.sh"
-SRC_MEDIA_PY="$BASE/oem-tasks/opg_media_stage_root.py"
-SRC_SUDOERS="$BASE/config/examples/oracle-patch-guard-context.sudoers"
 SUDOERS_DIR=${SUDOERS_DST%/*}
 CONFIG_DIR=${CONFIG_DST%/*}
 KEY_DST="$CONFIG_DIR/approval_public.pem"
@@ -54,6 +50,7 @@ declare -A CONFIG_VALUES=()
 SUDOERS_TEMP=
 CONFIG_TEMP=
 SOURCE_STAGE=
+PRIVILEGED_SOURCES=
 
 log() {
     printf 'OPG_BOOTSTRAP|%s\n' "$*"
@@ -182,6 +179,18 @@ validate_config_candidate() {
 # ---------------------------------------------------------------------------
 
 [[ $EUID -eq 0 ]] || fail "bootstrap moet als root draaien"
+if [[ $# == 3 && $1 == --privileged-base && $3 == "$BASE" ]]; then
+    PRIVILEGED_SOURCES=$2
+    [[ "$PRIVILEGED_SOURCES" == /tmp/opg-bootstrap-source.tmp.* && ! -L "$PRIVILEGED_SOURCES" &&
+       $(stat -c '%u:%a' "$PRIVILEGED_SOURCES") == 0:700 ]] || fail "onveilige bootstrap-staging"
+elif [[ $# != 0 ]]; then
+    fail "onbekende bootstrapargumenten"
+fi
+RELEASE=$(readlink -e -- "$BASE") || fail "releasepad kan niet worden vastgezet"
+SRC_CONTEXT="$RELEASE/oem-tasks/opg_context_root.sh"
+SRC_MEDIA_SH="$RELEASE/oem-tasks/opg_media_stage_root.sh"
+SRC_MEDIA_PY="$RELEASE/oem-tasks/opg_media_stage_root.py"
+SRC_SUDOERS="$RELEASE/config/examples/oracle-patch-guard-context.sudoers"
 
 for dependency in bash python3 openssl sudo flock timeout sha256sum stat readlink realpath mktemp \
                   install cmp mv rm chown chmod awk grep sed cut head tail tr sort find xargs \
@@ -212,6 +221,7 @@ done
 SOURCE_STAGE=$(mktemp -d /tmp/opg-bootstrap-source.tmp.XXXXXX) || fail "staging mislukt"
 for source_var in SRC_CONTEXT SRC_MEDIA_SH SRC_MEDIA_PY SRC_SUDOERS SRC_CONFIG SRC_KEY SRC_PROCEDURE; do
     src=${!source_var}
+    if [[ -n "$PRIVILEGED_SOURCES" ]]; then src="$PRIVILEGED_SOURCES/$source_var"; fi
     install -o root -g root -m 0600 "$src" "$SOURCE_STAGE/$source_var" || fail "bronstaging mislukt"
     printf -v "$source_var" '%s' "$SOURCE_STAGE/$source_var"
 done
@@ -236,11 +246,11 @@ config_source_mode=$(stat -c '%a' "$SRC_CONFIG") \
 validate_config_candidate "$SRC_CONFIG"
 LOG_ROOT=${CONFIG_VALUES[RUN_ROOT]}
 LOCK_ROOT=${CONFIG_VALUES[LOCK_ROOT]}
-for runtime in "$BASE/oem-tasks/opg_oem.sh" "$BASE/project/patchGD_guard.sh"; do
+for runtime in "$RELEASE/oem-tasks/opg_oem.sh" "$RELEASE/project/patchGD_guard.sh"; do
     [[ -f "$runtime" && -x "$runtime" && ! -L "$runtime" ]] || fail "release-runtime ontbreekt: $runtime"
 done
-[[ -f "$BASE/project/lib/opg_core.sh" && -r "$BASE/project/lib/opg_core.sh" ]] || fail "core-library ontbreekt"
-[[ -f "$BASE/project/lib/opg_active_home.py" && -r "$BASE/project/lib/opg_active_home.py" && ! -L "$BASE/project/lib/opg_active_home.py" ]] ||
+[[ -f "$RELEASE/project/lib/opg_core.sh" && -r "$RELEASE/project/lib/opg_core.sh" ]] || fail "core-library ontbreekt"
+[[ -f "$RELEASE/project/lib/opg_active_home.py" && -r "$RELEASE/project/lib/opg_active_home.py" && ! -L "$RELEASE/project/lib/opg_active_home.py" ]] ||
   fail "Active Oracle Home-helper ontbreekt of is onveilig"
 
 # Read-only destination preflight. No installed file or directory changes until
@@ -318,6 +328,32 @@ sudoers_dir_identity=$(stat -c '%U:%G:%a' "$SUDOERS_DIR")
 (( (8#${sudoers_dir_identity##*:} & 0022) == 0 )) || fail "schrijfbare sudoers-directory"
 [[ -x "$VISUDO_BIN" && -f "$VISUDO_BIN" && ! -L "$VISUDO_BIN" ]] || fail "visudo ontbreekt of is onveilig"
 "$VISUDO_BIN" -cf "$SRC_SUDOERS" || fail "meegeleverde sudoers-file faalt visudo-validatie"
+
+if [[ -z "$PRIVILEGED_SOURCES" ]]; then
+    # A directory descriptor lets the Oracle user share this gate without a
+    # writable host lock file. Never replace the directory while deployed.
+    if [[ ! -e "$CONFIG_DIR" ]]; then
+        install -d -o root -g root -m 0755 "$CONFIG_DIR" || fail "configdirectory aanmaken mislukt"
+    fi
+    [[ -d "$CONFIG_DIR" && ! -L "$CONFIG_DIR" && $(stat -c '%u:%g:%a' "$CONFIG_DIR") == 0:0:755 ]] \
+        || fail "onveilige configdirectory voor bootstrap-slot"
+    exec {BOOTSTRAP_FD}<"$CONFIG_DIR" || fail "bootstrap-slot onbeschikbaar"
+    flock -n "$BOOTSTRAP_FD" || fail "BOOTSTRAP, PREPARE of patchrun actief op deze host"
+    [[ $(readlink -e -- "$BASE") == "$RELEASE" ]] || fail "current wijzigde tijdens BOOTSTRAP"
+    DEPLOY="$RELEASE/oem-tasks/opg_deploy_active_home.py"
+    [[ -f "$DEPLOY" && ! -L "$DEPLOY" && $(stat -c '%u' "$DEPLOY") == 0 ]] || fail "onveilige Active Home-deployer"
+    (( (8#$(stat -c '%a' "$DEPLOY") & 0022) == 0 )) || fail "schrijfbare Active Home-deployer"
+    # The same evaluator is used by PREPARE. Only an explicit opt-in enters the transaction.
+    ACTIVE_MODE=$(/usr/bin/python3 -IBS "$DEPLOY" mode "$SRC_CONFIG" "$CONFIG_DST" "$OPG_ROOT" "${TEST_ROOT:-}") \
+        || fail "Active Home-hostbeleid ongeldig"
+    if [[ "$ACTIVE_MODE" == privileged ]]; then
+        /usr/bin/python3 -IBS "$DEPLOY" install "$RELEASE" "$OPG_ROOT" "$SOURCE_STAGE" "$CONFIG_DST" "$RUN_USER" "$CONFIG_GROUP" "${TEST_ROOT:-}" \
+            || fail "privileged Active Home-deployment geweigerd of mislukt"
+        printf 'OPG_BOOTSTRAP_RESULT|status=READY|exit_code=0\n'
+        exit 0
+    fi
+    [[ "$ACTIVE_MODE" == local ]] || fail "onbekende Active Home-modus"
+fi
 
 # All preflight validation succeeded. Begin activation.
 
@@ -458,7 +494,7 @@ install_sudoers() {
     log "INSTALLED|$SUDOERS_DST"
 }
 
-install_sudoers
+if [[ -z "$PRIVILEGED_SOURCES" ]]; then install_sudoers; fi
 
 # ---------------------------------------------------------------------------
 # Validate and atomically install the central runtime configuration
@@ -612,7 +648,7 @@ log "LOCK_ROOT_OK|$LOCK_ROOT"
 # Activate local configuration only after prerequisites have been established.
 install_runtime_config "$SRC_KEY" "$KEY_DST"
 install_runtime_config "$SRC_PROCEDURE" "$PROCEDURE_DST"
-install_runtime_config
+if [[ -z "$PRIVILEGED_SOURCES" ]]; then install_runtime_config; fi
 
 # ---------------------------------------------------------------------------
 # Final verification
@@ -625,6 +661,8 @@ for dst in "$DST_CONTEXT" "$DST_MEDIA_SH" "$DST_MEDIA_PY"; do
     [[ "$identity" == "root:${PRIVILEGED_GROUP}:755" ]] \
         || fail "final helper validation mislukt voor $dst: $identity"
 done
+
+if [[ -n "$PRIVILEGED_SOURCES" ]]; then exit 0; fi
 
 sudoers_identity=$(stat -c '%U:%G:%a' "$SUDOERS_DST") \
     || fail "final stat mislukt voor sudoers-file"

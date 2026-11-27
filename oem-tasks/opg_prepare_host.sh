@@ -32,6 +32,10 @@ echo "OPG_PREPARE|host=$(hostname -f)|phase=START"
 # BOOTSTRAP is the sole installer. PREPARE checks for deployment drift; the
 # calling OEM wrapper still owns creation/validation of the formal runcontext.
 CONFIG=$ETC_DIR/patchGD_guard.conf
+[[ -d "$ETC_DIR" && ! -L "$ETC_DIR" && $(stat -c '%u:%g:%a' "$ETC_DIR") == 0:0:755 ]] \
+  || fail 20 "host config directory missing or unsafe"
+exec {BOOTSTRAP_FD}<"$ETC_DIR" || fail 20 "bootstrap lock unavailable"
+flock -n -s "$BOOTSTRAP_FD" || fail 20 "BOOTSTRAP is active"
 [[ -f "$CONFIG" && ! -L "$CONFIG" && $(stat -c '%U:%G:%a' "$CONFIG") == "root:${CONFIG_GROUP}:640" ]] \
   || fail 20 "host config missing/unsafe; run bootstrap as root"
 declare -A paths=()
@@ -82,7 +86,9 @@ for name in patchGD_guard.conf approval_public.pem oracle_home_rebuild.md; do
   target=$ETC_DIR/$name
   [[ -f "$target" && ! -L "$target" && $(stat -c '%U:%G:%a' "$target") == "root:${CONFIG_GROUP}:640" ]] \
     || fail 20 "unsafe installed artifact: $target; rerun bootstrap"
-  cmp -s "$CONFIG_SRC/$name" "$target" || fail 20 "central/local artifact differs: $name; rerun bootstrap"
+  if [[ "$name" != patchGD_guard.conf ]]; then
+    cmp -s "$CONFIG_SRC/$name" "$target" || fail 20 "central/local artifact differs: $name; rerun bootstrap"
+  fi
 done
 for target in "$CONTEXT_HELPER" "$MEDIA_HELPER" "$MEDIA_ENGINE"; do
   [[ -f "$target" && ! -L "$target" && $(stat -c '%U:%G:%a' "$target") == root:root:755 ]] \
@@ -102,6 +108,10 @@ test -r "$ETC_DIR/approval_public.pem" || fail 20 "installed approval key unread
 test -r "$ETC_DIR/oracle_home_rebuild.md" || fail 20 "installed recovery procedure unreadable"
 test -d "$RUN_ROOT" || fail 20 "run root missing"
 test -d "$LOCK_ROOT" || fail 20 "lock root missing"
+
+/usr/bin/python3 -IBS "$BASE/current/oem-tasks/opg_deploy_active_home.py" check \
+  "$CONFIG_SRC/patchGD_guard.conf" "$CONFIG" "$BASE" "${OPG_PREPARE_TEST_ROOT:-}" \
+  || fail 20 "Active Home deployment unavailable or differs; see bootstrap diagnostics"
 
 echo "OPG_PREPARE_RESULT|host=$(hostname -f)|status=READY|exit_code=0"
 exit 0

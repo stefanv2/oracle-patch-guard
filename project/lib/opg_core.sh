@@ -449,6 +449,21 @@ opg_determine_assessment_status() {
   fi
 }
 
+# Snapshot the standard production config before the engine reads it.
+OPG_CONFIG_AT_START=
+if [[ ${OPG_TEST_MODE:-0} != 1 && -r /etc/oracle-patch-guard/patchGD_guard.conf ]]; then
+  OPG_CONFIG_AT_START=$(stat -c '%d:%i:%s:%y:%z' /etc/oracle-patch-guard/patchGD_guard.conf 2>/dev/null) || OPG_CONFIG_AT_START=
+fi
+
+opg_lock_current_config() {
+  local config=$1 snapshot=$2 dir=${1%/*}
+  [[ -d "$dir" && ! -L "$dir" && $(stat -c '%u:%g:%a' "$dir") == 0:0:755 ]] || return "$EXIT_BLOCKED"
+  exec {LOCK_BOOTSTRAP_FD}<"$dir" || return "$EXIT_BLOCKED"
+  flock -n -s "$LOCK_BOOTSTRAP_FD" || return "$EXIT_ALREADY_RUNNING"
+  [[ -n "$snapshot" && ! -e "$dir/.active-home-transaction.json" && ! -L "$dir/.active-home-transaction.json" &&
+     $(stat -c '%d:%i:%s:%y:%z' "$config" 2>/dev/null) == "$snapshot" ]] || return "$EXIT_BLOCKED"
+}
+
 opg_acquire_lock() {
   local home_id lock_file metadata owner_pid owner_host owner_run owner_home root_owner root_mode other_digit
   if [[ ${OPG_TEST_MODE:-0} == 1 && ${MOCK_LOCK_BUSY:-false} == true ]]; then
@@ -499,6 +514,18 @@ opg_acquire_lock() {
     LOCK_FD=
     return "$EXIT_ALREADY_RUNNING"
   fi
+  # Own both locks before changing the lock file or starting patch execution.
+  # Also reject a config read before a completed bootstrap's publication.
+  if [[ -n ${OPG_CONFIG_AT_START:-} || ${CONFIG_FILE:-} == /etc/oracle-patch-guard/patchGD_guard.conf ]]; then
+    if opg_lock_current_config /etc/oracle-patch-guard/patchGD_guard.conf "${OPG_CONFIG_AT_START:-}"; then
+      :
+    else
+      local config_rc=$?
+      opg_log ERROR "LOCK_SETUP|Active Home-config is gewijzigd of bootstrap is onvolledig; start de aanroep opnieuw na validatie."
+      opg_release_lock
+      return "$config_rc"
+    fi
+  fi
   : >"$lock_file"
   printf 'pid=%s\nhost=%s\nrun_id=%s\nhome=%s\nstarted=%s\n' "$$" "$HOST_NAME" "$RUN_ID" "$TARGET_ORACLE_HOME" "$(opg_now)" >&"$LOCK_FD"
   return 0
@@ -509,6 +536,10 @@ opg_release_lock() {
     flock -u "$LOCK_FD" 2>/dev/null || true
     exec {LOCK_FD}>&-
     LOCK_FD=
+  fi
+  if [[ -n ${LOCK_BOOTSTRAP_FD:-} ]]; then
+    exec {LOCK_BOOTSTRAP_FD}>&-
+    LOCK_BOOTSTRAP_FD=
   fi
   return 0
 }
