@@ -2,21 +2,26 @@
 """Privileged entry point for one root-configured Oracle Home."""
 
 import ctypes
+import hashlib
 import json
 import os
 from os import readlink
 from pathlib import Path
 import re
-import runpy
 import signal
 import stat
 import sys
 
 
 POLICY = Path("/etc/oracle-patch-guard/active-home-inspect.json")
-SCANNER = Path("/usr/local/libexec/oracle-patch-guard/opg_active_home.py")
+SCANNER_DIR = Path("/usr/local/libexec/oracle-patch-guard")
+DEPLOYMENT_ID = None  # Replaced by the host installer in the deployed launcher.
+SCANNER_SHA256 = None  # Replaced by the host installer in the deployed launcher.
 NAMESPACES = ("pid", "mnt", "user")
+# Reserved initial namespace inodes from Linux include/linux/proc_ns.h.
+INITIAL_NAMESPACES = {"pid": "pid:[4026531836]", "user": "user:[4026531837]"}
 MAX_POLICY_SIZE = 4096
+MAX_SCANNER_SIZE = 1024 * 1024
 PROTOCOL_VERSION = 1
 
 # Linux capability and prctl ABI. No exec is needed after reducing privileges.
@@ -45,7 +50,8 @@ class InspectionTimeout(Exception):
 
 def require_trusted_file(path, mode):
     metadata = path.lstat()
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != mode:
+    if (not stat.S_ISREG(metadata.st_mode) or (metadata.st_uid, metadata.st_gid, metadata.st_nlink) != (0, 0, 1)
+            or stat.S_IMODE(metadata.st_mode) != mode):
         raise PermissionError("untrusted file: {}".format(path))
     for parent in path.parents:
         metadata = parent.lstat()
@@ -67,8 +73,14 @@ def load_policy():
     if len(raw) > MAX_POLICY_SIZE:
         raise ValueError("oversized policy")
     policy = json.loads(raw.decode("ascii"), object_pairs_hook=unique_fields)
-    if not isinstance(policy, dict) or policy.keys() != {"uid", "gid", "oracle_home", "namespaces"}:
+    if not isinstance(policy, dict) or policy.keys() != {
+            "uid", "gid", "oracle_home", "namespaces", "deployment_id", "scanner_sha256"}:
         raise ValueError("invalid policy fields")
+    for name in ("deployment_id", "scanner_sha256"):
+        if not isinstance(policy[name], str) or not re.fullmatch(r"[a-f0-9]{64}", policy[name]):
+            raise ValueError("invalid " + name)
+    if (policy["deployment_id"], policy["scanner_sha256"]) != (DEPLOYMENT_ID, SCANNER_SHA256):
+        raise ValueError("launcher and policy belong to different deployments")
     for key in ("uid", "gid"):
         value = policy[key]
         if type(value) is not int or not 0 < value < 4294967295:
@@ -86,10 +98,40 @@ def load_policy():
     return policy
 
 
+def host_namespaces():
+    if readlink("/proc/self") != str(os.getpid()):
+        raise PermissionError("procfs PID view does not match the caller")
+    namespaces = {}
+    for name in NAMESPACES:
+        identity = readlink("/proc/1/ns/" + name)
+        if (not re.fullmatch(name + r":\[[0-9]+\]", identity)
+                or INITIAL_NAMESPACES.get(name, identity) != identity
+                or readlink("/proc/self/ns/" + name) != identity):
+            raise PermissionError("host namespace cannot be proven: " + name)
+        namespaces[name] = identity
+    return namespaces
+
+
 def require_host_namespaces(namespaces):
-    for name, identity in namespaces.items():
-        if any(readlink("/proc/{}/ns/{}".format(pid, name)) != identity for pid in ("self", "1")):
-            raise PermissionError("host namespace mismatch: {}".format(name))
+    if host_namespaces() != namespaces:
+        raise PermissionError("host namespace binding changed")
+
+
+def verified_scanner(digest):
+    path = SCANNER_DIR / ("opg_active_home-" + digest + ".py")
+    require_trusted_file(path, 0o644)
+    fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as source:
+        info = os.fstat(source.fileno())
+        if (not stat.S_ISREG(info.st_mode) or (info.st_uid, info.st_gid, info.st_nlink) != (0, 0, 1)
+                or stat.S_IMODE(info.st_mode) != 0o644):
+            raise PermissionError("untrusted open scanner: {}".format(path))
+        data = source.read(MAX_SCANNER_SIZE + 1)
+    if len(data) > MAX_SCANNER_SIZE or hashlib.sha256(data).hexdigest() != digest:
+        raise ValueError("scanner SHA-256 differs from policy")
+    scope = {"__name__": "opg_active_home", "__file__": str(path)}
+    exec(compile(data, str(path), "exec"), scope)
+    return scope["inspect_proc"]
 
 
 def status_fields():
@@ -142,19 +184,18 @@ def main(args):
         if (os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")) != (str(uid), str(gid)):
             raise PermissionError("caller is not authorized for this Oracle Home")
         require_host_namespaces(policy["namespaces"])
-        require_trusted_file(SCANNER, 0o644)
         restrict_observer(uid, gid)
         metadata = os.stat(home)
         if os.path.realpath(home) != home or not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != uid:
             raise PermissionError("Oracle Home binding is not canonical or owner does not match")
-        inspect = runpy.run_path(str(SCANNER), run_name="opg_active_home")["inspect_proc"]
+        inspect = verified_scanner(policy["scanner_sha256"])
         mode = args[0]
         result = inspect(None if mode == "visibility" else os.fsencode(home))
         if result == 0 or (result == 20 and mode == "scan"):
             print("OPG_ACTIVE_HOME_INSPECTION|version={}|mode={}|home={}|exit_code={}".format(
                 PROTOCOL_VERSION, mode, home, result))
             return result
-    except (OSError, KeyError, ValueError, InspectionTimeout) as error:
+    except (OSError, KeyError, ValueError, SyntaxError, InspectionTimeout) as error:
         print("OPG_ACTIVE_HOME_INSPECTION_UNKNOWN|version={}|reason={}".format(
             PROTOCOL_VERSION, json.dumps(str(error))))
     return 30

@@ -54,8 +54,29 @@ if opg_atomic_write "$RUN_DIR/value" <<<'x'; then exit 1; fi
 [[ ! -e "$RUN_DIR/value" ]]
 [[ "$OPG_ATOMIC_WRITE_ERROR" == write_or_close ]]
 """),
-        ("flush failure", """
+        ("path-specific flush works without coreutils sync", """
 sync() { return 1; }
+opg_atomic_write "$RUN_DIR/value" <<<'x'
+[[ $(cat "$RUN_DIR/value") == x ]]
+ln -s "$RUN_DIR/value" "$RUN_DIR/link"
+if opg_sync_path "$RUN_DIR/link" 2>/dev/null; then exit 1; fi
+if opg_sync_path "$RUN_DIR/missing" 2>/dev/null; then exit 1; fi
+"""),
+        ("path-aware sync is used and its flush errors are authoritative", """
+sync() {
+  if [[ "$1" == --help ]]; then printf 'Usage: sync [OPTION] [FILE]...\\n'; return 0; fi
+  [[ "$#" == 2 && "$1" == -- ]] || return 2
+  printf '%s\\n' "$2" >>"$RUN_DIR/sync.calls"
+  return "${MOCK_FLUSH_RC:-0}"
+}
+opg_atomic_write "$RUN_DIR/value" <<<'x'
+grep -Fxq "$RUN_DIR" "$RUN_DIR/sync.calls"
+MOCK_FLUSH_RC=7
+if opg_atomic_write "$RUN_DIR/rejected" <<<'x'; then exit 1; fi
+[[ ! -e "$RUN_DIR/rejected" && "$OPG_ATOMIC_WRITE_ERROR" == flush ]]
+"""),
+        ("flush failure", """
+opg_sync_path() { return 1; }
 if opg_atomic_write "$RUN_DIR/value" <<<'x'; then exit 1; fi
 [[ ! -e "$RUN_DIR/value" ]]
 [[ "$OPG_ATOMIC_WRITE_ERROR" == flush ]]
@@ -68,10 +89,9 @@ if opg_atomic_write "$RUN_DIR/value" <<<'x'; then exit 1; fi
 """),
         ("directory flush failure after rename", """
 sync_calls=0
-sync() {
+opg_sync_path() {
   sync_calls=$((sync_calls + 1))
-  (( sync_calls < 2 )) || return 1
-  command sync "$@"
+  (( sync_calls < 2 ))
 }
 if opg_atomic_write "$RUN_DIR/value" <<<'x'; then exit 1; fi
 [[ -f "$RUN_DIR/value" ]]
@@ -107,6 +127,21 @@ def main():
     checks = []
     for name, command in atomic_cases():
         checks.append(expect_failure(name, command))
+
+    checks.append(expect_failure("PRECHECK never reports READY when evidence publication fails", r'''
+ASSESSMENT_STATUS=READY; ASSESSMENT_EXIT=0; MONTH=JUL2026
+: >"$RUN_DIR/findings.psv"; : >"$RUN_DIR/precheck_summary.psv"
+opg_manifest_sids() { printf 'TESTDB\n'; }
+opg_atomic_write() { cat >/dev/null; return 1; }
+emit_precheck_result >"$RUN_DIR/out"
+grep -Fq '|status=UNKNOWN|exit_code=30' "$RUN_DIR/out"
+[[ "$ASSESSMENT_EXIT" -eq 30 && ! -e "$RUN_DIR/precheck_result.psv" ]]
+''', ("emit_precheck_result",)))
+    checks.append(expect_failure("assessment SQL file failure stops before later files are written", r'''
+opg_atomic_write() { printf '%s\n' "$1" >>"$RUN_DIR/calls"; cat >/dev/null; return 1; }
+if write_sql_files; then exit 1; fi
+[[ $(cat "$RUN_DIR/calls") == "$RUN_DIR/inventory.sql" ]]
+''', ("write_sql_files",)))
 
     checks.append(expect_failure("history failure preserves authoritative and memory state", """
 CURRENT_STATE=OLD; CURRENT_PHASE=OLD_PHASE
@@ -171,12 +206,12 @@ grep -q 'STATE_PUBLICATION_FAILED' "$RUN_DIR/error"
 
     checks.append(mutation_state_failure(
         "history flush failure stops next patch mutation",
-        "sync() { return 1; }", "history_flush", "05_DATABASES_STOPPED"))
+        "opg_sync_path() { return 1; }", "history_flush", "05_DATABASES_STOPPED"))
     checks.append(expect_failure("binary readiness block cannot publish state", """
 CURRENT_STATE=05_DATABASES_STOPPED; CURRENT_PHASE=STOP_DATABASES
 TARGET_ORACLE_HOME="$RUN_DIR/dbhome"
 opg_write_state 05_DATABASES_STOPPED STOP_DATABASES
-sync() { return 1; }
+opg_sync_path() { return 1; }
 if record_binary_readiness BLOCKED opatch 111 0 "$RUN_DIR/prereq.log" prerequisite_failed 2>"$RUN_DIR/error"; then
   exit 1
 fi
@@ -194,7 +229,7 @@ retry_inventory() { :; }; retry_window_valid() { :; }
 opg_verify_manifest_hash() { :; }; verify_approval() { :; }
 opg_sha256() { printf inventory; }; verify_manifest_databases_stopped() { :; }
 opg_run_critical() { touch "$RUN_DIR/mutation"; }
-sync() { return 1; }
+opg_sync_path() { return 1; }
 if apply_binary_patches; then exit 1; fi
 [[ "$OPG_STATE_WRITE_FAILED" == true && ! -e "$RUN_DIR/mutation" ]]
 grep -q '|PARTIAL|RETRY_BINARY_STARTED|DB_BINARY|' "$RUN_DIR/state_history.log"
@@ -209,10 +244,10 @@ grep -q '|PARTIAL|RETRY_BINARY_STARTED|DB_BINARY|' "$RUN_DIR/state_history.log"
     checks.append(mutation_state_failure(
         "directory flush failure after rename stops next mutation",
         """sync_calls=0
-sync() {
+opg_sync_path() {
   sync_calls=$((sync_calls + 1))
   (( sync_calls < 3 )) || return 1
-  command sync "$@"
+  return 0
 }""", "authoritative_state_directory_flush", "06_DB_BINARY_APPLIED"))
 
     checks.append(expect_failure("state failure after completed mutation", """

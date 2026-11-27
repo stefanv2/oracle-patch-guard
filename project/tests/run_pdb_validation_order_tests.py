@@ -143,6 +143,15 @@ exit "$check_rc"
 
 def main():
     checks = []
+    with tempfile.TemporaryDirectory(prefix="opg06-cdb-no-pdb.") as directory:
+        result = run(Path(directory), r'''
+opg_read_original_state() { if [[ "$2" == cdb ]]; then printf 'YES\n'; fi; }
+opg_sqlplus() { printf 'DATAPATCH_CONTAINER|1|CDB$ROOT|READ WRITE\n' >"$4"; }
+prepare_pdbs_for_datapatch DB1 || exit 1
+grep -Fxq '1|CDB$ROOT' "$RUN_DIR/datapatch_expected_containers_DB1.psv" &&
+  grep -Fxq 'exit success' "$RUN_DIR/prepare_datapatch_pdb_DB1.sql"
+''', ("prepare_pdbs_for_datapatch",))
+        checks.append((result.returncode == 0, "CDB without user PDBs prepares datapatch", result))
     checks.append(restore_case(
         "MOUNTED restored exactly", "PDB1=MOUNTED", "PDB1=READ WRITE",
         ('alter pluggable database "PDB1" close immediate;',)))

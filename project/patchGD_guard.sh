@@ -301,7 +301,7 @@ init_new_run() {
 }
 
 write_sql_files() {
-  opg_atomic_write "${RUN_DIR}/inventory.sql" <<'SQL'
+  opg_atomic_write "${RUN_DIR}/inventory.sql" <<'SQL' || return 1
 set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
 whenever sqlerror exit failure rollback
 select 'DB|'||name||'|'||database_role||'|'||open_mode||'|'||cdb from v$database;
@@ -330,36 +330,36 @@ from dba_datapump_jobs where state not in ('NOT RUNNING','COMPLETED') order by o
 select 'ASM_FILES|'||count(*) from v$datafile where name like '+%';
 exit success
 SQL
-  opg_atomic_write "${RUN_DIR}/shutdown.sql" <<'SQL'
+  opg_atomic_write "${RUN_DIR}/shutdown.sql" <<'SQL' || return 1
 whenever sqlerror exit failure rollback
 shutdown immediate;
 exit success
 SQL
-  opg_atomic_write "${RUN_DIR}/startup.sql" <<'SQL'
+  opg_atomic_write "${RUN_DIR}/startup.sql" <<'SQL' || return 1
 whenever sqlerror exit failure rollback
 startup;
 exit success
 SQL
-  opg_atomic_write "${RUN_DIR}/startup_verify.sql" <<'SQL'
+  opg_atomic_write "${RUN_DIR}/startup_verify.sql" <<'SQL' || return 1
 set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
 whenever sqlerror exit failure rollback
 select 'STARTUP_STATE|'||i.status||'|'||i.database_status||'|'||d.open_mode
 from v$instance i cross join v$database d;
 exit success
 SQL
-  opg_atomic_write "${RUN_DIR}/alter_system_register.sql" <<'SQL'
+  opg_atomic_write "${RUN_DIR}/alter_system_register.sql" <<'SQL' || return 1
 whenever sqlerror exit failure rollback
 alter system register;
 exit success
 SQL
-  opg_atomic_write "${RUN_DIR}/datapatch_containers.sql" <<'SQL'
+  opg_atomic_write "${RUN_DIR}/datapatch_containers.sql" <<'SQL' || return 1
 set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
 whenever sqlerror exit failure rollback
 select 'DATAPATCH_CONTAINER|'||con_id||'|'||name||'|'||open_mode
 from v$containers where con_id = 1 or con_id > 2 order by con_id;
 exit success
 SQL
-  opg_atomic_write "${RUN_DIR}/datapatch_sqlpatch_cdb.sql" <<SQL
+  opg_atomic_write "${RUN_DIR}/datapatch_sqlpatch_cdb.sql" <<SQL || return 1
 set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
 whenever sqlerror exit failure rollback
 select 'CDB_SQLPATCH|'||r.con_id||'|'||c.name||'|'||r.patch_id||'|'||r.action||'|'||r.status||'|'||
@@ -374,7 +374,7 @@ where r.patch_id in (${DB_PATCH},${OJVM_PATCH})
 order by r.con_id, r.patch_id;
 exit success
 SQL
-  opg_atomic_write "${RUN_DIR}/datapatch_sqlpatch_noncdb.sql" <<SQL
+  opg_atomic_write "${RUN_DIR}/datapatch_sqlpatch_noncdb.sql" <<SQL || return 1
 set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
 whenever sqlerror exit failure rollback
 select 'CDB_SQLPATCH|0|NONCDB|'||r.patch_id||'|'||r.action||'|'||r.status||'|'||
@@ -387,7 +387,7 @@ where r.patch_id in (${DB_PATCH},${OJVM_PATCH})
 order by r.patch_id;
 exit success
 SQL
-  opg_atomic_write "${RUN_DIR}/validate.sql" <<SQL
+  opg_atomic_write "${RUN_DIR}/validate.sql" <<SQL || return 1
 set pages 0 feedback off heading off verify off echo off trimspool on lines 32767
 whenever sqlerror exit failure rollback
 select 'REGISTRY|'||comp_id||'|'||status from dba_registry order by comp_id;
@@ -1187,7 +1187,7 @@ emit_precheck_result() {
   sid_list=$(opg_manifest_sids 2>/dev/null | paste -sd, -)
   [[ -n "$sid_list" ]] || sid_list=UNKNOWN
   timestamp=$(opg_now)
-  {
+  if ! {
     printf 'RESULT|host=%s|sid=%s|cycle=%s|timestamp=%s|run_id=%s|status=%s|exit_code=%s\n' \
       "$HOST_NAME" "$sid_list" "$MONTH" "$timestamp" "$RUN_ID" "$ASSESSMENT_STATUS" "$ASSESSMENT_EXIT"
     while IFS='|' read -r severity id _; do
@@ -1198,7 +1198,13 @@ emit_precheck_result() {
       [[ -n "$severity" && -n "$id" ]] || continue
       printf 'FINDING|severity=%s|id=%s\n' "$severity" "$id"
     done <"${RUN_DIR}/precheck_summary.psv"
-  } | opg_atomic_write "${RUN_DIR}/precheck_result.psv"
+  } | opg_atomic_write "${RUN_DIR}/precheck_result.psv"; then
+    opg_log ERROR "PRECHECK_EVIDENCE_WRITE_FAILED|path=${RUN_DIR}/precheck_result.psv"
+    if [[ "$ASSESSMENT_STATUS" == READY || "$ASSESSMENT_STATUS" == CONDITIONAL ]]; then
+      ASSESSMENT_STATUS=UNKNOWN
+      ASSESSMENT_EXIT=$EXIT_UNKNOWN
+    fi
+  fi
   while IFS='|' read -r severity id message _; do
     [[ -n "$severity" && -n "$id" ]] || continue
     case "$id" in
@@ -1280,7 +1286,52 @@ validate_opatch_media() {
   printf 'MEDIA|status=VALID|version=%s\n' "$internal_version" >>"$evidence"
 }
 
-readonly OJVM_PERL_DBA_REPAIR="De OJVM-relink kan Perl/File::Copy niet gebruiken. Laat de DBA Perl en de moduleprovider voor deze interpreter herstellen (zoek zo nodig met dnf provides '*/File/Copy.pm')."
+read_host_platform() {
+  if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then
+    printf '%s\n' "${MOCK_OS_ID:-ol}|${MOCK_OS_VERSION:-8.10}|${MOCK_ARCH:-x86_64}|${MOCK_KERNEL_RELEASE-5.15.0-fixture}"
+    return
+  fi
+  local identity machine release
+  identity=$(read_os_release /etc/os-release) || identity='|'
+  machine=$(uname -m 2>/dev/null) || machine=
+  release=$(uname -r 2>/dev/null) || release=
+  printf '%s\n' "$identity|$machine|$release"
+}
+
+read_os_release() {
+  LC_ALL=C awk -F= '
+    /^(ID|VERSION_ID)=/ {
+      if (++seen[$1] != 1 || NF != 2) bad=1
+      value=$2
+      if (value ~ /^"[^"]+"$/) value=substr(value, 2, length(value)-2)
+      if (value !~ /^[A-Za-z0-9._-]+$/) bad=1
+      fields[$1]=value
+    }
+    END {
+      if (bad || !fields["ID"] || !fields["VERSION_ID"]) exit 1
+      printf "%s|%s\n", tolower(fields["ID"]), fields["VERSION_ID"]
+    }' "$1" 2>/dev/null
+}
+
+supported_oracle_linux() {
+  local id=$1 version=$2 kernel=$3 build minor patch
+  [[ "$id" =~ ^(ol|oracle|oraclelinux)$ ]] || return 1
+  [[ "$version" =~ ^(8|9)([.][0-9]+)*$ ]] && return 0
+  [[ "$version" == 7.9 && "$kernel" =~ ^5[.]4[.]17-([0-9]{1,6})[.]([0-9]{1,6})[.]([0-9]{1,6})([.][0-9]+)*[.]el7uek[.]x86_64$ ]] || return 1
+  build=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} patch=${BASH_REMATCH[3]}
+  (( 10#$build > 2011 || (10#$build == 2011 && (10#$minor > 4 || (10#$minor == 4 && 10#$patch >= 4))) ))
+}
+
+recheck_host_platform() {
+  local os_id os_version arch kernel
+  IFS='|' read -r os_id os_version arch kernel < <(read_host_platform)
+  if [[ "$arch" != x86_64 ]] || ! supported_oracle_linux "$os_id" "$os_version" "$kernel"; then
+    opg_log ERROR "PLATFORM_CHANGED|os=${os_id}|version=${os_version}|arch=${arch}|kernel=${kernel}"
+    return 1
+  fi
+}
+
+readonly OJVM_PERL_DBA_REPAIR="De OJVM-relink kan Perl/File::Copy niet gebruiken. Laat de DBA Perl en de moduleprovider voor deze interpreter herstellen (gebruik yum provides op OL7 of dnf provides op OL8/9)."
 readonly OJVM_PERL_DBA_ACTION="$OJVM_PERL_DBA_REPAIR Voer daarna PRECHECK opnieuw uit."
 
 check_ojvm_perl() {
@@ -1321,7 +1372,7 @@ check_ojvm_perl() {
 
 perform_assessment() {
   local assessment_mode=${1:-formal}
-  local owner central_inventory local_inventory db_dir ojvm_dir zip readme_count opatch_actual rc os_id os_version arch expected_owner
+  local owner central_inventory local_inventory db_dir ojvm_dir zip readme_count opatch_actual rc os_id os_version arch kernel expected_owner
   local media_rc version_relation
   local OPG_READ_ONLY_PHASE=true OPG_CHECK_PHASE=assess OPG_WINDOW_BINDING_MODE=formal RECOVERY_MANIFEST_FILE OPG_STATE_READ_ONLY=false
   [[ "$assessment_mode" == formal || "$assessment_mode" == precheck ]] || return "$EXIT_INVALID_PARAMS"
@@ -1345,7 +1396,17 @@ perform_assessment() {
     return "$EXIT_BLOCKED"
   fi
   RECOVERY_MANIFEST_FILE="${RUN_DIR}/recovery_manifest.json"
-  write_sql_files
+  if ! write_sql_files; then
+    opg_add_finding UNKNOWN SQL_EVIDENCE_WRITE_FAILED "SQL-bestanden konden niet betrouwbaar worden gepubliceerd." "$RUN_DIR"
+    opg_determine_assessment_status
+    if [[ "$assessment_mode" == precheck ]]; then
+      : >"${RUN_DIR}/precheck_summary.psv"
+      emit_precheck_result
+    else
+      opg_result_line "$EXIT_UNKNOWN" UNKNOWN ASSESS
+    fi
+    return "$EXIT_UNKNOWN"
+  fi
   opg_write_state 01_ASSESS_STARTED ASSESS || return 1
 
   if [[ ${OPG_TEST_MODE:-0} != 1 ]]; then
@@ -1356,15 +1417,9 @@ perform_assessment() {
   fi
 
   owner=$(stat -c '%U' "$TARGET_ORACLE_HOME" 2>/dev/null || printf UNKNOWN)
-  if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then
-    os_id=${MOCK_OS_ID:-ol}; os_version=${MOCK_OS_VERSION:-8.10}; arch=${MOCK_ARCH:-x86_64}
-  else
-    os_id=$(awk -F= '$1=="ID"{gsub(/"/,"",$2);print tolower($2);exit}' /etc/os-release 2>/dev/null || true)
-    os_version=$(awk -F= '$1=="VERSION_ID"{gsub(/"/,"",$2);print $2;exit}' /etc/os-release 2>/dev/null || true)
-    arch=$(uname -m 2>/dev/null || true)
-  fi
-  printf 'hostname=%s\nuser=%s\nhome_owner=%s\nos_id=%s\nos_version=%s\nkernel=%s\narch=%s\n' "$HOST_NAME" "$EXEC_USER" "$owner" "$os_id" "$os_version" "$(uname -sr 2>/dev/null)" "$arch" >"${RUN_DIR}/host_info.txt"
-  [[ "$os_id" =~ ^(ol|oracle|oraclelinux)$ && "$os_version" =~ ^(8|9)([.]|$) ]] || opg_add_finding BLOCKED OS_UNSUPPORTED "Alleen Oracle Linux 8/9 wordt door deze MVP ondersteund." "${os_id} ${os_version}"
+  IFS='|' read -r os_id os_version arch kernel < <(read_host_platform)
+  printf 'hostname=%s\nuser=%s\nhome_owner=%s\nos_id=%s\nos_version=%s\nkernel=%s\narch=%s\n' "$HOST_NAME" "$EXEC_USER" "$owner" "$os_id" "$os_version" "$kernel" "$arch" >"${RUN_DIR}/host_info.txt"
+  supported_oracle_linux "$os_id" "$os_version" "$kernel" || opg_add_finding BLOCKED OS_UNSUPPORTED "Vereist Oracle Linux 7.9 met UEK6 of Oracle Linux 8/9." "${os_id} ${os_version} ${kernel}"
   [[ "$arch" == x86_64 ]] || opg_add_finding BLOCKED ARCH_UNSUPPORTED "Alleen x86_64 is in deze MVP bewezen." "$arch"
   [[ -x "$TARGET_ORACLE_HOME/bin/sqlplus" ]] || opg_add_finding BLOCKED SQLPLUS_MISSING "bin/sqlplus ontbreekt of is niet uitvoerbaar." "$TARGET_ORACLE_HOME"
   [[ -x "$TARGET_ORACLE_HOME/OPatch/opatch" ]] || opg_add_finding BLOCKED OPATCH_MISSING "OPatch/opatch ontbreekt of is niet uitvoerbaar." "$TARGET_ORACLE_HOME"
@@ -1765,6 +1820,7 @@ verify_resume_listener_progress() {
 
 verify_resume_environment() {
   verify_static_context_unchanged || return 1
+  [[ "$CURRENT_STATE" == 12_COMPLETE ]] || recheck_host_platform || return 1
   case "$CURRENT_STATE:$CURRENT_PHASE" in
     MEDIA_VALIDATED:OPATCH_UPGRADE|OPATCH_STAGED:OPATCH_UPGRADE|OPATCH_BACKED_UP:OPATCH_UPGRADE|OPATCH_INSTALLED_UNVERIFIED:OPATCH_UPGRADE|OPATCH_READY:OPATCH_UPGRADE|PARTIAL:OPATCH_STAGED|PARTIAL:OPATCH_BACKED_UP|PARTIAL:OPATCH_INSTALLED_UNVERIFIED) verify_database_state_unchanged ;;
     PARTIAL:DB_BINARY|PARTIAL:OJVM_BINARY|06_DB_BINARY_APPLIED:*|07_OJVM_BINARY_APPLIED:*) verify_manifest_databases_stopped ;;
@@ -1811,7 +1867,7 @@ write_preapply_report() {
 }
 
 perform_preapply_recheck() {
-  local rc opatch_actual central_inventory os_id os_version arch owner db_dir ojvm_dir stored_recovery_hash current_recovery_hash
+  local rc opatch_actual central_inventory owner db_dir ojvm_dir stored_recovery_hash current_recovery_hash
   local assessed_opatch planned_upgrade version_relation media_rc stored_approval_key_hash current_approval_key_hash
   local OPG_READ_ONLY_PHASE=true OPG_CHECK_PHASE=preapply OPG_WINDOW_BINDING_MODE=formal RECOVERY_MANIFEST_FILE="${RUN_DIR}/preapply_recovery_manifest.json"
   PREAPPLY_BLOCKED=0; PREAPPLY_UNKNOWN=0; : >"${RUN_DIR}/preapply_findings.psv"
@@ -1832,14 +1888,7 @@ perform_preapply_recheck() {
     preapply_add UNKNOWN ACTIVE_HOME_VISIBILITY_UNKNOWN "Vereist proceszicht is vóór shutdown niet aantoonbaar met de ingestelde inspectiemethode." "${RUN_DIR}/preapply_active_home_visibility.log"
   fi
   detect_home_processes preapply
-  if [[ ${OPG_TEST_MODE:-0} == 1 ]]; then
-    os_id=${MOCK_OS_ID:-ol}; os_version=${MOCK_OS_VERSION:-8.10}; arch=${MOCK_ARCH:-x86_64}
-  else
-    os_id=$(awk -F= '$1=="ID"{gsub(/"/,"",$2);print tolower($2);exit}' /etc/os-release 2>/dev/null || true)
-    os_version=$(awk -F= '$1=="VERSION_ID"{gsub(/"/,"",$2);print $2;exit}' /etc/os-release 2>/dev/null || true)
-    arch=$(uname -m 2>/dev/null || true)
-  fi
-  [[ "$os_id" =~ ^(ol|oracle|oraclelinux)$ && "$os_version" =~ ^(8|9)([.]|$) && "$arch" == x86_64 ]] || preapply_add BLOCKED PLATFORM_CHANGED "Platformcontrole faalt direct vóór apply." "${os_id} ${os_version} ${arch}"
+  recheck_host_platform || preapply_add BLOCKED PLATFORM_CHANGED "Platformcontrole faalt direct vóór apply." "${RUN_DIR}/commands.log"
 
   opg_run_capture preapply_oracle_version "${RUN_DIR}/preapply_oracle_version.txt" "$TARGET_ORACLE_HOME/bin/sqlplus" -V; rc=$?
   (( rc == 0 )) || preapply_add UNKNOWN ORACLE_VERSION_RECHECK_FAILED "Oracle-versie kon direct vóór apply niet worden bepaald." "${RUN_DIR}/preapply_oracle_version.txt"
@@ -1912,7 +1961,10 @@ perform_preapply_recheck() {
 
   if (( PREAPPLY_BLOCKED > 0 )); then write_preapply_report BLOCKED "$EXIT_BLOCKED"; return "$EXIT_BLOCKED"; fi
   if (( PREAPPLY_UNKNOWN > 0 )); then write_preapply_report UNKNOWN "$EXIT_UNKNOWN"; return "$EXIT_UNKNOWN"; fi
-  write_preapply_report READY "$EXIT_OK"
+  if ! write_preapply_report READY "$EXIT_OK"; then
+    opg_log ERROR "PREAPPLY_EVIDENCE_WRITE_FAILED|path=${RUN_DIR}/preapply_assessment.json"
+    return "$EXIT_UNKNOWN"
+  fi
   return 0
 }
 
@@ -2368,7 +2420,8 @@ prepare_pdbs_for_datapatch() {
   sql_file="${RUN_DIR}/prepare_datapatch_pdb_${sid}.sql"
   {
     printf 'whenever sqlerror exit failure rollback\n'
-    for entry in "${entries[@]}"; do
+    # Bash 4.2 with nounset rejects an empty array expansion.
+    for entry in ${entries[@]+"${entries[@]}"}; do
       pdb=${entry%%=*}; open_mode=${current_modes[$pdb]}
       [[ "$open_mode" == 'READ WRITE' ]] && continue
       printf 'prompt DATAPATCH_PDB_PREPARE|%s|current=%s|desired=READ WRITE\n' "$pdb" "$open_mode"
@@ -2622,8 +2675,17 @@ active_home_executable_trusted() {
   done
 }
 
+active_home_initial_pid_namespace() {
+  [[ $(/usr/bin/readlink /proc/self/ns/pid 2>/dev/null) == 'pid:[4026531836]' ]]
+}
+
 run_active_home_inspection() {
   local label=$1 output=$2 mode=$3 rc subject=$TARGET_ORACLE_HOME verdict ready_marker=ACTIVE_HOME_SCAN_CLEAR
+  # Also guard existing protocol-1 launchers already installed on OL8/OL9.
+  if [[ ${OPG_TEST_MODE:-0} != 1 ]] && ! active_home_initial_pid_namespace; then
+    printf 'OPG_ACTIVE_HOME_INSPECTION_UNKNOWN|reason=initial_pid_namespace_unconfirmed\n' >"$output"
+    return "$EXIT_UNKNOWN"
+  fi
   if [[ "$mode" == visibility ]]; then
     subject=--visibility
     ready_marker=PROC_COVERAGE_CONFIRMED
@@ -2812,7 +2874,8 @@ validate_apply_retry() {
   # Used by opg_run_capture from the sourced core library.
   # shellcheck disable=SC2034
   local OPG_READ_ONLY_PHASE=true
-  check_active_home_tools >/dev/null &&
+  recheck_host_platform &&
+    check_active_home_tools >/dev/null &&
     verify_static_context_unchanged &&
     [[ "$(stat -c '%U' "$TARGET_ORACLE_HOME")" == "$EXEC_USER" ]] &&
     [[ "$(opatch_version_at "$TARGET_ORACLE_HOME/OPatch" opatch_version "$RUN_DIR/retry_opatch_version.log")" == "$OPATCH_VERSION" ]] &&

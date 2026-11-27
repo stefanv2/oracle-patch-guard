@@ -53,6 +53,25 @@ opg_canonical_dir() {
   fi
 }
 
+opg_sync_path() {
+  local path=$1 sync_help
+  [[ ! -L "$path" ]] || return 1
+  # Older OL7 builds ignore the path, whereas later builds backport file sync.
+  if sync_help=$(LC_ALL=C sync --help 2>/dev/null) && [[ "$sync_help" == *'[FILE]...'* ]]; then
+    sync -- "$path"
+    return $?
+  fi
+  /usr/bin/python3 -I -c '
+import os, sys
+
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+' "$path"
+}
+
 opg_atomic_write() {
   local destination=$1
   local directory temporary rc
@@ -62,14 +81,14 @@ opg_atomic_write() {
   temporary=$(mktemp "${directory}/.opg.tmp.XXXXXX") || { OPG_ATOMIC_WRITE_ERROR=temporary_create; return 1; }
   cat >"$temporary" || { OPG_ATOMIC_WRITE_ERROR=write_or_close; rm -f -- "$temporary"; return 1; }
   chmod 0600 "$temporary" 2>/dev/null || true
-  sync "$temporary" || { OPG_ATOMIC_WRITE_ERROR=flush; rm -f -- "$temporary"; return 1; }
+  opg_sync_path "$temporary" || { OPG_ATOMIC_WRITE_ERROR=flush; rm -f -- "$temporary"; return 1; }
   mv -f -- "$temporary" "$destination" || {
     rc=$?
     OPG_ATOMIC_WRITE_ERROR=rename
     rm -f -- "$temporary"
     return "$rc"
   }
-  sync "$directory" || { OPG_ATOMIC_WRITE_ERROR=directory_flush; return 1; }
+  opg_sync_path "$directory" || { OPG_ATOMIC_WRITE_ERROR=directory_flush; return 1; }
 }
 
 opg_get_json_string() {
@@ -137,7 +156,7 @@ opg_write_state() {
     opg_report_state_publication_failure history_write "$previous" "$next" "$phase"
     return 1
   fi
-  if ! sync "$history_file"; then
+  if ! opg_sync_path "$history_file"; then
     opg_report_state_publication_failure history_flush "$previous" "$next" "$phase"
     return 1
   fi

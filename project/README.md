@@ -7,12 +7,15 @@ Oracle Patch Guard automatiseert de herkenbare `patchGD.sh`-werkwijze als een lo
 
 ## Ondersteunde scope
 
-- Oracle Database 19c op Oracle Linux 8/9;
+- Oracle Database 19c op Oracle Linux 8/9 en op Oracle Linux 7.9 met UEK6
+  vanaf `5.4.17-2011.4.4.el7uek.x86_64`, na hostkwalificatie;
 - Bash, single-instance;
 - één of meerdere databases in exact één gedeelde Oracle Home;
 - in-place DB-RU gevolgd door OJVM;
 - expliciete uitvoering per SID van `datapatch -verbose`, `utlrp.sql` en eindvalidatie;
 - lokale uitvoering of OEM-agentaccount met vooraf ingerichte `sudo -n`.
+
+Zie de [platformkwalificatie en installatie van privileged Active Home](../docs/OL7_ACTIVE_HOME_DEPLOYMENT.md).
 
 RAC, SEHA, Data Guard, Grid Infrastructure en ASM worden gedetecteerd en in deze MVP geblokkeerd. OS-update en reboot zijn bewust geen onderdeel van `apply`.
 

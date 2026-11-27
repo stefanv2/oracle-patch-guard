@@ -13,7 +13,7 @@ Legenda: `IMPLEMENTED`, `PARTIAL`, `MOCKED`, `PLACEHOLDER`, `NOT_IMPLEMENTED`, `
 | SID↔PMON↔home-koppeling | PARTIAL / NOT_TESTED_ON_ORACLE | `inventory_databases`, `verify_no_unexpected_home_processes`; `/proc` niet echt getest |
 | RAC/SEHA/ASM/Grid-detectie | PARTIAL / NOT_TESTED_ON_ORACLE | `detect_unsupported_topology`, ASM datafilecheck; alleen fixturetest |
 | Data Guard-detectie | IMPLEMENTED / NOT_TESTED_ON_ORACLE | database role-query plus `checks/check_dataguard`; scenario 9 mock |
-| Oracle Linux 8/9, x86_64, 19c | IMPLEMENTED / NOT_TESTED_ON_ORACLE | `perform_assessment`, `perform_preapply_recheck` |
+| Oracle Linux 8/9 of 7.9 met gekwalificeerde UEK6, x86_64, 19c | IMPLEMENTED / NOT_TESTED_ON_ORACLE | `supported_oracle_linux`, `perform_assessment`, `perform_preapply_recheck`; OL7-hostkwalificatie vereist |
 | Central/local inventory en OPatch lsinventory | IMPLEMENTED / NOT_TESTED_ON_ORACLE | assessment en preapply inventorylogs |
 | OPatch-versie | IMPLEMENTED / MOCKED | assessment/preapply; scenario 5 |
 | Patch-ID/type/README | PARTIAL | directory-ID en README-aanwezigheid; semantische README/patchtypebeoordeling handmatig |

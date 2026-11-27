@@ -20,6 +20,7 @@ releases/<unieke-release-id>/
 │   ├── opg_stage_approval.sh
 │   ├── opg_blackout.py
 │   ├── opg_active_home_inspect.py
+│   ├── opg_install_active_home.py
 │   ├── opg_bootstrap_host.sh
 │   ├── opg_build_artifact_manifest.py
 │   ├── opg_context_root.sh
@@ -93,3 +94,6 @@ Zie het volledige [fresh-host contract](../OEM_WRAPPER_GUIDE.md#fresh-host-insta
 De meegeleverde
 privileged helpers komen uit dezelfde actieve release onder
 `current/oem-tasks`. Bootstrap verandert de patch- of lifecyclelogica niet.
+
+Privileged Active Home heeft een afzonderlijke opt-in installatie met lokale,
+hostgebonden policy en sudoers. Zie de [installatie- en kwalificatieprocedure](OL7_ACTIVE_HOME_DEPLOYMENT.md).

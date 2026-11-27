@@ -2,6 +2,7 @@
 """Test the read-only helper and its Bash caller with isolated fixtures."""
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -26,8 +27,9 @@ SPEC.loader.exec_module(helper)
 SOURCE = (ROOT / "project/patchGD_guard.sh").read_text(encoding="utf-8")
 HOME = "/opt/oracle/dbhome_1"
 UID, GID = 65534, 65534
-POLICY = {"uid": UID, "gid": GID, "oracle_home": HOME,
-          "namespaces": {name: "{}:[123]".format(name) for name in helper.NAMESPACES}}
+DEPLOYMENT_ID = "a" * 64
+POLICY = {"uid": UID, "gid": GID, "oracle_home": HOME, "deployment_id": DEPLOYMENT_ID,
+          "scanner_sha256": "b" * 64, "namespaces": dict(helper.INITIAL_NAMESPACES, mnt="mnt:[123]")}
 BINDING = "OPG_ACTIVE_HOME_INSPECTION|version=1|mode={}|home={}|exit_code={}"
 HIT = 'ACTIVE_HOME_FILE|pid=1|uid=1001|process="fixture"|file="{}/bin/oracle"'.format(HOME)
 
@@ -59,12 +61,12 @@ class HelperTests(unittest.TestCase):
 
     def test_refuses_unsafe_file_and_parent_permissions(self):
         path = Path("/fixture/scanner.py")
-        safe_file = SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o644)
+        safe_file = SimpleNamespace(st_uid=0, st_gid=0, st_nlink=1, st_mode=stat.S_IFREG | 0o644)
         safe_parent = SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
         for file, parent, allowed in (
                 (safe_file, safe_parent, True),
-                (SimpleNamespace(st_uid=UID, st_mode=safe_file.st_mode), safe_parent, False),
-                (SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o664), safe_parent, False),
+                (SimpleNamespace(st_uid=UID, st_gid=0, st_nlink=1, st_mode=safe_file.st_mode), safe_parent, False),
+                (SimpleNamespace(st_uid=0, st_gid=0, st_nlink=1, st_mode=stat.S_IFREG | 0o664), safe_parent, False),
                 (SimpleNamespace(st_uid=0, st_mode=stat.S_IFLNK | 0o777), safe_parent, False),
                 (safe_file, SimpleNamespace(st_uid=UID, st_mode=safe_parent.st_mode), False),
                 (safe_file, SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o775), False)):
@@ -82,15 +84,41 @@ class HelperTests(unittest.TestCase):
                 helper.require_host_namespaces(POLICY["namespaces"])
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "policy.json"
-            with patch.object(helper, "POLICY", path), patch.object(helper, "require_trusted_file"):
+            with patch.object(helper, "POLICY", path), patch.object(helper, "require_trusted_file"), \
+                    patch.object(helper, "DEPLOYMENT_ID", DEPLOYMENT_ID), \
+                    patch.object(helper, "SCANNER_SHA256", POLICY["scanner_sha256"]):
                 path.write_text(json.dumps(POLICY))
                 self.assertEqual(helper.load_policy(), POLICY)
                 for invalid in (json.dumps(POLICY).replace(HOME, HOME + "/../other"),
                                 json.dumps(POLICY).replace('"uid": 65534', '"uid": 0, "uid": 65534'),
-                                json.dumps(POLICY).replace('"gid": 65534', '"gid": true')):
+                                json.dumps(POLICY).replace('"gid": 65534', '"gid": true'),
+                                json.dumps(dict(POLICY, deployment_id="c" * 64)),
+                                json.dumps(dict(POLICY, scanner_sha256="d" * 64))):
                     path.write_text(invalid)
                     with self.assertRaises(ValueError):
                         helper.load_policy()
+
+    def test_matching_child_namespace_still_cannot_prove_host_coverage(self):
+        def link(path):
+            if path == "/proc/self":
+                return str(os.getpid())
+            return dict(POLICY["namespaces"], pid="pid:[999]")[path.rsplit("/", 1)[1]]
+        with patch.object(helper, "readlink", side_effect=link), self.assertRaisesRegex(PermissionError, "pid"):
+            helper.host_namespaces()
+
+    def test_scanner_fingerprint_is_checked_before_loading_code(self):
+        data = b"def inspect_proc(home):\n    return 20 if home else 0\n"
+        digest = hashlib.sha256(data).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ("opg_active_home-" + digest + ".py")
+            path.write_bytes(data)
+            info = SimpleNamespace(st_uid=0, st_gid=0, st_nlink=1, st_mode=stat.S_IFREG | 0o644)
+            with patch.object(helper, "SCANNER_DIR", Path(tmp)), patch.object(helper, "require_trusted_file"), \
+                    patch.object(helper.os, "fstat", return_value=info):
+                self.assertEqual(helper.verified_scanner(digest)(None), 0)
+                path.write_bytes(b"raise AssertionError('incorrect scanner executed')\n")
+                with self.assertRaisesRegex(ValueError, "SHA-256"):
+                    helper.verified_scanner(digest)
 
     def test_missing_ptrace_capability_fails_before_reading_targets(self):
         with patch.object(helper, "status_fields", return_value={"CapPrm": "0"}), \
@@ -115,7 +143,7 @@ class HelperTests(unittest.TestCase):
                         patch.object(helper, "restrict_observer"), \
                         patch.object(helper.os, "stat", return_value=metadata), \
                         patch.object(helper.os.path, "realpath", return_value=HOME), \
-                        patch.object(helper.runpy, "run_path", return_value={"inspect_proc": inspect}), \
+                        patch.object(helper, "verified_scanner", return_value=inspect), \
                         contextlib.redirect_stdout(io.StringIO()) as evidence:
                     actual = helper.main([mode])
                 self.assertEqual(actual, code)
@@ -127,10 +155,13 @@ class GuardTests(unittest.TestCase):
     def inspect(self, mode, rc, transcript, trust="yes", route="inspect"):
         shell = r'''
 set -uo pipefail
+unset OPG_TEST_MODE
 ACTIVE_HOME_INSPECTION_MODE=privileged
 EXIT_UNKNOWN=30 EXIT_BLOCKED=20
 TARGET_ORACLE_HOME=$1; RUN_DIR=$2
 PATCH_ROOT=/fixture; MONTH=TEST
+namespace_fixture=$5
+active_home_initial_pid_namespace() { [[ "$namespace_fixture" != isolated ]]; }
 case "$5" in
   missing) active_home_executable_trusted() { return 1; } ;;
   yes) active_home_executable_trusted() {
@@ -201,6 +232,11 @@ esac
 
     def test_missing_helper_fails_before_sudo(self):
         result, calls = self.inspect("scan", 0, "", trust="missing")
+        self.assertEqual(result.returncode, 30, result.stderr)
+        self.assertEqual(calls, "")
+
+    def test_non_initial_pid_namespace_never_calls_existing_launcher(self):
+        result, calls = self.inspect("scan", 0, "ACTIVE_HOME_SCAN_CLEAR\n" + BINDING.format("scan", HOME, 0), trust="isolated")
         self.assertEqual(result.returncode, 30, result.stderr)
         self.assertEqual(calls, "")
 
@@ -296,11 +332,12 @@ class LinuxPrivilegeTests(unittest.TestCase):
 import os, runpy, signal, sys
 entry = runpy.run_path(sys.argv[1], run_name='fixture')
 from pathlib import Path
-entry['main'].__globals__.update(POLICY=Path(sys.argv[2]), SCANNER=Path(sys.argv[3]))
+entry['main'].__globals__.update(POLICY=Path(sys.argv[2]), SCANNER_DIR=Path(sys.argv[3]),
+                                 DEPLOYMENT_ID='a' * 64, SCANNER_SHA256=sys.argv[4])
 if 'OPG_FIXTURE_ALARM' in os.environ:
     signal.signal(signal.SIGALRM, entry['timed_out'])
     signal.alarm(1)
-sys.exit(entry['main'](sys.argv[4:]))
+sys.exit(entry['main'](sys.argv[5:]))
 """
         mapped_child = """
 import ctypes, mmap, sys
@@ -319,17 +356,19 @@ sys.stdin.read()
             os.chown(str(home), UID, GID)
             mapping = home / "mapped.bin"
             mapping.write_bytes(b"fixture data")
-            scanner = directory / "opg_active_home.py"
-            scanner.write_bytes((ROOT / "project/lib/opg_active_home.py").read_bytes())
+            data = (ROOT / "project/lib/opg_active_home.py").read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+            scanner = directory / ("opg_active_home-" + digest + ".py")
+            scanner.write_bytes(data)
             scanner.chmod(0o644)
             policy = directory / "policy.json"
-            policy.write_text(json.dumps(dict(POLICY, oracle_home=str(home), namespaces={
-                name: os.readlink("/proc/1/ns/" + name) for name in helper.NAMESPACES})))
+            metadata = dict(POLICY, oracle_home=str(home), namespaces=helper.host_namespaces(), scanner_sha256=digest)
+            policy.write_text(json.dumps(metadata))
             policy.chmod(0o400)
-            command = [sys.executable, "-IBS", "-c", launcher, str(HELPER), str(policy), str(scanner)]
+            command = [sys.executable, "-IBS", "-c", launcher, str(HELPER), str(policy), str(directory)]
 
             def inspect(mode, expected):
-                result = subprocess.run(command + [mode], env=credentials, stdout=subprocess.PIPE,
+                result = subprocess.run(command + [metadata["scanner_sha256"], mode], env=credentials, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, timeout=10)
                 self.assertEqual(result.returncode, expected, (result.stdout, result.stderr))
                 return result.stdout
@@ -351,7 +390,12 @@ sys.stdin.read()
             os.chown(str(home), 0, 0)
             self.assertIn(b"Oracle Home binding", inspect("scan", 30))
             os.chown(str(home), UID, GID)
-            scanner.write_text("import time\ndef inspect_proc(home):\n    time.sleep(5)\n")
+            data = b"import time\ndef inspect_proc(home):\n    time.sleep(5)\n"
+            metadata["scanner_sha256"] = hashlib.sha256(data).hexdigest()
+            scanner = directory / ("opg_active_home-" + metadata["scanner_sha256"] + ".py")
+            scanner.write_bytes(data)
+            scanner.chmod(0o644)
+            policy.write_text(json.dumps(metadata))
             credentials["OPG_FIXTURE_ALARM"] = "1"
             self.assertIn(b"inspection deadline exceeded", inspect("scan", 30))
             policy.chmod(0o644)

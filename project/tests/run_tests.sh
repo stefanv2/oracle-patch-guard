@@ -196,6 +196,8 @@ python3 "$ROOT/tests/run_active_home_tests.py"
 record 'Active Home-helpersuite' 0 $?
 python3 "$ROOT/tests/run_privileged_active_home_tests.py"
 record 'Privileged Active Home-helpersuite' 0 $?
+python3 "$ROOT/tests/run_active_home_install_tests.py"
+record 'Privileged Active Home-installatiesuite' 0 $?
 
 # 2. Meerdere databases in dezelfde home -> afzonderlijke CONDITIONAL.
 setup_case multi multiple_databases; printf 'DB1:%s:Y\nDB2:%s:Y\n' "$HOME_DIR" "$HOME_DIR" >"$ORATAB"; assess R2; record 'meerdere databases zelfde home' 10 $? "$CASE_DIR/R2.out"
@@ -571,6 +573,78 @@ for summary_id in PATCH_CONFLICT_READINESS TOPOLOGY_READINESS DATABASE_RUNTIME_R
   grep -Fq "OPG_PRECHECK_FINDING|run_id=PC1|severity=READY|id=${summary_id}" "$CASE_DIR/PC1.out" || summary_rc=99
 done
 record 'succesvolle PRECHECK-controles tonen compacte READY-summary' 0 "$summary_rc"
+
+platform_identity() {
+  local definition
+  definition=$(sed -n '/^read_os_release() {$/,/^}$/p' "$ROOT/patchGD_guard.sh") || return 1
+  bash -c "$definition"$'\n''read_os_release "$1"' _ "$1"
+}
+printf 'ID="ol"\nVERSION_ID="7.9"\n' >"$CASE_DIR/os-release"
+[[ $(platform_identity "$CASE_DIR/os-release") == 'ol|7.9' ]]
+record 'os-release levert de exacte OL7-identiteit' 0 $?
+printf 'ID=rhel\n' >>"$CASE_DIR/os-release"
+platform_identity "$CASE_DIR/os-release" >/dev/null
+record 'Dubbele os-release-identiteit wordt geweigerd' 1 $?
+
+while IFS='|' read -r label id version arch kernel expected finding; do
+  setup_case "platform-$label"
+  printf '\nMOCK_OS_ID=%s\nMOCK_OS_VERSION=%s\nMOCK_ARCH=%s\nMOCK_KERNEL_RELEASE=%s\n' \
+    "$id" "$version" "$arch" "$kernel" >>"$FIXTURE_ENV"
+  precheck PLATFORM; rc=$?
+  grep -Fxq "kernel=$kernel" "$RUN_ROOT/PLATFORM/host_info.txt" || rc=99
+  if [[ -n "$finding" ]]; then
+    grep -Fq "BLOCKED|$finding|" "$RUN_ROOT/PLATFORM/findings.psv" || rc=98
+  elif grep -Eq 'BLOCKED\|(OS_UNSUPPORTED|ARCH_UNSUPPORTED)\|' "$RUN_ROOT/PLATFORM/findings.psv"; then
+    rc=97
+  fi
+  record_precheck "PRECHECK-platform $label" "$expected" "$rc" "$CASE_DIR/PLATFORM.out"
+done <<'EOF'
+OL7-UEK6|ol|7.9|x86_64|5.4.17-2136.338.4.2.el7uek.x86_64|10|
+OL7-UEK6-minimum|ol|7.9|x86_64|5.4.17-2011.4.4.el7uek.x86_64|10|
+OL8|ol|8.10|x86_64|5.4.17-2136.300.7.el8uek.x86_64|10|
+OL9|ol|9.6|x86_64|5.15.0-300.163.18.el9uek.x86_64|10|
+OL7-RHCK|ol|7.9|x86_64|3.10.0-1160.119.1.el7.x86_64|20|OS_UNSUPPORTED
+OL7-oude-UEK6|ol|7.9|x86_64|5.4.17-2011.4.3.el7uek.x86_64|20|OS_UNSUPPORTED
+OL7-kernel-onbekend|ol|7.9|x86_64||20|OS_UNSUPPORTED
+OL7-oude-release|ol|7.8|x86_64|5.4.17-2011.4.4.el7uek.x86_64|20|OS_UNSUPPORTED
+RHEL7|rhel|7.9|x86_64|5.4.17-2011.4.4.el7uek.x86_64|20|OS_UNSUPPORTED
+OL9-ARM|ol|9.6|aarch64|5.15.0-300.163.18.el9uek.aarch64|20|ARCH_UNSUPPORTED
+OL10|ol|10.0|x86_64|6.12.0-100.el10uek.x86_64|20|OS_UNSUPPORTED
+EOF
+
+setup_case platform-apply
+printf '\nMOCK_OS_VERSION=7.9\nMOCK_KERNEL_RELEASE=5.4.17-2136.338.4.2.el7uek.x86_64\n' >>"$FIXTURE_ENV"
+assess PLATFORM-APPLY; rc=$?
+record 'ASSESS accepteert OL7.9 met UEK6' 10 "$rc" "$CASE_DIR/PLATFORM-APPLY.out"
+plan PLATFORM-APPLY; token=$(approval PLATFORM-APPLY)
+guard apply --dry-run --non-interactive --run-id PLATFORM-APPLY \
+  --approved-manifest "$RUN_ROOT/PLATFORM-APPLY/patch_manifest.json" --approval-token "$token" \
+  >"$CASE_DIR/platform-apply.out" 2>&1; rc=$?
+record 'PREAPPLY accepteert OL7.9 met UEK6 in dry-run' 0 "$rc" "$CASE_DIR/platform-apply.out"
+printf '\nMOCK_KERNEL_RELEASE=3.10.0-1160.119.1.el7.x86_64\n' >>"$FIXTURE_ENV"
+guard apply --non-interactive --run-id PLATFORM-APPLY \
+  --approved-manifest "$RUN_ROOT/PLATFORM-APPLY/patch_manifest.json" --approval-token "$token" \
+  >"$CASE_DIR/platform-apply.out" 2>&1; rc=$?
+grep -Fq 'BLOCKED|PLATFORM_CHANGED|' "$RUN_ROOT/PLATFORM-APPLY/preapply_findings.psv" || rc=99
+record 'PREAPPLY blokkeert een niet-ondersteunde kernel' 20 "$rc" "$CASE_DIR/platform-apply.out"
+assert_no_downtime_started 'Niet-ondersteunde OL7-kernel start geen downtime' PLATFORM-APPLY
+
+setup_case preapply-evidence-write
+assess EVIDENCE-WRITE; plan EVIDENCE-WRITE; token=$(approval EVIDENCE-WRITE)
+mock_bin="$CASE_DIR/mock-bin"; mkdir "$mock_bin"
+cat >"$mock_bin/mv" <<'EOF'
+#!/bin/bash
+[[ ${!#} != */preapply_assessment.json ]] || exit 1
+exec /usr/bin/mv "$@"
+EOF
+chmod 0750 "$mock_bin/mv"
+sed -i "s|^SAFE_PATH=.*|SAFE_PATH=$mock_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|" "$CONFIG"
+guard apply --non-interactive --run-id EVIDENCE-WRITE \
+  --approved-manifest "$RUN_ROOT/EVIDENCE-WRITE/patch_manifest.json" --approval-token "$token" \
+  >"$CASE_DIR/preapply-evidence.out" 2>&1; rc=$?
+grep -Fq 'PREAPPLY_EVIDENCE_WRITE_FAILED' "$CASE_DIR/preapply-evidence.out" || rc=99
+record 'PREAPPLY blokkeert bij mislukte evidencepublicatie' 30 "$rc" "$CASE_DIR/preapply-evidence.out"
+assert_no_downtime_started 'Mislukte PREAPPLY-evidencepublicatie start geen downtime' EVIDENCE-WRITE
 
 setup_case ojvm-perl
 perl_check_bin="$CASE_DIR/opatch-path"
@@ -1157,7 +1231,7 @@ active_home_apply resume; rc=$?
    $(grep -Fc 'COMMAND_START|label=shutdown_DB1|' "$ACTIVE_RUN/commands.log") == 1 ]] || rc=99
 record 'RESUME voltooit na herstel zonder RU of shutdown te herhalen' 0 "$rc" "$CASE_DIR/active.out"
 
-for case_name in approval window inventory media lock history binary; do
+for case_name in approval window inventory media platform lock history binary; do
   prepare_active_home_case "retry-deny-$case_name"
   printf '\nMOCK_RC_active_home_before_db=20\n' >>"$FIXTURE_ENV"
   active_home_apply
@@ -1168,6 +1242,7 @@ for case_name in approval window inventory media lock history binary; do
     window) printf '\nMOCK_CHECK_MAINTENANCE_WINDOW=BLOCKED\n' >>"$FIXTURE_ENV" ;;
     inventory) printf '\nMOCK_RETRY_INVENTORY_EXTRA="1234;Unexpected patch"\n' >>"$FIXTURE_ENV" ;;
     media) printf 'changed\n' >>"$PATCH_ROOT/JUL2026/39472050/payload.bin" ;;
+    platform) printf '\nMOCK_OS_VERSION=7.9\nMOCK_KERNEL_RELEASE=3.10.0-1160.119.1.el7.x86_64\n' >>"$FIXTURE_ENV" ;;
     lock) printf '\nMOCK_LOCK_BUSY=true\n' >>"$FIXTURE_ENV"; expected=60 ;;
     history) printf 'incomplete publication\n' >>"$ACTIVE_RUN/state_history.log" ;;
     binary)

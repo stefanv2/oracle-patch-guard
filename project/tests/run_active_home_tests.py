@@ -126,10 +126,20 @@ class InspectionTests(unittest.TestCase):
 
     def test_proc_mount_that_hides_pids_is_unknown(self):
         mountinfo = b"21 20 0:15 / /proc rw,nosuid - proc proc rw,hidepid=2\n"
-        with patch("builtins.open", return_value=io.BytesIO(mountinfo)), \
+        with patch.object(active_home, "readlink", side_effect=(active_home.INITIAL_PID_NAMESPACE,
+                          str(os.getpid()).encode("ascii"))), \
+                patch("builtins.open", return_value=io.BytesIO(mountinfo)), \
                 contextlib.redirect_stdout(io.StringIO()) as evidence:
             self.assertEqual(active_home.main("--visibility"), 30)
             self.assertIn("FILE_INSPECTION_UNKNOWN", evidence.getvalue())
+
+    def test_local_proc_inspection_refuses_nested_or_unbound_pid_view(self):
+        for links in ((b"pid:[999]",), (active_home.INITIAL_PID_NAMESPACE, b"0")):
+            with self.subTest(links=links), patch.object(active_home, "readlink", side_effect=links), \
+                    patch("builtins.open") as mountinfo, contextlib.redirect_stdout(io.StringIO()) as evidence:
+                self.assertEqual(active_home.main("--visibility"), 30)
+                self.assertNotIn("PROC_COVERAGE_CONFIRMED", evidence.getvalue())
+                mountinfo.assert_not_called()
 
     def inspect(self, rc, output=b"", stderr=b"", proc=(set(), None)):
         result = subprocess.CompletedProcess([], rc, output, stderr)

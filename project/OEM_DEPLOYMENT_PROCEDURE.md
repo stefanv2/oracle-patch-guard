@@ -52,6 +52,12 @@ gelijke UID op zichzelf geen toegang bewijst.
 
 ### Read-only helper bij beperkt proceszicht
 
+De [hostinstaller voor privileged Active Home](../docs/OL7_ACTIVE_HOME_DEPLOYMENT.md)
+is de installatieprocedure voor releases met een generatiegebonden launcher
+en scanner. De handmatige paden en het JSON-voorbeeld hieronder beschrijven
+de eerdere deployment. Voer de kwalificatie uit voordat de hostconfig naar
+`privileged` gaat.
+
 Laat de DBA op een representatieve OL9.9-acceptatiehost de read-only detector
 uitvoeren als de Oracle Home-owner, met de OEM-omgeving en dezelfde procfs-mount.
 Gebruik een vertrouwde kopie van `lib/opg_active_home.py` met

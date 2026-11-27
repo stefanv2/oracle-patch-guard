@@ -11,6 +11,7 @@ import sys
 
 PROC_ROOT = b"/proc"
 PROCESS_GONE = (errno.ENOENT, errno.ESRCH)
+INITIAL_PID_NAMESPACE = b"pid:[4026531836]"  # Linux PROC_PID_INIT_INO.
 
 
 def in_home(path, home):
@@ -52,6 +53,9 @@ def parse_lsof(output, home):
 
 def proc_pids():
     # A hidden PID must not be mistaken for an unrelated process or no match.
+    if (readlink(PROC_ROOT + b"/self/ns/pid") != INITIAL_PID_NAMESPACE
+            or readlink(PROC_ROOT + b"/self") != str(os.getpid()).encode("ascii")):
+        raise ValueError("initiele PID-namespace of procfs-PID-weergave niet aantoonbaar")
     with open(PROC_ROOT + b"/self/mountinfo", "rb") as mountinfo:
         mounts = [line.split(b" - ", 1) for line in mountinfo
                   if line.split()[4:5] == [b"/proc"]]
