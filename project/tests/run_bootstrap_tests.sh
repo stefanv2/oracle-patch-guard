@@ -65,9 +65,12 @@ write_valid_config
 cat >"$VISUDO" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$OPG_VISUDO_LOG"
+if [[ $# -eq 1 && $1 == -c ]]; then
+    exec /usr/sbin/visudo -cf "$OPG_BOOTSTRAP_TEST_ROOT/etc/sudoers"
+fi
 [[ $# -eq 2 && $1 == -cf && -f $2 ]] || exit 2
 grep -q 'BROKEN_SUDOERS' "$2" && exit 1
-grep -q '/usr/local/sbin/opg_context_root.sh publish-completion [*]' "$2" || exit 1
+grep -Eq '/usr/local/sbin/opg_context_root.sh publish-completion [*]|OPG_ACTIVE_HOME_INSPECTION|^@include ' "$2" || exit 1
 exec /usr/sbin/visudo "$@"
 EOF
 chmod 0755 "$VISUDO"
@@ -370,6 +373,181 @@ mv "$BASE/var/log/oracle-patch-guard" "$BASE/safe-log-target"
 ln -s "$BASE/safe-log-target" "$BASE/var/log/oracle-patch-guard"
 run_bootstrap
 record 'arbitraire deploymentdirectorysymlink blijft geblokkeerd' 30 $?
+
+rm -- "$BASE/var/log/oracle-patch-guard"
+mv -- "$BASE/safe-log-target" "$BASE/var/log/oracle-patch-guard"
+write_valid_config
+run_bootstrap; rc=$?
+[[ ! -e "$BASE/usr/local/sbin/opg_active_home_inspect" && ! -e "$BASE/etc/oracle-patch-guard/active-home-inspect.json" ]] || rc=99
+record 'local-mode gebruikt geen privileged bestanden of SELinux-tools' 0 "$rc"
+
+ACTIVE_BIN="$BASE/active-bin"
+ACTIVE_HOME="$BASE/oracle-home"
+ACTIVE_HELPER="$BASE/usr/local/sbin/opg_active_home_inspect"
+ACTIVE_SCANNER="$BASE/usr/local/libexec/oracle-patch-guard/opg_active_home.py"
+ACTIVE_SUDOERS="$BASE/etc/sudoers.d/oracle-patch-guard-active-home"
+ACTIVE_POLICY="$BASE/etc/oracle-patch-guard/active-home-inspect.json"
+ACTIVE_SOURCE="$FIXTURE_ROOT/config/examples/oracle-patch-guard-active-home.sudoers"
+HOST_KEY=$( (hostname -f 2>/dev/null || hostname) | tr '[:upper:]' '[:lower:]')
+BINDING="$CENTRAL_OPG_ROOT/config/hosts/$HOST_KEY/active-home.conf"
+mkdir -p "$ACTIVE_BIN" "$ACTIVE_HOME/bin" "$BASE/usr/bin" "$BASE/proc/1/ns" "$BASE/proc/self/ns" "${BINDING%/*}"
+chown -R nobody:"$(id -gn nobody)" "$ACTIVE_HOME"
+printf '#!/bin/false\n' >"$ACTIVE_HOME/bin/oracle"
+printf '#!/bin/false\n' >"$BASE/usr/bin/sudo"
+chmod 04111 "$BASE/usr/bin/sudo"
+cp "$ROOT/config/examples/oracle-patch-guard-active-home.sudoers" "$ACTIVE_SOURCE"
+printf 'root ALL=(ALL) ALL\n@includedir "%s"\n' "$BASE/etc/sudoers.d" >"$BASE/etc/sudoers"
+chmod 0440 "$BASE/etc/sudoers"
+set_fixture_namespaces() {
+    local view
+    for view in 1 self; do
+        ln -sfn 'pid:[4026531836]' "$BASE/proc/$view/ns/pid"
+        ln -sfn 'user:[4026531837]' "$BASE/proc/$view/ns/user"
+        ln -sfn "mnt:[$1]" "$BASE/proc/$view/ns/mnt"
+    done
+}
+set_fixture_namespaces 12345
+
+cat >"$ACTIVE_BIN/getenforce" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${FIXTURE_SELINUX:-Enforcing}"
+EOF
+cat >"$ACTIVE_BIN/matchpathcon" <<'EOF'
+#!/usr/bin/env bash
+if [[ $# == 2 && $1 == -V ]]; then
+    [[ -f "$2" ]]
+elif [[ $# == 4 && "$1 $2 $3" == '-n -m file' ]]; then
+    printf 'system_u:object_r:usr_t:s0\n'
+else
+    exit 1
+fi
+EOF
+cat >"$ACTIVE_BIN/chcon" <<'EOF'
+#!/usr/bin/env bash
+[[ $# == 3 && $1 == -- && $2 == system_u:object_r:usr_t:s0 && -f "$3" ]]
+EOF
+cat >"$ACTIVE_BIN/restorecon" <<'EOF'
+#!/usr/bin/env bash
+[[ $# == 2 && $1 == -- && -d "$2" ]]
+EOF
+cat >"$ACTIVE_BIN/stat" <<'EOF'
+#!/usr/bin/env bash
+if [[ $# == 4 && "$1 $2 $3" == '-c %C --' ]]; then
+    [[ -f "$4" ]] || exit 1
+    printf 'system_u:object_r:usr_t:s0\n'
+else
+    exec /usr/bin/stat "$@"
+fi
+EOF
+cat >"$ACTIVE_BIN/runuser" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+root=$OPG_BOOTSTRAP_TEST_ROOT
+[[ $# == 10 && "$1 $2 $3" == '-u nobody --' && "$4 $5 $6 $7 $8" == "$root/usr/bin/sudo -n -u root --" &&
+   "$9" == "$root/usr/local/sbin/opg_active_home_inspect" && "${10}" == visibility ]]
+if [[ ${FIXTURE_VISIBILITY:-ready} == refused ]]; then exit 30; fi
+home=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["oracle_home"])' \
+    "$root/etc/oracle-patch-guard/active-home-inspect.json")
+printf 'PROC_COVERAGE_CONFIRMED\nOPG_ACTIVE_HOME_INSPECTION|version=%s|mode=visibility|home=%s|exit_code=0\n' \
+    "${FIXTURE_PROTOCOL:-1}" "$home"
+EOF
+chmod 0755 "$ACTIVE_BIN"/*
+
+run_privileged_bootstrap() {
+    PATH="$ACTIVE_BIN:$PATH" run_bootstrap
+}
+
+local_config=$(sha256sum "$CONFIG_TARGET")
+printf 'ACTIVE_HOME_INSPECTION_MODE=privileged\n' >>"$CONFIG_SOURCE"
+run_privileged_bootstrap; rc=$?
+[[ $(sha256sum "$CONFIG_TARGET") == "$local_config" && ! -e "$ACTIVE_SUDOERS" ]] || rc=99
+record 'privileged bootstrap zonder hostbinding behoudt lokale config' 30 "$rc"
+
+printf 'ACTIVE_HOME_ORACLE_HOME=%s\n' "$ACTIVE_HOME" >"$BINDING"
+chmod 0664 "$BINDING"
+run_privileged_bootstrap; rc=$?
+[[ $(sha256sum "$CONFIG_TARGET") == "$local_config" && ! -e "$ACTIVE_HELPER" ]] || rc=99
+record 'schrijfbare hostbinding wordt vóór installatie geweigerd' 30 "$rc"
+chmod 0644 "$BINDING"
+
+FIXTURE_SELINUX=Permissive run_privileged_bootstrap; rc=$?
+[[ $(sha256sum "$CONFIG_TARGET") == "$local_config" && ! -e "$ACTIVE_HELPER" ]] || rc=99
+record 'privileged bootstrap vereist SELinux Enforcing' 30 "$rc"
+
+chown root:root "$ACTIVE_HOME"
+run_privileged_bootstrap; rc=$?
+[[ $(sha256sum "$CONFIG_TARGET") == "$local_config" && ! -e "$ACTIVE_HELPER" ]] || rc=99
+record 'Oracle Home met afwijkende eigenaar wordt geweigerd' 30 "$rc"
+chown nobody:"$(id -gn nobody)" "$ACTIVE_HOME"
+
+ln -sfn 'mnt:[777]' "$BASE/proc/self/ns/mnt"
+run_privileged_bootstrap; rc=$?
+[[ $(sha256sum "$CONFIG_TARGET") == "$local_config" && ! -e "$ACTIVE_HELPER" ]] || rc=99
+record 'afwijkende mountnamespace wordt geweigerd' 30 "$rc"
+set_fixture_namespaces 12345
+
+printf '\nBROKEN_SUDOERS\n' >>"$ACTIVE_SOURCE"
+run_privileged_bootstrap; rc=$?
+[[ $(sha256sum "$CONFIG_TARGET") == "$local_config" && ! -e "$ACTIVE_SUDOERS" ]] || rc=99
+record 'ongeldig Active Home-sudoersfragment wordt vooraf geweigerd' 30 "$rc"
+cp "$ROOT/config/examples/oracle-patch-guard-active-home.sudoers" "$ACTIVE_SOURCE"
+
+printf 'Cmnd_Alias OPG_ACTIVE_HOME_INSPECTION = /bin/true\n' >"$BASE/etc/sudoers.d/duplicate-active-home"
+chmod 0440 "$BASE/etc/sudoers.d/duplicate-active-home"
+run_privileged_bootstrap; rc=$?
+[[ $(sha256sum "$CONFIG_TARGET") == "$local_config" && ! -e "$ACTIVE_SUDOERS" ]] || rc=99
+record 'visudo weigert een botsende alias in de volledige kandidaat' 30 "$rc"
+rm -- "$BASE/etc/sudoers.d/duplicate-active-home"
+
+FIXTURE_PROTOCOL=0 run_privileged_bootstrap; rc=$?
+[[ $(sha256sum "$CONFIG_TARGET") == "$local_config" && ! -e "$ACTIVE_SUDOERS" ]] || rc=99
+record 'foutieve protocolversie trekt nieuwe sudoers in en behoudt lokale config' 30 "$rc"
+rm -- "$ACTIVE_HELPER" "$ACTIVE_SCANNER" "$ACTIVE_POLICY"
+
+run_privileged_bootstrap; rc=$?
+cmp -s "$CONFIG_SOURCE" "$CONFIG_TARGET" &&
+    grep -Fxq "OPG_BOOTSTRAP|ACTIVE_HOME_READY|home=$ACTIVE_HOME|mode=privileged|protocol=1" "$OUT" &&
+    [[ $(stat -c '%u:%g:%a' "$ACTIVE_HELPER" "$ACTIVE_SCANNER" "$ACTIVE_POLICY" "$ACTIVE_SUDOERS") == \
+       $'0:0:755\n0:0:644\n0:0:400\n0:0:440' ]] || rc=99
+record 'privileged installatie valideert en publiceert byte-identieke centrale config als laatste' 0 "$rc"
+
+before=$(stat -c '%i' "$ACTIVE_HELPER" "$ACTIVE_SCANNER" "$ACTIVE_POLICY" "$ACTIVE_SUDOERS" "$CONFIG_TARGET")
+run_privileged_bootstrap; rc=$?
+[[ $(stat -c '%i' "$ACTIVE_HELPER" "$ACTIVE_SCANNER" "$ACTIVE_POLICY" "$ACTIVE_SUDOERS" "$CONFIG_TARGET") == "$before" ]] || rc=99
+record 'herhaalde privileged bootstrap laat identieke bestanden intact' 0 "$rc"
+
+# Model a prior manually generated JSON with the same binding but different whitespace.
+python3 -c 'import json, sys; p=sys.argv[1]; d=json.load(open(p)); open(p,"w").write(json.dumps(d))' "$ACTIVE_POLICY"
+working=$(sha256sum "$ACTIVE_HELPER" "$ACTIVE_SCANNER" "$ACTIVE_POLICY" "$ACTIVE_SUDOERS" "$CONFIG_TARGET")
+run_privileged_bootstrap; rc=$?
+[[ $(sha256sum "$ACTIVE_HELPER" "$ACTIVE_SCANNER" "$ACTIVE_POLICY" "$ACTIVE_SUDOERS" "$CONFIG_TARGET") == "$working" ]] || rc=99
+record 'handmatige installatie met dezelfde bindgegevens wordt zonder herschrijven overgenomen' 0 "$rc"
+
+OTHER_HOME="$BASE/other-oracle-home"
+mkdir -p "$OTHER_HOME/bin"
+chown nobody:"$(id -gn nobody)" "$OTHER_HOME"
+printf '#!/bin/false\n' >"$OTHER_HOME/bin/oracle"
+printf 'ACTIVE_HOME_ORACLE_HOME=%s\n' "$OTHER_HOME" >"$BINDING"
+run_privileged_bootstrap; rc=$?
+[[ $(sha256sum "$ACTIVE_HELPER" "$ACTIVE_SCANNER" "$ACTIVE_POLICY" "$ACTIVE_SUDOERS" "$CONFIG_TARGET") == "$working" ]] || rc=99
+record 'een andere Oracle Home wijzigt een bestaande binding niet' 30 "$rc"
+printf 'ACTIVE_HOME_ORACLE_HOME=%s\n' "$ACTIVE_HOME" >"$BINDING"
+
+set_fixture_namespaces 67890
+FIXTURE_VISIBILITY=refused run_privileged_bootstrap; rc=$?
+[[ $(sha256sum "$ACTIVE_HELPER" "$ACTIVE_SCANNER" "$ACTIVE_POLICY" "$ACTIVE_SUDOERS" "$CONFIG_TARGET") == "$working" ]] || rc=99
+record 'geweigerde zichtbaarheid herstelt eerder geïnstalleerde policy en behoudt privileged config' 30 "$rc"
+run_privileged_bootstrap; rc=$?
+grep -Fq 'mnt:[67890]' "$ACTIVE_POLICY" || rc=99
+record 'herhaalde run vernieuwt de namespacebinding voor dezelfde host en home' 0 "$rc"
+
+chmod 0664 "$ACTIVE_SCANNER"
+run_privileged_bootstrap
+record 'onveilig bestaand doelbestand wordt geweigerd' 30 $?
+chmod 0644 "$ACTIVE_SCANNER"
+
+OPG_PREPARE_TEST_ROOT=$BASE bash "$ROOT/oem-tasks/opg_prepare_host.sh" >"$OUT" 2>&1
+record 'ongewijzigde PREPARE accepteert de geïnstalleerde privileged config' 0 $?
 
 printf '\nBootstrap results: %d passed, %d failed\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

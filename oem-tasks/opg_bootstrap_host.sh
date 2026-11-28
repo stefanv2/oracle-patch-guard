@@ -2,12 +2,14 @@
 set -euo pipefail
 umask 077
 
+ACTIVE_ROOT=
 if [[ ${OPG_BOOTSTRAP_TEST_MODE:-0} == 1 ]]; then
     TEST_ROOT=${OPG_BOOTSTRAP_TEST_ROOT:-}
     [[ "$TEST_ROOT" == /tmp/opg-bootstrap-tests.* ]] || {
         printf 'OPG_BOOTSTRAP_RESULT|status=FAILED|exit_code=30|message=ongeldige testroot\n' >&2
         exit 30
     }
+    ACTIVE_ROOT=$TEST_ROOT
     BASE="$TEST_ROOT/base/current"
     DST_CONTEXT="$TEST_ROOT/usr/local/sbin/opg_context_root.sh"
     DST_MEDIA_SH="$TEST_ROOT/usr/local/sbin/opg_media_stage_root.sh"
@@ -54,6 +56,10 @@ declare -A CONFIG_VALUES=()
 SUDOERS_TEMP=
 CONFIG_TEMP=
 SOURCE_STAGE=
+ACTIVE_TEMP=
+ACTIVE_POLICY_BACKUP=
+ACTIVE_NEW_SUDOERS=false
+ACTIVE_COMMITTED=false
 
 log() {
     printf 'OPG_BOOTSTRAP|%s\n' "$*"
@@ -76,6 +82,17 @@ SRC_KEY="$OPG_ROOT/config/approval_public.pem"
 SRC_PROCEDURE="$OPG_ROOT/config/oracle_home_rebuild.md"
 
 cleanup() {
+    if [[ "$ACTIVE_COMMITTED" == false ]]; then
+        if [[ "$ACTIVE_NEW_SUDOERS" == true ]]; then
+            rm -f -- "$ACTIVE_SUDOERS" || log "RECOVERY_REQUIRED|$ACTIVE_SUDOERS"
+        fi
+        if [[ -n "$ACTIVE_POLICY_BACKUP" ]]; then
+            mv -fT -- "$ACTIVE_POLICY_BACKUP" "$ACTIVE_POLICY" || log "RECOVERY_REQUIRED|backup=$ACTIVE_POLICY_BACKUP"
+        fi
+    elif [[ -n "$ACTIVE_POLICY_BACKUP" ]]; then
+        rm -f -- "$ACTIVE_POLICY_BACKUP"
+    fi
+    if [[ -n "$ACTIVE_TEMP" ]]; then rm -f -- "$ACTIVE_TEMP"; fi
     if [[ -n ${SOURCE_STAGE:-} ]]; then
         rm -f -- "$SOURCE_STAGE"/*
         rmdir -- "$SOURCE_STAGE"
@@ -88,6 +105,221 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+active_home_parent_chain() {
+    local directory=$1 identity mode
+    while :; do
+        if [[ -e "$directory" || -L "$directory" ]]; then
+            [[ -d "$directory" && ! -L "$directory" ]] || fail "onveilige Active Home-directory: $directory"
+            identity=$(stat -c '%u:%a' -- "$directory") || fail "onleesbare directorymetadata: $directory"
+            mode=${identity#*:}
+            [[ "$identity" =~ ^0:[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) ||
+                fail "onveilige Active Home-directoryrechten: $directory"
+        fi
+        [[ "$directory" != "${ACTIVE_ROOT:-/}" ]] || break
+        directory=${directory%/*}; directory=${directory:-/}
+    done
+}
+
+active_home_source() {
+    local path=$1 identity mode
+    active_home_parent_chain "${path%/*}"
+    [[ -f "$path" && ! -L "$path" && -s "$path" && -r "$path" ]] ||
+        fail "Active Home-bron ontbreekt of is onveilig: $path"
+    identity=$(stat -c '%u:%g:%h:%a' -- "$path") || fail "onleesbare bronmetadata: $path"
+    mode=${identity##*:}
+    [[ "$identity" =~ ^0:0:1:[0-7]{3,4}$ ]] && (( (8#$mode & 07022) == 0 )) ||
+        fail "onveilige Active Home-bronrechten: $path"
+}
+
+active_home_target() {
+    local path=$1 mode=$2
+    active_home_parent_chain "${path%/*}"
+    if [[ -e "$path" || -L "$path" ]]; then
+        [[ -f "$path" && ! -L "$path" && $(stat -c '%u:%g:%h:%a' -- "$path") == "0:0:1:$mode" ]] ||
+            fail "onveilig Active Home-doel: $path"
+        matchpathcon -V "$path" || fail "afwijkend SELinux-label: $path"
+    fi
+}
+
+preflight_active_home() {
+    local host binding relative target mode spec sudo_path sudo_identity
+    ACTIVE_HELPER="$ACTIVE_ROOT/usr/local/sbin/opg_active_home_inspect"
+    ACTIVE_SCANNER="$ACTIVE_ROOT/usr/local/libexec/oracle-patch-guard/opg_active_home.py"
+    ACTIVE_SUDOERS="$SUDOERS_DIR/oracle-patch-guard-active-home"
+    ACTIVE_POLICY="$CONFIG_DIR/active-home-inspect.json"
+    ACTIVE_RELEASE=$(realpath -e -- "$BASE") || fail "Active Home-release kan niet worden opgelost"
+    ACTIVE_USER=oracle
+    ACTIVE_PROC=/proc
+    if [[ -n "$ACTIVE_ROOT" ]]; then
+        ACTIVE_USER=nobody
+        ACTIVE_PROC="$ACTIVE_ROOT/proc"
+    fi
+
+    for tool in getenforce restorecon matchpathcon chcon runuser; do
+        command -v "$tool" >/dev/null 2>&1 || fail "Active Home-tool ontbreekt: $tool"
+    done
+    [[ $(getenforce) == Enforcing ]] || fail "privileged Active Home vereist SELinux Enforcing"
+    sudo_path="$ACTIVE_ROOT/usr/bin/sudo"
+    active_home_parent_chain "${sudo_path%/*}"
+    [[ -f "$sudo_path" && ! -L "$sudo_path" && -x "$sudo_path" ]] || fail "onveilige sudo-executable"
+    sudo_identity=$(stat -c '%u:%g:%a' -- "$sudo_path") || fail "sudo-metadata onleesbaar"
+    [[ "$sudo_identity" == 0:0:4111 || "$sudo_identity" == 0:0:4755 ]] || fail "onveilige sudo-owner/mode"
+    active_home_source "$OPG_ROOT/config/patchGD_guard.conf"
+    host=$( (hostname -f 2>/dev/null || hostname) | LC_ALL=C tr '[:upper:]' '[:lower:]') ||
+        fail "hostnaam onleesbaar"
+    [[ "$host" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ && "$host" != *..* ]] ||
+        fail "ongeldige hostnaam voor Active Home-binding"
+    binding="$OPG_ROOT/config/hosts/$host/active-home.conf"
+    active_home_source "$binding"
+    install -m 0600 -- "$binding" "$SOURCE_STAGE/active-binding" || fail "bindingstaging mislukt"
+    for relative in oem-tasks/opg_active_home_inspect.py project/lib/opg_active_home.py config/examples/oracle-patch-guard-active-home.sudoers; do
+        active_home_source "$ACTIVE_RELEASE/$relative"
+        install -m 0600 -- "$ACTIVE_RELEASE/$relative" "$SOURCE_STAGE/${relative##*/}" ||
+            fail "Active Home-bronstaging mislukt: $relative"
+    done
+    for spec in "$ACTIVE_HELPER|755|opg_active_home_inspect.py" "$ACTIVE_SCANNER|644|opg_active_home.py" \
+                "$ACTIVE_SUDOERS|440|oracle-patch-guard-active-home.sudoers"; do
+        IFS='|' read -r target mode relative <<<"$spec"
+        active_home_target "$target" "$mode"
+        [[ ! -e "$target" ]] || cmp -s "$target" "$SOURCE_STAGE/$relative" ||
+            fail "bestaand Active Home-bestand wijkt af: $target"
+    done
+    active_home_target "$ACTIVE_POLICY" 400
+    "$VISUDO_BIN" -cf "$SOURCE_STAGE/oracle-patch-guard-active-home.sudoers" ||
+        fail "Active Home-sudoersfragment ongeldig"
+    ACTIVE_HOME=$(/usr/bin/python3 -IBS - "$SOURCE_STAGE" "$ACTIVE_USER" "$ACTIVE_PROC" "$ACTIVE_POLICY" <<'PY'
+import ast, json, os, pwd, re, sys
+from pathlib import Path
+
+stage, user, proc, existing = sys.argv[1:]
+stage, proc, existing = Path(stage), Path(proc), Path(existing)
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def unique_fields(pairs):
+    fields = dict(pairs)
+    require(len(fields) == len(pairs), "dubbel policyveld")
+    return fields
+
+
+try:
+    for name in ("opg_active_home_inspect.py", "opg_active_home.py"):
+        ast.parse((stage / name).read_text(encoding="utf-8"))
+    with (stage / "active-binding").open("rb") as source:
+        data = source.read(4097)
+    require(len(data) <= 4096, "hostbinding te groot")
+    lines = [line for line in data.decode("ascii").splitlines()
+             if line.strip() and not line.lstrip().startswith("#")]
+    require(len(lines) == 1 and lines[0].startswith("ACTIVE_HOME_ORACLE_HOME="),
+            "hostbinding moet precies één ACTIVE_HOME_ORACLE_HOME bevatten")
+    home = lines[0].partition("=")[2]
+    account = pwd.getpwnam(user)
+    require(0 < account.pw_uid < 4294967295 and 0 < account.pw_gid < 4294967295,
+            "Oracle-account moet een niet-root UID/GID hebben")
+    require(re.fullmatch(r"/[A-Za-z0-9_./-]+", home)
+            and all(part not in ("", ".", "..") for part in home[1:].split("/"))
+            and os.path.realpath(home) == home and Path(home).is_dir()
+            and Path(home).stat().st_uid == account.pw_uid
+            and (Path(home) / "bin/oracle").is_file(), "ongeldige Oracle Home-binding")
+    namespaces = {}
+    initial = {"pid": "pid:[4026531836]", "user": "user:[4026531837]"}
+    for name in ("pid", "mnt", "user"):
+        identity = os.readlink(str(proc / "1/ns" / name))
+        require(re.fullmatch(name + r":\[[0-9]+\]", identity)
+                and initial.get(name, identity) == identity
+                and os.readlink(str(proc / "self/ns" / name)) == identity,
+                "ongeldige hostnamespace: " + name)
+        namespaces[name] = identity
+    proposal = dict(uid=account.pw_uid, gid=account.pw_gid, oracle_home=home, namespaces=namespaces)
+    if existing.exists():
+        with existing.open("rb") as source:
+            data = source.read(4097)
+        require(len(data) <= 4096, "bestaande Active Home-policy te groot")
+        old = json.loads(data.decode("ascii"), object_pairs_hook=unique_fields)
+        require(isinstance(old, dict) and old.keys() == proposal.keys()
+                and type(old["uid"]) is int and type(old["gid"]) is int
+                and all(old[key] == proposal[key] for key in ("uid", "gid", "oracle_home")),
+                "bestaande Active Home-policy heeft een andere binding")
+        require(isinstance(old["namespaces"], dict) and old["namespaces"].keys() == namespaces.keys()
+                and all(isinstance(value, str) and re.fullmatch(name + r":\[[0-9]+\]", value)
+                        for name, value in old["namespaces"].items()), "ongeldige bestaande namespacebinding")
+        if old == proposal:
+            print(home)
+            sys.exit(0)
+    (stage / "active-policy.json").write_text(json.dumps(proposal, indent=2) + "\n", encoding="ascii")
+    print(home)
+except (OSError, ValueError, SyntaxError, KeyError) as error:
+    sys.exit(str(error))
+PY
+    ) || fail "Active Home-hostbinding ongeldig"
+}
+
+install_active_home_file() {
+    local source=$1 destination=$2 mode=$3 context
+    active_home_target "$destination" "$mode"
+    if [[ -f "$destination" ]] && cmp -s "$source" "$destination"; then
+        log "UNCHANGED|$destination"
+        return 0
+    fi
+    # Set the context for the final path on the same-filesystem candidate.
+    ACTIVE_TEMP=$(mktemp "${destination%/*}/.opg-active-home.XXXXXX") || fail "Active Home-staging mislukt"
+    install -o root -g root -m "$mode" -- "$source" "$ACTIVE_TEMP" || fail "Active Home-installatie mislukt: $destination"
+    context=$(matchpathcon -n -m file "$destination") || fail "doelcontext ontbreekt: $destination"
+    [[ "$context" =~ ^[^[:space:]:]+:[^[:space:]:]+:[^[:space:]:]+:[^[:space:]]+$ ]] ||
+        fail "ongeldige doelcontext: $destination"
+    chcon -- "$context" "$ACTIVE_TEMP" || fail "SELinux-label instellen mislukt: $destination"
+    [[ $(stat -c '%C' -- "$ACTIVE_TEMP") == "$context" ]] || fail "onbevestigd SELinux-label: $destination"
+    mv -fT -- "$ACTIVE_TEMP" "$destination" || fail "Active Home-publicatie mislukt: $destination"
+    ACTIVE_TEMP=
+    active_home_target "$destination" "$mode"
+    log "INSTALLED|$destination"
+}
+
+install_privileged_active_home() {
+    local scanner_dir=${ACTIVE_SCANNER%/*} existing_sudoers="$ACTIVE_ROOT/etc/sudoers" verdict
+    [[ $(realpath -e -- "$BASE") == "$ACTIVE_RELEASE" ]] || fail "current wijzigde tijdens BOOTSTRAP"
+    if [[ ! -d "$scanner_dir" ]]; then
+        install -d -o root -g root -m 0755 -- "$scanner_dir" && restorecon -- "$scanner_dir" ||
+            fail "Active Home-scannerdirectory kon niet veilig worden aangelegd"
+    fi
+    "$VISUDO_BIN" -c || fail "bestaande volledige sudoers-policy ongeldig"
+    if [[ ! -e "$ACTIVE_SUDOERS" ]]; then
+        # Checking the combined candidate also catches duplicate aliases.
+        printf '@include "%s"\n@include "%s"\n' "$existing_sudoers" \
+            "$SOURCE_STAGE/oracle-patch-guard-active-home.sudoers" >"$SOURCE_STAGE/combined-sudoers"
+        "$VISUDO_BIN" -cf "$SOURCE_STAGE/combined-sudoers" || fail "volledige sudoers-candidate ongeldig"
+    fi
+    install_active_home_file "$SOURCE_STAGE/opg_active_home_inspect.py" "$ACTIVE_HELPER" 755
+    install_active_home_file "$SOURCE_STAGE/opg_active_home.py" "$ACTIVE_SCANNER" 644
+    if [[ -f "$SOURCE_STAGE/active-policy.json" ]]; then
+        if [[ -e "$ACTIVE_POLICY" ]]; then
+            local backup
+            backup=$(mktemp "$CONFIG_DIR/.opg-active-home.previous.XXXXXX") || fail "policybackup mislukt"
+            cp -a -- "$ACTIVE_POLICY" "$backup" || fail "policybackup mislukt"
+            ACTIVE_POLICY_BACKUP=$backup
+        fi
+        install_active_home_file "$SOURCE_STAGE/active-policy.json" "$ACTIVE_POLICY" 400
+    fi
+    if [[ ! -e "$ACTIVE_SUDOERS" ]]; then ACTIVE_NEW_SUDOERS=true; fi
+    install_active_home_file "$SOURCE_STAGE/oracle-patch-guard-active-home.sudoers" "$ACTIVE_SUDOERS" 440
+    verdict=$(LC_ALL=C "$VISUDO_BIN" -c) || fail "geïnstalleerde sudoers-policy ongeldig"
+    grep -Fxq "$ACTIVE_SUDOERS: parsed OK" <<<"$verdict" || fail "Active Home-fragment ontbreekt in effectieve sudoers-policy"
+    verdict=$(timeout --kill-after=5 60 runuser -u "$ACTIVE_USER" -- \
+        "$ACTIVE_ROOT/usr/bin/sudo" -n -u root -- "$ACTIVE_HELPER" visibility </dev/null) ||
+        fail "Active Home-proceszicht kon niet als Oracle-gebruiker worden bevestigd"
+    [[ $(grep '^OPG_ACTIVE_HOME_INSPECTION|' <<<"$verdict") == \
+        "OPG_ACTIVE_HOME_INSPECTION|version=1|mode=visibility|home=$ACTIVE_HOME|exit_code=0" ]] &&
+        grep -Fxq PROC_COVERAGE_CONFIRMED <<<"$verdict" &&
+        ! grep -Eq '^(ACTIVE_HOME_FILE|PROC_COVERAGE_UNKNOWN|OPG_ACTIVE_HOME_INSPECTION_UNKNOWN)\|' <<<"$verdict" ||
+        fail "onbevestigde protocol- of hostbinding van Active Home-helper"
+    [[ $(getenforce) == Enforcing ]] || fail "SELinux Enforcing kon niet worden herbevestigd"
+    log "ACTIVE_HOME_READY|home=$ACTIVE_HOME|mode=privileged|protocol=1"
+}
 
 validate_config_candidate() {
     local candidate=$1 raw key value required_key semantic_value
@@ -234,6 +466,12 @@ config_source_mode=$(stat -c '%a' "$SRC_CONFIG") \
 (( (8#$config_source_mode & 0022) == 0 )) \
     || fail "centrale config is group/world-writable: $SRC_CONFIG"
 validate_config_candidate "$SRC_CONFIG"
+ACTIVE_MODE=${CONFIG_VALUES[ACTIVE_HOME_INSPECTION_MODE]-local}
+case "$ACTIVE_MODE" in
+    local) ;;
+    privileged) preflight_active_home ;;
+    *) fail "ongeldige ACTIVE_HOME_INSPECTION_MODE" ;;
+esac
 LOG_ROOT=${CONFIG_VALUES[RUN_ROOT]}
 LOCK_ROOT=${CONFIG_VALUES[LOCK_ROOT]}
 for runtime in "$BASE/oem-tasks/opg_oem.sh" "$BASE/project/patchGD_guard.sh"; do
@@ -612,7 +850,9 @@ log "LOCK_ROOT_OK|$LOCK_ROOT"
 # Activate local configuration only after prerequisites have been established.
 install_runtime_config "$SRC_KEY" "$KEY_DST"
 install_runtime_config "$SRC_PROCEDURE" "$PROCEDURE_DST"
+if [[ "$ACTIVE_MODE" == privileged ]]; then install_privileged_active_home; fi
 install_runtime_config
+ACTIVE_COMMITTED=true
 
 # ---------------------------------------------------------------------------
 # Final verification

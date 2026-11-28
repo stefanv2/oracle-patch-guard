@@ -115,6 +115,123 @@ runcontext maken/hergebruiken/valideren volgens de bestaande lifecycle-regels.
 AIDE blijft een toekomstige operationele follow-up na installatie of Oracle
 Home-mutatie volgens sitebeleid; deze wijziging automatiseert geen baseline-update.
 
+### Privileged Active Home via BOOTSTRAP
+
+De opt-in is `ACTIVE_HOME_INSPECTION_MODE=privileged` in de bestaande centrale
+runtimeconfig van een deploymentroot. Gebruik de centrale productieroot
+voorlopig met `local`. Test met een aparte acceptatieroot op dezelfde NFS-inrichting.
+Alle hosts die dezelfde runtimeconfig gebruiken delen de modus. PREPARE vergelijkt
+die config byte voor byte met de geïnstalleerde kopie.
+
+Voor iedere privileged host levert de beheerder precies één canoniek homepad in
+`config/hosts/<fqdn-in-kleine-letters>/active-home.conf`. Gebruik het
+[voorbeeld](config/examples/active-home.conf). De hostbinding en privileged
+releasebronnen moeten regulier, root-owned en beschermd tegen schrijven door
+groep of others zijn. BOOTSTRAP valideert de eigenaar van de Oracle Home,
+de primaire GID en de hostnamespaces bij PID 1. Een host zonder privileged
+opt-in gebruikt de bestaande local-mode-procedure.
+
+| Lokaal doel | Owner en mode |
+| --- | --- |
+| `/usr/local/sbin/opg_active_home_inspect` | `root:root 0755` |
+| `/usr/local/libexec/oracle-patch-guard/opg_active_home.py` | `root:root 0644` |
+| `/etc/oracle-patch-guard/active-home-inspect.json` | `root:root 0400` |
+| `/etc/sudoers.d/oracle-patch-guard-active-home` | `root:root 0440` |
+
+Onder Enforcing gebruikt BOOTSTRAP de SELinux-context die het hostbeleid
+voor het doelpad voorschrijft. Bestaande bestanden moeten al dat label hebben.
+De helper, scanner en sudoers van een handmatige installatie worden overgenomen
+als bytes en metadata overeenkomen. BOOTSTRAP vernieuwt zo nodig de JSON met
+actuele namespaces voor dezelfde UID, GID en home. Het valideert de sudoerskandidaat
+tegen de volledige policy en de actieve policy na publicatie. Pas een geslaagde
+`visibility` als Oracle-gebruiker met protocolversie 1 en bevestigde homebinding
+maakt publicatie van de runtimeconfig mogelijk. Herhaal BOOTSTRAP na een reboot
+als de mountnamespace is gewijzigd.
+
+#### Acceptatie op SV2620535
+
+Bereid een aparte NFS-acceptatieroot voor met een immutable build van de
+kandidaat onder die root zijn `current` en de gebruikelijke config, sleutel en
+herstelprocedure. Zet `ACTIVE_HOME_INSPECTION_MODE=privileged` uitsluitend in
+de config van die acceptatieroot. Maak het hostfragment op de NFS-beheerzijde
+als `root:root` met mode `0644` en het vastgestelde Oracle Home-pad. Gebruik een
+onderhoudsperiode buiten patchruns en sudoers-onderhoud. Laat database en
+listener online. Voer als hostbeheerder de volgende commando's uit nadat je
+`ACCEPT_ROOT` en `ORACLE_HOME` voor deze acceptatie hebt ingesteld.
+
+```bash
+set -euo pipefail
+: "${ACCEPT_ROOT:?aparte absolute NFS-acceptatieroot vereist}"
+: "${ORACLE_HOME:?canonieke Oracle Home vereist}"
+CENTRAL=/mnt/datadomain/software/patches/Linux/oracle-patch-guard
+test "$(hostname -s | tr '[:lower:]' '[:upper:]')" = SV2620535
+test "$(getenforce)" = Enforcing
+test "$(realpath -e -- "$ORACLE_HOME")" = "$ORACLE_HOME"
+central_current=$(realpath -e -- "$CENTRAL/current")
+test "$(realpath -e -- "$ACCEPT_ROOT/current")" != "$central_current"
+grep -Fx 'ACTIVE_HOME_INSPECTION_MODE=privileged' "$ACCEPT_ROOT/config/patchGD_guard.conf"
+host_key=$( (hostname -f 2>/dev/null || hostname) | tr '[:upper:]' '[:lower:]')
+grep -Fx "ACTIVE_HOME_ORACLE_HOME=$ORACLE_HOME" "$ACCEPT_ROOT/config/hosts/$host_key/active-home.conf"
+
+RECOVERY=$(mktemp -d /var/tmp/opg-bootstrap-accept.XXXXXX)
+printf 'Herstelkopie %s\n' "$RECOVERY"
+for path in /etc/oracle-patch-guard/{patchGD_guard.conf,active-home-inspect.json,approval_public.pem,oracle_home_rebuild.md} \
+  /etc/sudoers.d/oracle-patch-guard-{context,active-home} \
+  /usr/local/sbin/{opg_active_home_inspect,opg_context_root.sh,opg_media_stage_root.sh} \
+  /usr/local/libexec/{oracle-patch-guard/opg_active_home.py,opg_media_stage_root.py}; do
+    test ! -L "$path"
+    printf '%s\n' "$path" >>"$RECOVERY/targets"
+    if test -e "$path"; then
+        test -f "$path"
+        cp -a --parents -- "$path" "$RECOVERY"
+    fi
+done
+
+for attempt in 1 2; do
+    OPG_BOOTSTRAP_BASE="$ACCEPT_ROOT/current" \
+        /bin/bash "$ACCEPT_ROOT/current/oem-tasks/opg_bootstrap_host.sh" | tee "$RECOVERY/bootstrap-$attempt.log"
+    grep -Fx 'OPG_BOOTSTRAP_RESULT|status=READY|exit_code=0' "$RECOVERY/bootstrap-$attempt.log"
+done
+/usr/sbin/visudo -c
+runuser -u oracle -- /bin/bash "$ACCEPT_ROOT/current/oem-tasks/opg_prepare_host.sh"
+runuser -u oracle -- /usr/bin/sudo -n -u root -- /usr/local/sbin/opg_active_home_inspect visibility
+scan_rc=0
+runuser -u oracle -- /usr/bin/sudo -n -u root -- /usr/local/sbin/opg_active_home_inspect scan || scan_rc=$?
+test "$scan_rc" = 0 || test "$scan_rc" = 20
+test "$(getenforce)" = Enforcing
+test "$(realpath -e -- "$CENTRAL/current")" = "$central_current"
+```
+
+Verifieer dezelfde inspectie onder de echte OEM-context. Een scan met bewezen
+gebruik kan daar `20` geven terwijl de database online is. In de tweede
+BOOTSTRAP moeten identieke bestanden als `UNCHANGED` verschijnen.
+
+#### Herstel na acceptatie of installatiefout
+
+De bestaande runtimeconfig blijft actief totdat de helper is gevalideerd.
+Bij een afgevangen installatiefout trekt BOOTSTRAP een nieuw toegevoegde sudoers
+in en zet het een tijdens die poging vervangen JSON-policy terug. Herstel na een
+onderbreking of om de acceptatie op te ruimen vanuit de genoteerde root-owned
+herstelkopie. Gebruik een nog open root-sessie buiten patchruns.
+
+```bash
+: "${RECOVERY:?pad naar de genoteerde herstelkopie vereist}"
+while IFS= read -r path; do
+    if test -f "$RECOVERY$path"; then
+        candidate=$(mktemp "${path%/*}/.opg-restore.XXXXXX")
+        cp -a -- "$RECOVERY$path" "$candidate"
+        mv -fT -- "$candidate" "$path"
+    else
+        rm -f -- "$path"
+    fi
+done <"$RECOVERY/targets"
+/usr/sbin/visudo -c
+test "$(getenforce)" = Enforcing
+```
+
+Controleer de teruggezette runtimeconfig en de eventuele bestaande privileged
+inspectie. Corrigeer de oorzaak en herhaal daarna BOOTSTRAP indien gewenst.
+
 ## PRECHECK met historische COMPLETE-context
 
 PRECHECK behoudt een bestaande, aantoonbaar COMPLETE-context als historie.
